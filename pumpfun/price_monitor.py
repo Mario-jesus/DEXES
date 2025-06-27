@@ -184,8 +184,16 @@ class PumpFunPriceMonitor:
             message_data: Datos del mensaje recibido
         """
         try:
-            # Detectar tipo de mensaje
-            if 'tokenTrade' in message_data:
+            # Detectar tipo de mensaje - FORMATO NUEVO (directo)
+            if 'mint' in message_data and 'txType' in message_data:
+                # Trade directo (formato actual de PumpPortal)
+                if message_data.get('txType') == 'create':
+                    self._process_token_creation(message_data)
+                else:
+                    # Buy/Sell trade
+                    self._process_direct_token_trade(message_data)
+            # Detectar tipo de mensaje - FORMATO ANTIGUO (anidado)
+            elif 'tokenTrade' in message_data:
                 self._process_token_trade(message_data)
             elif 'newToken' in message_data:
                 self._process_new_token(message_data)
@@ -193,11 +201,10 @@ class PumpFunPriceMonitor:
                 self._process_account_trade(message_data)
             elif 'migration' in message_data:
                 self._process_migration(message_data)
-            elif 'txType' in message_data and message_data.get('txType') == 'create':
-                # Evento de creación de token (nuevo formato)
-                self._process_token_creation(message_data)
             else:
-                print(f"📨 Mensaje desconocido: {message_data}")
+                # Silenciar mensajes de confirmación
+                if 'message' not in message_data or 'subscribed' not in message_data.get('message', '').lower():
+                    print(f"📨 Mensaje desconocido: {message_data}")
                 
         except Exception as e:
             print(f"❌ Error procesando mensaje: {e}")
@@ -239,8 +246,71 @@ class PumpFunPriceMonitor:
         except Exception as e:
             print(f"❌ Error procesando creación de token: {e}")
     
+    def _process_direct_token_trade(self, data: Dict[str, Any]):
+        """Procesa trades de tokens en formato directo (nuevo formato PumpPortal)"""
+        try:
+            token_address = data.get('mint', '')
+            
+            # Extraer datos del trade
+            tx_type = data.get('txType', 'unknown')
+            market_cap = data.get('marketCapSol', 0)
+            token_amount = data.get('tokenAmount', 0)
+            sol_amount = data.get('solAmount', 0)
+            trader = data.get('traderPublicKey', '')
+            signature = data.get('signature', '')
+            new_balance = data.get('newTokenBalance', 0)
+            v_tokens = data.get('vTokensInBondingCurve', 0)
+            v_sol = data.get('vSolInBondingCurve', 0)
+            
+            # Calcular precio por token usando los datos del trade
+            price_per_token = 0
+            if token_amount > 0 and sol_amount > 0:
+                price_per_token = sol_amount / token_amount
+            
+            # Usar el market cap para estimar precio si no hay datos directos
+            elif market_cap > 0:
+                # Estimación basada en market cap (asumiendo supply estándar de pump.fun)
+                estimated_supply = 1_000_000_000  # Supply típico de pump.fun
+                price_per_token = market_cap / estimated_supply
+            
+            timestamp = datetime.now()
+            
+            # Almacenar precio actual con más datos
+            self.token_prices[token_address] = {
+                'price': price_per_token,
+                'market_cap': market_cap,
+                'volume': sol_amount,
+                'tx_type': tx_type,
+                'token_amount': token_amount,
+                'sol_amount': sol_amount,
+                'trader': trader,
+                'signature': signature,
+                'new_balance': new_balance,
+                'v_tokens_in_curve': v_tokens,
+                'v_sol_in_curve': v_sol,
+                'timestamp': timestamp,
+                'data': data
+            }
+            
+            # Agregar a historial
+            self.price_history[token_address].append({
+                'price': price_per_token,
+                'market_cap': market_cap,
+                'volume': sol_amount,
+                'tx_type': tx_type,
+                'trader': trader,
+                'timestamp': timestamp
+            })
+            
+            # Llamar callback si existe
+            if self.on_token_trade_callback:
+                self.on_token_trade_callback(data)
+                
+        except Exception as e:
+            print(f"❌ Error procesando trade directo: {e}")
+
     def _process_token_trade(self, data: Dict[str, Any]):
-        """Procesa trades de tokens"""
+        """Procesa trades de tokens (formato anidado antiguo)"""
         try:
             trade_data = data.get('tokenTrade', {})
             token_address = trade_data.get('mint', '')
@@ -284,15 +354,6 @@ class PumpFunPriceMonitor:
                 'tx_type': tx_type,
                 'timestamp': timestamp
             })
-            
-            # Mostrar información más detallada
-            action_emoji = "🟢" if tx_type == "buy" else "🔴"
-            print(f"{action_emoji} Trade - {token_address[:8]}... | {tx_type.upper()}")
-            print(f"   💰 Market Cap: {market_cap:.2f} SOL")
-            if price_per_token > 0:
-                print(f"   📊 Precio: {price_per_token:.10f} SOL/token")
-            if sol_amount > 0:
-                print(f"   💎 Volumen: {sol_amount:.6f} SOL")
             
             # Llamar callback si existe
             if self.on_token_trade_callback:
@@ -419,6 +480,21 @@ class PumpFunPriceMonitor:
             except Exception as e:
                 print(f"❌ Error en WebSocket main: {e}")
                 await asyncio.sleep(5)
+
+    async def _websocket_main_single_token(self, token_address: str):
+        """Función principal del WebSocket para monitoreo de un solo token"""
+        while self.is_running:
+            try:
+                if await self.connect():
+                    # SOLO suscribirse al token específico, NO a eventos globales
+                    await self.subscribe_token_trades([token_address])
+                    await self.listen()
+                else:
+                    print("❌ No se pudo conectar, reintentando en 5 segundos...")
+                    await asyncio.sleep(5)
+            except Exception as e:
+                print(f"❌ Error en WebSocket main: {e}")
+                await asyncio.sleep(5)
     
     # Callbacks
     def set_new_token_callback(self, callback: Callable):
@@ -460,16 +536,16 @@ class PumpFunPriceMonitor:
         return {
             "is_connected": self.is_connected,
             "is_running": self.is_running,
-            "subscribed_tokens": len(self.subscribed_tokens),
-            "subscribed_accounts": len(self.subscribed_accounts),
+            "subscribed_tokens": list(self.subscribed_tokens),
+            "subscribed_accounts": list(self.subscribed_accounts),
             "tracked_tokens": len(self.token_prices),
             "websocket_url": self.websocket_url
         }
-    
-    def monitor_token_price(self, token_address: str, duration_minutes: int = 5, 
-                          show_trades: bool = True, price_alerts: Dict = None) -> Dict[str, Any]:
+
+    def monitor_single_token_only(self, token_address: str, duration_minutes: int = 5, 
+                                 show_trades: bool = True, price_alerts: Dict = None) -> Dict[str, Any]:
         """
-        Monitorea el precio de un token específico en tiempo real
+        Monitorea ÚNICAMENTE un token específico sin mostrar otros eventos
         
         Args:
             token_address: Dirección del token a monitorear
@@ -483,7 +559,7 @@ class PumpFunPriceMonitor:
         import time
         from datetime import datetime
         
-        print(f"🎯 MONITOR DE PRECIOS EN TIEMPO REAL")
+        print(f"🎯 MONITOR DE TOKEN ESPECÍFICO")
         print("=" * 70)
         print(f"🔗 Token: {token_address}")
         print(f"⏰ Duración: {duration_minutes} minutos")
@@ -516,7 +592,7 @@ class PumpFunPriceMonitor:
         def price_callback(trade_data):
             mint = trade_data.get('mint', '')
             if mint != token_address:
-                return
+                return  # Ignorar trades de otros tokens
                 
             # Extraer datos del trade
             tx_type = trade_data.get('txType', 'unknown')
@@ -580,26 +656,35 @@ class PumpFunPriceMonitor:
                 print(f"   👤 Trader: {trader}...")
                 print("-" * 50)
         
-        # Establecer callback
-        original_callback = self.on_token_trade_callback
-        self.set_token_trade_callback(price_callback)
+        # Crear un monitor específico para este token
+        specific_monitor = PumpFunPriceMonitor()
+        specific_monitor.set_token_trade_callback(price_callback)
+        
+        # Función para WebSocket específico
+        def run_specific_websocket():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                loop.run_until_complete(specific_monitor._websocket_main_single_token(token_address))
+            except Exception as e:
+                print(f"❌ Error en WebSocket específico: {e}")
+            finally:
+                loop.close()
         
         try:
-            # Iniciar monitoreo si no está corriendo
-            was_running = self.is_running
-            if not was_running:
-                self.start_monitoring()
-                time.sleep(2)  # Esperar conexión
-            
-            # Suscribirse al token específico (esto requiere que el monitor esté corriendo)
-            # En implementación real, esto se haría de forma async
-            print(f"📡 Monitoreando trades del token: {token_address[:8]}...")
-            print("👂 Escuchando precios en tiempo real...")
+            print(f"📡 Monitoreando SOLO el token: {token_address[:8]}...")
+            print("👂 Escuchando trades en tiempo real...")
             print("-" * 70)
             
-            # Simular suscripción (en implementación real sería async)
-            if self.is_connected:
-                self.subscribed_tokens.add(token_address)
+            # Iniciar monitor específico
+            specific_monitor.is_running = True
+            specific_thread = threading.Thread(target=run_specific_websocket)
+            specific_thread.daemon = True
+            specific_thread.start()
+            
+            # Esperar conexión
+            time.sleep(3)
             
             # Monitorear por el tiempo especificado
             start_time = time.time()
@@ -629,17 +714,36 @@ class PumpFunPriceMonitor:
             print("\n⏰ Tiempo de monitoreo completado")
             
         finally:
-            # Restaurar callback original
-            self.set_token_trade_callback(original_callback)
-            
-            # Si iniciamos el monitor, detenerlo
-            if not was_running and self.is_running:
-                self.stop_monitoring()
+            # Detener monitor específico
+            specific_monitor.is_running = False
+            specific_monitor.is_connected = False
         
         # Generar resumen final
         self._print_monitoring_summary(stats)
         
         return stats
+    
+    def monitor_token_price(self, token_address: str, duration_minutes: int = 5, 
+                          show_trades: bool = True, price_alerts: Dict = None) -> Dict[str, Any]:
+        """
+        Monitorea el precio de un token específico en tiempo real
+        NOTA: Este método puede mostrar eventos globales. Usa monitor_single_token_only() para monitoreo específico.
+        
+        Args:
+            token_address: Dirección del token a monitorear
+            duration_minutes: Duración del monitoreo en minutos
+            show_trades: Si mostrar cada trade individual
+            price_alerts: Dict con alertas {'above': precio, 'below': precio}
+            
+        Returns:
+            Diccionario con estadísticas del monitoreo
+        """
+        print("⚠️  NOTA: Este método puede mostrar eventos globales.")
+        print("💡 Para monitorear SOLO tu token, usa monitor_single_token_only()")
+        print("-" * 70)
+        
+        # Redirigir al método específico
+        return self.monitor_single_token_only(token_address, duration_minutes, show_trades, price_alerts)
     
     def _print_monitoring_summary(self, stats: Dict[str, Any]):
         """Imprime resumen final del monitoreo"""
