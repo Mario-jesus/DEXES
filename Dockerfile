@@ -5,6 +5,7 @@ WORKDIR /app/
 RUN pip install pipenv
 COPY Pipfile .
 RUN pipenv install --clear
+RUN pip install jupyter notebook
 COPY . .
 RUN mkdir -p /root/.jupyter
 RUN echo "c.NotebookApp.token = ''" > /root/.jupyter/jupyter_notebook_config.py
