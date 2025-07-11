@@ -195,3 +195,7 @@ cython_debug/
 
 # Wallets
 /wallets/*.json
+
+# Copy Trading Mini
+copy_trading_mini/logs/
+copy_trading_mini/data/

@@ -8,6 +8,17 @@ ipykernel = "*"
 solana = "*"
 base58 = "*"
 requests = "*"
+aiohttp = "*"
+numpy = "*"
+dotenv = "*"
+python-dotenv = "*"
+icecream = "*"
+websocket-client = "*"
+pandas = "*"
+aiofiles = "*"
+python-telegram-bot = "*"
+notebook = "*"
+jupyter = "*"
 
 [dev-packages]
 

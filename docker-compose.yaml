@@ -1,0 +1,14 @@
+services:
+  dexes:
+    image: dexes:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dexes-app
+    volumes:
+      - ./:/app
+    ports:
+      - "7777:8888"
+    env_file:
+      - .env
+    restart: unless-stopped
