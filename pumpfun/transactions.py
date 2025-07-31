@@ -135,7 +135,7 @@ class PumpFunTransactions:
             "publicKey": str(keypair.pubkey()),
             "action": action,
             "mint": mint,
-            "amount": str(amount),
+            "amount": str(amount) if isinstance(amount, float) else amount,
             "denominatedInSol": "true" if denominated_in_sol else "false",
             "slippage": slippage,
             "priorityFee": priority_fee,

@@ -5,10 +5,9 @@ WORKDIR /app/
 RUN pip install pipenv
 COPY Pipfile .
 RUN pipenv install --clear
-RUN pip install jupyter notebook
 COPY . .
 RUN mkdir -p /root/.jupyter
 RUN echo "c.NotebookApp.token = ''" > /root/.jupyter/jupyter_notebook_config.py
 RUN echo "c.NotebookApp.password = ''" >> /root/.jupyter/jupyter_notebook_config.py
 EXPOSE 8888
-CMD ["python", "-m", "jupyter", "notebook", "--ip=0.0.0.0", "--no-browser", "--allow-root"]
+CMD ["pipenv", "run", "python", "-m", "jupyter", "notebook", "--ip=0.0.0.0", "--no-browser", "--allow-root"]
