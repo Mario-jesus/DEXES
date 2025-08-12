@@ -40,8 +40,7 @@ class PumpFunTransactions:
         Método de entrada para el context manager asíncrono.
         Conecta el cliente API automáticamente.
         """
-        print("🔌 Iniciando sesión de transacciones PumpFun...")
-        await self.client.connect()
+        await self.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -49,6 +48,13 @@ class PumpFunTransactions:
         Método de salida para el context manager asíncrono.
         Desconecta el cliente API automáticamente.
         """
+        await self.stop()
+
+    async def start(self):
+        print("🔌 Iniciando sesión de transacciones PumpFun...")
+        await self.client.connect()
+
+    async def stop(self):
         print("🔌 Cerrando sesión de transacciones PumpFun...")
         await self.client.disconnect()
         print("✅ Sesión de transacciones cerrada correctamente")
@@ -57,10 +63,10 @@ class PumpFunTransactions:
         self,
         action: TradeAction,
         mint: str,
-        amount: Union[float, str],
+        amount: str,
         denominated_in_sol: bool,
-        slippage: float,
-        priority_fee: float,
+        slippage: str,
+        priority_fee: str,
         pool: PoolType = "auto",
         skip_preflight: bool = True,
         jito_only: bool = False
@@ -88,7 +94,7 @@ class PumpFunTransactions:
         payload = {
             "action": action,
             "mint": mint,
-            "amount": str(amount),
+            "amount": amount,
             "denominatedInSol": "true" if denominated_in_sol else "false",
             "slippage": slippage,
             "priorityFee": priority_fee,
@@ -100,17 +106,17 @@ class PumpFunTransactions:
         print(f"🚀 Ejecutando trade Lightning: {action} {amount} de {mint}")
         response = await self.client.http_post(endpoint="trade", data=payload, use_api_key=True)
         print(f"✅ Respuesta Lightning: {response}")
-        return response
+        return response or {}
 
     async def create_and_send_local_trade(
         self,
         keypair: Keypair,
         action: TradeAction,
         mint: str,
-        amount: Union[float, str],
+        amount: str,
         denominated_in_sol: bool,
-        slippage: float,
-        priority_fee: float,
+        slippage: str,
+        priority_fee: str,
         pool: PoolType = "auto",
         rpc_endpoint: str = "https://api.mainnet-beta.solana.com/"
     ) -> str:
@@ -135,7 +141,7 @@ class PumpFunTransactions:
             "publicKey": str(keypair.pubkey()),
             "action": action,
             "mint": mint,
-            "amount": str(amount) if isinstance(amount, float) else amount,
+            "amount": amount,
             "denominatedInSol": "true" if denominated_in_sol else "false",
             "slippage": slippage,
             "priorityFee": priority_fee,

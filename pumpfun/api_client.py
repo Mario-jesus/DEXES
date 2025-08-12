@@ -72,7 +72,7 @@ class PumpFunApiClient(metaclass=SingletonMeta):
     def __init__(self, 
                     websocket_url: str = "wss://pumpportal.fun/api/data",
                     http_base_url: str = "https://pumpportal.fun/api",
-                    api_key: str = None,
+                    api_key: Optional[str] = None,
                     enable_websocket: bool = True,
                     enable_http: bool = True,
                     max_connections: int = 10,

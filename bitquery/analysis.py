@@ -72,7 +72,11 @@ def filter_and_calculate_pnl_corrected(traders_data: List[Dict], min_trades: int
             # Filtrar por porcentaje mínimo de ganancia
             if realized_pnl >= min_profit_percentage:
                 # Calcular métricas adicionales
-                trader['avgTradeSize'] = format(Decimal(total_volume_usd / Decimal(trader.get('trades', 1))).quantize(Decimal('1.00'), rounding=ROUND_DOWN).normalize(), "f")
+                trades_count = trader.get('trades', 1)
+                if trades_count > 0:
+                    trader['avgTradeSize'] = format(Decimal(total_volume_usd / Decimal(trades_count)).quantize(Decimal('1.00'), rounding=ROUND_DOWN).normalize(), "f")
+                else:
+                    trader['avgTradeSize'] = "0"
                 
                 # Eficiencia de trading (porcentaje de volumen vendido)
                 if total_volume_usd > 0:

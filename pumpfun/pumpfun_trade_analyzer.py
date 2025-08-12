@@ -308,7 +308,7 @@ class PumpFunTradeAnalyzer:
         self.rpc_url = rpc_url
         self.solana_client = SolanaAsyncClient(self.rpc_url)
         self.logger = logger or logging.getLogger(__name__)
-        self.logger.info("🔍 Pump.fun Trade Analyzer inicializado")
+        self.logger.debug("🔍 Pump.fun Trade Analyzer inicializado")
         self.logger.info(f"🌐 Configurado para conectar a {self.rpc_url}")
 
     async def __aenter__(self):

@@ -196,7 +196,7 @@ class WalletData:
             # Actualizar con fecha actual si es inválida
             self.created_at = datetime.now().isoformat()
             print(f"✅ Fecha actualizada a: {self.created_at}")
-        
+
         print(f"✅ Wallet validada correctamente: {self.wallet_public_key[:8]}...")
 
     def to_dict(self) -> Dict[str, Any]:
@@ -687,13 +687,13 @@ class PumpFunWalletStorage:
                     f"Archivo de wallet no encontrado: {wallet_file}",
                     file_path=wallet_file
                 )
-            
+
             # Leer archivo
             async with aiofiles.open(wallet_file, 'r') as f:
                 data = json.loads(await f.read())
-            
+
             # Intentar diferentes formatos
-            
+
             # Formato 1: Campos estándar (api_key, public_key, private_key)
             if all(key in data for key in ['api_key', 'public_key', 'private_key']):
                 return WalletData(
@@ -704,7 +704,7 @@ class PumpFunWalletStorage:
                     platform=data.get('platform', 'pump.fun'),
                     description=data.get('description', '')
                 )
-            
+
             # Formato 2: Campos con wallet_public_key
             if all(key in data for key in ['api_key', 'wallet_public_key', 'private_key']):
                 return WalletData(
@@ -715,7 +715,7 @@ class PumpFunWalletStorage:
                     platform=data.get('platform', 'pump.fun'),
                     description=data.get('description', '')
                 )
-            
+
             # Formato 3: Formato de API de pump.fun
             if all(key in data for key in ['apiKey', 'walletPublicKey', 'privateKey']):
                 return WalletData(
@@ -726,13 +726,13 @@ class PumpFunWalletStorage:
                     platform=data.get('platform', 'pump.fun'),
                     description=data.get('description', '')
                 )
-            
+
             # Si no coincide con ningún formato conocido
             raise WalletImportException(
                 "Formato de wallet no reconocido. Se requiere: api_key, (public_key o wallet_public_key), private_key",
                 file_path=wallet_file
             )
-            
+
         except json.JSONDecodeError as e:
             raise WalletImportException(
                 f"Error decodificando JSON: {e}",

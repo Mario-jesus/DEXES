@@ -10,7 +10,7 @@ import asyncio
 
 class SolanaAccountInfo:
     """Consulta de información de cuentas Solana - Balances, tokens, historial (Asíncrono)"""
-    
+
     def __init__(self, network: str = 'mainnet-beta', rpc_url: str = 'https://api.mainnet-beta.solana.com'):
         self.network = network
         self.rpc_url = rpc_url
@@ -199,7 +199,7 @@ class SolanaAccountInfo:
             token_accounts: List[Dict[str, Any]] = []
 
             if response.value:
-                print(f"🪙 Encontradas {len(response.value)} cuentas de tokens:")
+                print(f"🪙 Encontradas {len(response.value)} cuentas de tokens")
 
                 balance_tasks = []
                 for account in response.value:
@@ -232,9 +232,9 @@ class SolanaAccountInfo:
                             'raw_amount': result.value.amount
                         })
                     
-                    print(f"   {i+1}. Mint: {token_accounts[i]['mint']}")
-                    print(f"      Balance: {token_accounts[i]['balance']} tokens ({token_accounts[i]['decimals']} decimales)")
-                    print(f"      Cuenta: {token_accounts[i]['account_address']}")
+                    #print(f"   {i+1}. Mint: {token_accounts[i]['mint']}")
+                    #print(f"      Balance: {token_accounts[i]['balance']} tokens ({token_accounts[i]['decimals']} decimales)")
+                    #print(f"      Cuenta: {token_accounts[i]['account_address']}")
 
             return token_accounts
 
