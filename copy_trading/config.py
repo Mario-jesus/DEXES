@@ -1,0 +1,545 @@
+# -*- coding: utf-8 -*-
+"""
+Configuración del sistema Copy Trading
+"""
+import json, random
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Literal
+from enum import Enum
+from pathlib import Path
+from decimal import Decimal, getcontext, ROUND_DOWN
+from haikunator import Haikunator
+
+from logging_system import AppLogger
+
+# Configurar precisión de Decimal para operaciones financieras
+getcontext().prec = 26
+
+_logger = AppLogger(__name__)
+
+
+class AmountMode(Enum):
+    """Modos de cálculo de montos para copy trading"""
+    EXACT = "exact"          # Replicar monto exacto
+    PERCENTAGE = "percentage" # Porcentaje del monto original
+    FIXED = "fixed"          # Monto fijo por operación
+    DISTRIBUTED = "distributed"    # Balance entre traders (Para esto ocupamos max_amount_to_invest, max_open_tokens, max_open_positions_per_token, use_balanced_allocation en True)
+
+
+class TransactionType(Enum):
+    """Tipos de transacciones soportadas"""
+    LIGHTNING_TRADE = "lightning_trade"  # Transacciones ejecutadas por el servidor
+    LOCAL_TRADE = "local_trade"          # Transacciones firmadas localmente
+
+
+class NicknameGenerator(Enum):
+    """Generadores de nombres para traders"""
+    CUSTOM = "custom"
+    HEROKU = "heroku"
+    PETNAME = "petname"
+    FAKER = "faker"
+
+
+@dataclass
+class TraderInfo:
+    wallet_address: str
+    nickname_generator: NicknameGenerator = NicknameGenerator.HEROKU
+    nickname: str = ""
+
+    def __post_init__(self):
+        self.nickname = self.generate_nickname(self)
+        _logger.debug(f"TraderInfo inicializado para wallet: {self.wallet_address}, nickname: {self.nickname}")
+
+    @classmethod
+    def generate_nickname(cls, trader_info: 'TraderInfo', token_length=4) -> str:
+        """
+        Genera un nickname para el trader usando el generador especificado en trader_info.
+        El parámetro token_length se usa para Haikunator y puede ser usado en otros generadores si aplica.
+        """
+        generate_token = lambda: str(random.randint(0, 10**token_length - 1)).zfill(token_length)
+
+        if trader_info.nickname_generator == NicknameGenerator.CUSTOM:
+            if trader_info.nickname:
+                nickname = trader_info.nickname.title().replace(" ", "-")
+                return nickname
+        elif trader_info.nickname_generator == NicknameGenerator.PETNAME and not trader_info.nickname:
+            import petname
+            name1 = petname.generate()
+            name2 = petname.generate()
+            if name1 and isinstance(name1, str) and name2 and isinstance(name2, str):
+                token = generate_token()
+                nickname = f"{name1}-{name2}-{token}".title()
+                return nickname
+        elif trader_info.nickname_generator == NicknameGenerator.FAKER and not trader_info.nickname:
+            from faker import Faker
+            fake = Faker()
+            base_name = fake.name().title().replace(" ", "-")
+            token = generate_token()
+            return f"{base_name}-{token}"
+
+        if trader_info.nickname:
+            return trader_info.nickname.title().replace(" ", "-")
+
+        nickname = Haikunator().haikunate(token_length=token_length)
+        nickname = "-".join(map(lambda nickname: nickname.title(), nickname.split("-")))
+        return nickname
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'wallet_address': self.wallet_address,
+            'nickname_generator': self.nickname_generator.value,
+            'nickname': self.nickname
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TraderInfo':
+        return cls(
+            wallet_address=data['wallet_address'],
+            nickname_generator=NicknameGenerator(data['nickname_generator']),
+            nickname=data.get('nickname', '')
+        )
+
+
+@dataclass
+class TraderConfig:
+    """Configuración específica por trader"""
+    trader_info: TraderInfo
+    enabled: bool = True
+
+    amount_mode: Optional[AmountMode] = AmountMode.EXACT
+    amount_value: Optional[str] = None
+
+    max_amount_to_invest: Optional[str] = None
+    max_open_tokens: Optional[int] = None
+    max_open_positions_per_token: Optional[int] = None
+    use_balanced_allocation: bool = False
+    min_position_size: Optional[str] = None
+    max_position_size: Optional[str] = None
+    adjust_position_size: bool = True
+    max_daily_volume_sol_open: Optional[str] = None
+    min_trade_interval_seconds: int = 1
+
+    def __post_init__(self):
+        _logger.debug(f"TraderConfig inicializado para trader: {self.trader_info.wallet_address}, enabled: {self.enabled}")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convierte a diccionario"""
+        return {
+            'trader_info': self.trader_info.to_dict(),
+            'enabled': self.enabled,
+            'amount_mode': self.amount_mode.value if self.amount_mode else None,
+            'amount_value': self.amount_value,
+            'max_amount_to_invest': self.max_amount_to_invest,
+            'max_open_tokens': self.max_open_tokens,
+            'max_open_positions_per_token': self.max_open_positions_per_token,
+            'use_balanced_allocation': self.use_balanced_allocation,
+            'min_position_size': self.min_position_size,
+            'max_position_size': self.max_position_size,
+            'adjust_position_size': self.adjust_position_size,
+            'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
+            'min_trade_interval_seconds': self.min_trade_interval_seconds
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TraderConfig':
+        """Crea desde diccionario"""
+        return cls(
+            trader_info=TraderInfo.from_dict(data['trader_info']),
+            enabled=data.get('enabled', True),
+            amount_mode=AmountMode(data['amount_mode']) if data.get('amount_mode') else None,
+            amount_value=data.get('amount_value'),
+            max_amount_to_invest=data.get('max_amount_to_invest'),
+            max_open_tokens=data.get('max_open_tokens'),
+            max_open_positions_per_token=data.get('max_open_positions_per_token'),
+            use_balanced_allocation=data.get('use_balanced_allocation', False),
+            min_position_size=data.get('min_position_size'),
+            max_position_size=data.get('max_position_size'),
+            adjust_position_size=data.get('adjust_position_size', True),
+            max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
+            min_trade_interval_seconds=data.get('min_trade_interval_seconds', 1)
+        )
+
+
+@dataclass
+class CopyTradingConfig:
+    """Configuración principal del sistema de copy trading"""
+
+    # Traders a seguir
+    traders: List[TraderInfo] = field(default_factory=list)
+    trader_configs: Dict[str, TraderConfig] = field(default_factory=dict)
+
+    # Wallet y Red
+    wallet_file: str = "wallets/wallet_pumpportal.json"
+    rpc_url: str = "https://api.mainnet-beta.solana.com/"
+
+    general_available_balance_to_invest: str = "0.0"
+
+    # Modo de copia y valor
+    amount_mode: AmountMode = AmountMode.EXACT
+    amount_value: Optional[str] = None  # Porcentaje (50.0), monto fijo en SOL, o monto exacto a copiar
+
+    # Validaciones
+    validations_enabled: bool = True
+    strict_mode: bool = False                                      # Cambiado a False para permitir WARNING en copy trading
+    max_traders_per_token: Optional[int] = None                    # Maximo de traders que pueden tener una posicion abierta en un token
+    max_amount_to_invest_per_trader: Optional[str] = None          # Maximo de SOL que puede invertir un trader en posiciones abiertas
+    max_open_tokens_per_trader: Optional[int] = None               # Maximo de tokens que puede tener un trader
+    max_open_positions_per_token_per_trader: Optional[int] = None  # Maximo de posiciones que puede tener un trader en un token
+    use_balanced_allocation_per_trader: bool = False               # Si se usa la distribucion balanceada de la inversion, el balance para cada trader seria max_amount_to_invest_per_trader / max_open_tokens_per_trader
+    min_position_size: Optional[str] = None                        # Minimo de SOL que puede tener una posicion
+    max_position_size: Optional[str] = None                        # Maximo de SOL que puede tener una posicion
+    adjust_position_size: bool = True                              # Si se ajusta el tamaño de la posicion automaticamente si esta activado en base a max_position_size y min_position_size
+    max_daily_volume_sol_open: Optional[str] = None                # Maximo de SOL que puede tener un trader en un dia en posiciones abiertas
+    min_trade_interval_seconds_per_trader: int = 1                 # Minimo de segundos que debe esperar un trader para hacer un trade
+
+    # Configuración de Transacciones
+    transaction_type: TransactionType = TransactionType.LIGHTNING_TRADE
+    pool_type: Literal["pump", "raydium", "pump-amm", "launchlab", "raydium-cpmm", "bonk", "auto"] = "auto"
+    skip_preflight: bool = True
+    jito_only: bool = False  # Solo para lightning_trade
+
+    # Parámetros de trading
+    slippage_tolerance: float = 0.01  # 1%
+    priority_fee_sol: float = 0.0005  # 0.0005 SOL
+    max_execution_delay_seconds: int = 30
+
+    # Logging
+    logging_level: str = "INFO"
+    log_to_file: bool = True
+    log_file_path: str = "copy_trading/logs"
+    max_log_size_mb: int = 10
+
+    # Sistema
+    dry_run: bool = False
+    auto_close_positions: bool = True
+    position_tracking_interval: int = 60  # segundos
+    max_queue_size: Optional[int] = None
+
+    # Persistencia
+    data_path: str = "copy_trading/data"
+    save_interval_seconds: int = 300  # 5 minutos
+
+    # WebSocket
+    websocket_reconnect_delay: int = 5
+    websocket_max_retries: int = 10
+
+    # Notificaciones
+    notifications_enabled: bool = False
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    telegram_messages_per_minute: int = 30  # Límite de mensajes por minuto para Telegram
+
+    def __post_init__(self):
+        _logger.info("Inicializando configuración de Copy Trading")
+
+        # Validar que el balance por trader sea valido, si se configura
+        if self.max_amount_to_invest_per_trader is not None:
+            total_amount_per_trader = Decimal(self.max_amount_to_invest_per_trader) * Decimal(len(self.traders))
+            if total_amount_per_trader > Decimal(self.general_available_balance_to_invest):
+                error_msg = f"El balance disponible para invertir ({self.general_available_balance_to_invest} SOL) es menor al balance por trader ({total_amount_per_trader} SOL)"
+                _logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            if self.max_open_tokens_per_trader is not None and self.amount_mode == AmountMode.FIXED:
+                amount_per_token = Decimal(self.max_amount_to_invest_per_trader) / Decimal(self.max_open_tokens_per_trader)
+                if self.amount_value is not None and Decimal(self.amount_value) > amount_per_token:
+                    error_msg = f"El valor de la cantidad a invertir ({self.amount_value} SOL) es mayor al balance por token ({amount_per_token} SOL)"
+                    _logger.error(error_msg)
+                    raise ValueError(error_msg)
+
+        _logger.debug(f"Configuración inicializada con {len(self.traders)} traders")
+
+    def is_lightning_trade(self) -> bool:
+        """Verifica si está configurado para usar Lightning Trade"""
+        return self.transaction_type == TransactionType.LIGHTNING_TRADE
+
+    def is_local_trade(self) -> bool:
+        """Verifica si está configurado para usar Local Trade"""
+        return self.transaction_type == TransactionType.LOCAL_TRADE
+
+    def get_transaction_params(self) -> Dict[str, Any]:
+        """Obtiene parámetros comunes para transacciones"""
+        params = {
+            'slippage': self.slippage_tolerance,
+            'priority_fee': self.priority_fee_sol,
+            'pool': self.pool_type,
+        }
+
+        if self.is_lightning_trade():
+            params.update({
+                'skip_preflight': self.skip_preflight,
+                'jito_only': self.jito_only
+            })
+        elif self.is_local_trade():
+            params.update({
+                'rpc_endpoint': self.rpc_url
+            })
+
+        return params
+
+    def get_trader_info(self, wallet_address: str) -> Optional[TraderInfo]:
+        """Obtiene la información de un trader específico"""
+        return next((trader for trader in self.traders if trader.wallet_address == wallet_address), None)
+
+    def add_trader_info(self, trader_info: TraderInfo, config: Optional[TraderConfig] = None):
+        """Añade un trader con configuración opcional"""
+        if trader_info not in self.traders:
+            self.traders.append(trader_info)
+            _logger.info(f"Trader añadido: {trader_info.wallet_address} ({trader_info.nickname})")
+
+        if config:
+            self.trader_configs[trader_info.wallet_address] = config
+            _logger.debug(f"Configuración personalizada añadida para trader: {trader_info.wallet_address}")
+        elif trader_info.wallet_address not in self.trader_configs:
+            # Crear configuración por defecto
+            self.trader_configs[trader_info.wallet_address] = TraderConfig(trader_info=trader_info)
+            _logger.debug(f"Configuración por defecto creada para trader: {trader_info.wallet_address}")
+
+    def remove_trader_info(self, trader_info: TraderInfo):
+        """Elimina un trader"""
+        if trader_info in self.traders:
+            self.traders.remove(trader_info)
+            _logger.info(f"Trader eliminado: {trader_info.wallet_address} ({trader_info.nickname})")
+        if trader_info.wallet_address in self.trader_configs:
+            del self.trader_configs[trader_info.wallet_address]
+            _logger.debug(f"Configuración eliminada para trader: {trader_info.wallet_address}")
+
+    def add_trader_by_wallet_address(self, wallet_address: str, config: Optional[TraderConfig] = None):
+        """Añade un trader por su dirección de wallet"""
+        trader_info = self.get_trader_info(wallet_address)
+        if not trader_info:
+            trader_info = TraderInfo(wallet_address=wallet_address)
+            self.add_trader_info(trader_info, config)
+        else:
+            _logger.debug(f"Trader ya existe: {wallet_address}")
+
+    def get_trader_config(self, trader_info: TraderInfo) -> Optional[TraderConfig]:
+        """Obtiene la configuración de un trader específico"""
+        if trader_info.wallet_address in self.trader_configs:
+            return self.trader_configs[trader_info.wallet_address]
+
+    def calculate_copy_amount(self, trader_wallet: str, original_amount: str) -> str:
+        """
+        Calcula el monto a copiar basado en la configuración usando Decimal
+        
+        Args:
+            trader_wallet: Dirección del trader
+            original_amount: Monto original del trade (como string)
+            
+        Returns:
+            Monto calculado para copiar (como string)
+
+        Exceptions:
+            ValueError: Si el trader no se encuentra
+        """
+
+        # Obtener configuración del trader o usar valores globales
+        trader_info = self.get_trader_info(trader_wallet)
+        if not trader_info:
+            error_msg = f"Trader not found: {trader_wallet}"
+            _logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        trader_config = self.get_trader_config(trader_info)
+
+        # Priorizar la configuracion individual sobre la global
+        mode = AmountMode(trader_config.amount_mode if trader_config and trader_config.amount_mode else self.amount_mode)
+        value = trader_config.amount_value if trader_config and trader_config.amount_value else self.amount_value
+
+        # Convertir a Decimal
+        original_amount_dec = Decimal(original_amount)
+        value_dec = Decimal(value) if value is not None else Decimal("0")
+
+        if mode == AmountMode.EXACT:
+            copy_amount = original_amount_dec
+        elif mode == AmountMode.PERCENTAGE:
+            copy_amount = (original_amount_dec * (value_dec / Decimal("100"))).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+        elif mode == AmountMode.FIXED:
+            copy_amount = value_dec
+        elif mode == AmountMode.DISTRIBUTED:
+            if (trader_config is not None and trader_config.max_amount_to_invest is not None
+                and trader_config.max_open_tokens is not None and trader_config.max_open_positions_per_token is not None
+                and trader_config.use_balanced_allocation):
+                max_amount_to_invest = Decimal(trader_config.max_amount_to_invest)
+                max_open_tokens = trader_config.max_open_tokens
+                max_open_positions_per_token = trader_config.max_open_positions_per_token
+            elif (self.max_amount_to_invest_per_trader is not None and self.max_open_tokens_per_trader is not None
+                and self.max_open_positions_per_token_per_trader is not None and self.use_balanced_allocation_per_trader):
+                max_amount_to_invest = Decimal(self.max_amount_to_invest_per_trader)
+                max_open_tokens = self.max_open_tokens_per_trader
+                max_open_positions_per_token = self.max_open_positions_per_token_per_trader
+            else:
+                error_msg = "No se puede calcular el monto a copiar en modo DISTRIBUTED, no se encontró la configuración del trader o la configuración global"
+                _logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            # Calcular el monto a copiar para cada posicion de cada token
+            balance_per_token = max_amount_to_invest / max_open_tokens
+            copy_amount = balance_per_token / max_open_positions_per_token
+        else:
+            copy_amount = original_amount_dec
+
+        # Aplicar límites
+        if trader_config and trader_config.adjust_position_size and trader_config.max_position_size:
+            max_pos_dec = Decimal(str(trader_config.max_position_size))
+            copy_amount = min(copy_amount, max_pos_dec)
+        elif self.max_position_size and self.adjust_position_size:
+            max_global_dec = Decimal(str(self.max_position_size))
+            copy_amount = min(copy_amount, max_global_dec)
+
+        if trader_config and trader_config.adjust_position_size and trader_config.min_position_size:
+            min_pos_dec = Decimal(str(trader_config.min_position_size))
+            copy_amount = max(copy_amount, min_pos_dec)
+        elif self.min_position_size and self.adjust_position_size:
+            min_global_dec = Decimal(str(self.min_position_size))
+            copy_amount = max(copy_amount, min_global_dec)
+
+        # Devolver como string para mantener consistencia y evitar problemas de precisión
+        resultado = format(copy_amount, "f")
+        _logger.debug(f"Monto calculado para trader {trader_wallet}: {original_amount} -> {resultado} (modo: {mode.value})")
+        return resultado
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convierte la configuración a diccionario"""
+        return {
+            'traders': self.traders,
+            'trader_configs': {k: v.to_dict() for k, v in self.trader_configs.items()},
+            'wallet_file': self.wallet_file,
+            'rpc_url': self.rpc_url,
+            'general_available_balance_to_invest': self.general_available_balance_to_invest,
+            'amount_mode': self.amount_mode.value,
+            'amount_value': self.amount_value,
+            'validations_enabled': self.validations_enabled,
+            'strict_mode': self.strict_mode,
+            'max_traders_per_token': self.max_traders_per_token,
+            'max_amount_to_invest_per_trader': self.max_amount_to_invest_per_trader,
+            'max_open_tokens_per_trader': self.max_open_tokens_per_trader,
+            'max_open_positions_per_token_per_trader': self.max_open_positions_per_token_per_trader,
+            'use_balanced_allocation_per_trader': self.use_balanced_allocation_per_trader,
+            'min_position_size': self.min_position_size,
+            'max_position_size': self.max_position_size,
+            'adjust_position_size': self.adjust_position_size,
+            'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
+            'min_trade_interval_seconds_per_trader': self.min_trade_interval_seconds_per_trader,
+            'transaction_type': self.transaction_type.value,
+            'pool_type': self.pool_type,
+            'skip_preflight': self.skip_preflight,
+            'jito_only': self.jito_only,
+            'slippage_tolerance': self.slippage_tolerance,
+            'priority_fee_sol': self.priority_fee_sol,
+            'max_execution_delay_seconds': self.max_execution_delay_seconds,
+            'logging_level': self.logging_level,
+            'log_to_file': self.log_to_file,
+            'log_file_path': self.log_file_path,
+            'max_log_size_mb': self.max_log_size_mb,
+            'dry_run': self.dry_run,
+            'auto_close_positions': self.auto_close_positions,
+            'position_tracking_interval': self.position_tracking_interval,
+            'data_path': self.data_path,
+            'save_interval_seconds': self.save_interval_seconds,
+            'websocket_reconnect_delay': self.websocket_reconnect_delay,
+            'websocket_max_retries': self.websocket_max_retries,
+            'notifications_enabled': self.notifications_enabled,
+            'telegram_bot_token': self.telegram_bot_token,
+            'telegram_chat_id': self.telegram_chat_id,
+            'telegram_messages_per_minute': self.telegram_messages_per_minute
+        }
+
+    def save_to_file(self, filepath: str = "copy_trading/config.json"):
+        """Guarda la configuración en archivo"""
+        try:
+            Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+            with open(filepath, 'w') as f:
+                json.dump(self.to_dict(), f, indent=2)
+            _logger.info(f"Configuración guardada exitosamente en: {filepath}")
+        except Exception as e:
+            _logger.error(f"Error al guardar configuración en {filepath}: {e}")
+            raise
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'CopyTradingConfig':
+        """Crea configuración desde diccionario"""
+        _logger.debug("Creando configuración desde diccionario")
+        config = cls()
+
+        # Configuración básica
+        config.traders = data.get('traders', [])
+        config.wallet_file = data.get('wallet_file', 'wallets/wallet_pumpportal.json')
+        config.rpc_url = data.get('rpc_url', 'https://api.mainnet-beta.solana.com/')
+
+        config.general_available_balance_to_invest = data.get('general_available_balance_to_invest', "0.0")
+
+        config.amount_mode = AmountMode(data.get('amount_mode', AmountMode.PERCENTAGE.value))
+        config.amount_value = data.get('amount_value', "50.0")
+
+        # Validaciones
+        config.validations_enabled = data.get('validations_enabled', True)
+        config.strict_mode = data.get('strict_mode', False) # Changed from True to False
+        config.max_traders_per_token = data.get('max_traders_per_token')
+        config.max_amount_to_invest_per_trader = data.get('max_amount_to_invest_per_trader')
+        config.max_open_tokens_per_trader = data.get('max_open_tokens_per_trader')
+        config.max_open_positions_per_token_per_trader = data.get('max_open_positions_per_token_per_trader')
+        config.use_balanced_allocation_per_trader = data.get('use_balanced_allocation_per_trader', False)
+        config.min_position_size = data.get('min_position_size')
+        config.max_position_size = data.get('max_position_size')
+        config.adjust_position_size = data.get('adjust_position_size', True)
+        config.max_daily_volume_sol_open = data.get('max_daily_volume_sol_open')
+        config.min_trade_interval_seconds_per_trader = data.get('min_trade_interval_seconds_per_trader', 1)
+
+        # Transacciones
+        config.transaction_type = TransactionType(data.get('transaction_type', TransactionType.LIGHTNING_TRADE.value))
+        config.pool_type = data.get('pool_type', 'auto')
+        config.skip_preflight = data.get('skip_preflight', True)
+        config.jito_only = data.get('jito_only', False)
+
+        # Trading
+        config.slippage_tolerance = data.get('slippage_tolerance', 0.01)
+        config.priority_fee_sol = data.get('priority_fee_sol', 0.0005)
+        config.max_execution_delay_seconds = data.get('max_execution_delay_seconds', 30)
+
+        # Configuraciones de traders
+        trader_configs = data.get('trader_configs', {})
+        for wallet, tconfig in trader_configs.items():
+            config.trader_configs[wallet] = TraderConfig.from_dict(tconfig)
+
+        # Logging
+        config.logging_level = data.get('logging_level', 'INFO')
+        config.log_to_file = data.get('log_to_file', True)
+        config.log_file_path = data.get('log_file_path', 'copy_trading/logs')
+        config.max_log_size_mb = data.get('max_log_size_mb', 10)
+
+        # Sistema
+        config.dry_run = data.get('dry_run', False)
+        config.auto_close_positions = data.get('auto_close_positions', True)
+        config.position_tracking_interval = data.get('position_tracking_interval', 60)
+        config.data_path = data.get('data_path', 'copy_trading/data')
+        config.save_interval_seconds = data.get('save_interval_seconds', 300)
+
+        # WebSocket
+        config.websocket_reconnect_delay = data.get('websocket_reconnect_delay', 5)
+        config.websocket_max_retries = data.get('websocket_max_retries', 10)
+
+        # Notificaciones
+        config.notifications_enabled = data.get('notifications_enabled', False)
+        config.telegram_bot_token = data.get('telegram_bot_token')
+        config.telegram_chat_id = data.get('telegram_chat_id')
+        config.telegram_messages_per_minute = data.get('telegram_messages_per_minute', 30)
+
+        _logger.debug(f"Configuración creada con {len(config.traders)} traders y {len(config.trader_configs)} configuraciones")
+        return config
+
+    @classmethod
+    def load_from_file(cls, filepath: str = "copy_trading/config.json") -> 'CopyTradingConfig':
+        """Carga configuración desde archivo"""
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            _logger.info(f"Configuración cargada exitosamente desde: {filepath}")
+            return cls.from_dict(data)
+        except FileNotFoundError:
+            _logger.warning(f"Archivo de configuración no encontrado: {filepath}")
+            _logger.info("Creando configuración por defecto...")
+            return cls()
+        except Exception as e:
+            _logger.error(f"Error al cargar configuración desde {filepath}: {e}")
+            raise
