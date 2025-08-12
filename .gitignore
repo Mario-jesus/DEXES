@@ -202,3 +202,6 @@ anaconda_projects/
 # Copy Trading
 copy_trading/logs/
 copy_trading/data/
+
+# Mac OS
+.DS_Store
