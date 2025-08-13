@@ -202,6 +202,7 @@ anaconda_projects/
 # Copy Trading
 copy_trading/logs/
 copy_trading/data/
+copy_trading/configs_in_json/
 
 # Mac OS
 .DS_Store
