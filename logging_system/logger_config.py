@@ -27,7 +27,8 @@ def setup_logging(
     console_output: bool = True, 
     file_output: bool = True, 
     min_level_to_process: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = 'INFO',
-    module_levels: Optional[Dict[str, Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']]] = None
+    module_levels: Optional[Dict[str, Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']]] = None,
+    log_directory: str = "logs"
 ):
     """
     Configura el sistema de logging con soporte para niveles específicos por módulo.
@@ -41,7 +42,6 @@ def setup_logging(
     """
     handlers: List[Union[logging.FileHandler, logging.StreamHandler]] = []
     if file_output:
-        log_directory = "logs"
         if not os.path.exists(log_directory):
             os.makedirs(log_directory)
         log_filename = datetime.now().strftime("copy_trading_%Y-%m-%d_%H-%M-%S.log")

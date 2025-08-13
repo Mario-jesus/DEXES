@@ -60,6 +60,8 @@ class TradeProcessorCallback:
             # Incrementar contador
             self.stats['trades_received'] += 1
 
+            self._logger.info(f"Trade recibido: {data.get('signature', 'N/A')}")
+
             # Crear objeto TradeData estructurado a partir de los datos crudos
             trade_data = self._create_trade_data_from_pumpfun(data)
 
@@ -171,7 +173,6 @@ class TradeProcessorCallback:
             Objeto TradeData con todos los campos mapeados
         """
         try:
-            print(f"[DEBUG] - _create_trade_data_from_pumpfun - data: {data}")
             return TraderTradeData(
                 # Información básica del trade
                 trader_wallet=data.get('traderPublicKey', ''),

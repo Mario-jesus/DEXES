@@ -211,8 +211,8 @@ class AnalysisPositionQueue:
                     async with self._lock:
                         self.analysis_queue.remove(position)
                         self._logger.info(f"Posición {position.id} analizada y removida de la cola")
+                    await self._save_analysis_queue()
 
-            await self._save_analysis_queue()
         except Exception as e:
             self._logger.error(f"Error procesando cola de análisis: {e}")
 

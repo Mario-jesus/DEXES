@@ -196,9 +196,6 @@ class PositionNotificationQueue:
 
             self.stats['current_queue_size'] = len(self._queue)
 
-            if processed_count > 0 or skipped_count > 0:
-                self._logger.debug(f"Procesamiento completado: {processed_count} procesadas, {skipped_count} saltadas, {len(self._queue)} en cola")
-
     def _is_position_analyzed(self, position: Union[OpenPosition, ClosePosition, SubClosePosition]) -> bool:
         """
         Verifica si una posición está analizada y lista para notificación.

@@ -10,7 +10,7 @@ from pathlib import Path
 from decimal import Decimal, getcontext, ROUND_DOWN
 from haikunator import Haikunator
 
-from logging_system import AppLogger
+from logging_system import AppLogger, setup_logging
 
 # Configurar precisión de Decimal para operaciones financieras
 getcontext().prec = 26
@@ -204,10 +204,10 @@ class CopyTradingConfig:
     max_execution_delay_seconds: int = 30
 
     # Logging
-    logging_level: str = "INFO"
+    logging_level: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = "INFO"
     log_to_file: bool = True
+    log_to_console: bool = True
     log_file_path: str = "copy_trading/logs"
-    max_log_size_mb: int = 10
 
     # Sistema
     dry_run: bool = False
@@ -230,6 +230,12 @@ class CopyTradingConfig:
     telegram_messages_per_minute: int = 30  # Límite de mensajes por minuto para Telegram
 
     def __post_init__(self):
+        setup_logging(
+            min_level_to_process=self.logging_level,
+            file_output=self.log_to_file,
+            console_output=self.log_to_console,
+            log_directory=self.log_file_path
+        )
         _logger.info("Inicializando configuración de Copy Trading")
 
         # Validar que el balance por trader sea valido, si se configura
@@ -290,10 +296,14 @@ class CopyTradingConfig:
         if config:
             self.trader_configs[trader_info.wallet_address] = config
             _logger.debug(f"Configuración personalizada añadida para trader: {trader_info.wallet_address}")
-        elif trader_info.wallet_address not in self.trader_configs:
-            # Crear configuración por defecto
-            self.trader_configs[trader_info.wallet_address] = TraderConfig(trader_info=trader_info)
-            _logger.debug(f"Configuración por defecto creada para trader: {trader_info.wallet_address}")
+
+    def add_trader_config_by_wallet_address(self, wallet_address: str, config: TraderConfig):
+        """Añade una configuración de trader específica"""
+        if wallet_address not in [trader.wallet_address for trader in self.traders]:
+            self.add_trader_info(TraderInfo(wallet_address=wallet_address))
+
+        self.trader_configs[wallet_address] = config
+        _logger.debug(f"Configuración personalizada añadida para trader: {wallet_address}")
 
     def remove_trader_info(self, trader_info: TraderInfo):
         """Elimina un trader"""
@@ -402,7 +412,7 @@ class CopyTradingConfig:
     def to_dict(self) -> Dict[str, Any]:
         """Convierte la configuración a diccionario"""
         return {
-            'traders': self.traders,
+            'traders': [trader.to_dict() for trader in self.traders],
             'trader_configs': {k: v.to_dict() for k, v in self.trader_configs.items()},
             'wallet_file': self.wallet_file,
             'rpc_url': self.rpc_url,
@@ -430,11 +440,12 @@ class CopyTradingConfig:
             'max_execution_delay_seconds': self.max_execution_delay_seconds,
             'logging_level': self.logging_level,
             'log_to_file': self.log_to_file,
+            'log_to_console': self.log_to_console,
             'log_file_path': self.log_file_path,
-            'max_log_size_mb': self.max_log_size_mb,
             'dry_run': self.dry_run,
             'auto_close_positions': self.auto_close_positions,
             'position_tracking_interval': self.position_tracking_interval,
+            'max_queue_size': self.max_queue_size,
             'data_path': self.data_path,
             'save_interval_seconds': self.save_interval_seconds,
             'websocket_reconnect_delay': self.websocket_reconnect_delay,
@@ -460,70 +471,80 @@ class CopyTradingConfig:
     def from_dict(cls, data: Dict[str, Any]) -> 'CopyTradingConfig':
         """Crea configuración desde diccionario"""
         _logger.debug("Creando configuración desde diccionario")
-        config = cls()
 
-        # Configuración básica
-        config.traders = data.get('traders', [])
-        config.wallet_file = data.get('wallet_file', 'wallets/wallet_pumpportal.json')
-        config.rpc_url = data.get('rpc_url', 'https://api.mainnet-beta.solana.com/')
+        # Preparar traders
+        traders = [TraderInfo.from_dict(trader) for trader in data.get('traders', [])]
 
-        config.general_available_balance_to_invest = data.get('general_available_balance_to_invest', "0.0")
+        # Preparar trader_configs
+        trader_configs = {}
+        trader_configs_data = data.get('trader_configs', {})
+        for wallet, tconfig in trader_configs_data.items():
+            trader_configs[wallet] = TraderConfig.from_dict(tconfig)
 
-        config.amount_mode = AmountMode(data.get('amount_mode', AmountMode.PERCENTAGE.value))
-        config.amount_value = data.get('amount_value', "50.0")
+        # Crear configuración pasando todos los parámetros al constructor
+        config = cls(
+            # Traders a seguir
+            traders=traders,
+            trader_configs=trader_configs,
 
-        # Validaciones
-        config.validations_enabled = data.get('validations_enabled', True)
-        config.strict_mode = data.get('strict_mode', False) # Changed from True to False
-        config.max_traders_per_token = data.get('max_traders_per_token')
-        config.max_amount_to_invest_per_trader = data.get('max_amount_to_invest_per_trader')
-        config.max_open_tokens_per_trader = data.get('max_open_tokens_per_trader')
-        config.max_open_positions_per_token_per_trader = data.get('max_open_positions_per_token_per_trader')
-        config.use_balanced_allocation_per_trader = data.get('use_balanced_allocation_per_trader', False)
-        config.min_position_size = data.get('min_position_size')
-        config.max_position_size = data.get('max_position_size')
-        config.adjust_position_size = data.get('adjust_position_size', True)
-        config.max_daily_volume_sol_open = data.get('max_daily_volume_sol_open')
-        config.min_trade_interval_seconds_per_trader = data.get('min_trade_interval_seconds_per_trader', 1)
+            # Wallet y Red
+            wallet_file=data.get('wallet_file', 'wallets/wallet_pumpportal.json'),
+            rpc_url=data.get('rpc_url', 'https://api.mainnet-beta.solana.com/'),
+            general_available_balance_to_invest=data.get('general_available_balance_to_invest', "0.0"),
 
-        # Transacciones
-        config.transaction_type = TransactionType(data.get('transaction_type', TransactionType.LIGHTNING_TRADE.value))
-        config.pool_type = data.get('pool_type', 'auto')
-        config.skip_preflight = data.get('skip_preflight', True)
-        config.jito_only = data.get('jito_only', False)
+            # Modo de copia y valor
+            amount_mode=AmountMode(data.get('amount_mode', AmountMode.PERCENTAGE.value)),
+            amount_value=data.get('amount_value', "50.0"),
 
-        # Trading
-        config.slippage_tolerance = data.get('slippage_tolerance', 0.01)
-        config.priority_fee_sol = data.get('priority_fee_sol', 0.0005)
-        config.max_execution_delay_seconds = data.get('max_execution_delay_seconds', 30)
+            # Validaciones
+            validations_enabled=data.get('validations_enabled', True),
+            strict_mode=data.get('strict_mode', False),
+            max_traders_per_token=data.get('max_traders_per_token'),
+            max_amount_to_invest_per_trader=data.get('max_amount_to_invest_per_trader'),
+            max_open_tokens_per_trader=data.get('max_open_tokens_per_trader'),
+            max_open_positions_per_token_per_trader=data.get('max_open_positions_per_token_per_trader'),
+            use_balanced_allocation_per_trader=data.get('use_balanced_allocation_per_trader', False),
+            min_position_size=data.get('min_position_size'),
+            max_position_size=data.get('max_position_size'),
+            adjust_position_size=data.get('adjust_position_size', True),
+            max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
+            min_trade_interval_seconds_per_trader=data.get('min_trade_interval_seconds_per_trader', 1),
 
-        # Configuraciones de traders
-        trader_configs = data.get('trader_configs', {})
-        for wallet, tconfig in trader_configs.items():
-            config.trader_configs[wallet] = TraderConfig.from_dict(tconfig)
+            # Configuración de Transacciones
+            transaction_type=TransactionType(data.get('transaction_type', TransactionType.LIGHTNING_TRADE.value)),
+            pool_type=data.get('pool_type', 'auto'),
+            skip_preflight=data.get('skip_preflight', True),
+            jito_only=data.get('jito_only', False),
 
-        # Logging
-        config.logging_level = data.get('logging_level', 'INFO')
-        config.log_to_file = data.get('log_to_file', True)
-        config.log_file_path = data.get('log_file_path', 'copy_trading/logs')
-        config.max_log_size_mb = data.get('max_log_size_mb', 10)
+            # Parámetros de trading
+            slippage_tolerance=data.get('slippage_tolerance', 0.01),
+            priority_fee_sol=data.get('priority_fee_sol', 0.0005),
+            max_execution_delay_seconds=data.get('max_execution_delay_seconds', 30),
 
-        # Sistema
-        config.dry_run = data.get('dry_run', False)
-        config.auto_close_positions = data.get('auto_close_positions', True)
-        config.position_tracking_interval = data.get('position_tracking_interval', 60)
-        config.data_path = data.get('data_path', 'copy_trading/data')
-        config.save_interval_seconds = data.get('save_interval_seconds', 300)
+            # Logging
+            logging_level=data.get('logging_level', 'INFO'),
+            log_to_file=data.get('log_to_file', True),
+            log_to_console=data.get('log_to_console', True),
+            log_file_path=data.get('log_file_path', 'copy_trading/logs'),
 
-        # WebSocket
-        config.websocket_reconnect_delay = data.get('websocket_reconnect_delay', 5)
-        config.websocket_max_retries = data.get('websocket_max_retries', 10)
+            # Sistema
+            dry_run=data.get('dry_run', False),
+            auto_close_positions=data.get('auto_close_positions', True),
+            position_tracking_interval=data.get('position_tracking_interval', 60),
+            max_queue_size=data.get('max_queue_size'),
+            data_path=data.get('data_path', 'copy_trading/data'),
+            save_interval_seconds=data.get('save_interval_seconds', 300),
 
-        # Notificaciones
-        config.notifications_enabled = data.get('notifications_enabled', False)
-        config.telegram_bot_token = data.get('telegram_bot_token')
-        config.telegram_chat_id = data.get('telegram_chat_id')
-        config.telegram_messages_per_minute = data.get('telegram_messages_per_minute', 30)
+            # WebSocket
+            websocket_reconnect_delay=data.get('websocket_reconnect_delay', 5),
+            websocket_max_retries=data.get('websocket_max_retries', 10),
+
+            # Notificaciones
+            notifications_enabled=data.get('notifications_enabled', False),
+            telegram_bot_token=data.get('telegram_bot_token'),
+            telegram_chat_id=data.get('telegram_chat_id'),
+            telegram_messages_per_minute=data.get('telegram_messages_per_minute', 30)
+        )
 
         _logger.debug(f"Configuración creada con {len(config.traders)} traders y {len(config.trader_configs)} configuraciones")
         return config
