@@ -1,14 +1,44 @@
 services:
-  dexes:
-    image: dexes:1.0.0
+  COPY_TRADING_BOT_A:
+    image: copy-trading-bot:1.0.0
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: dexes-app
-    volumes:
-      - ./:/app
+    container_name: COPY_TRADING_BOT_A
     ports:
-      - "7777:8888"
-    env_file:
-      - .env
+      - "7778:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-A.json
+    restart: unless-stopped
+  COPY_TRADING_BOT_B:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_B
+    ports:
+      - "7779:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-B.json
+    restart: unless-stopped
+  COPY_TRADING_BOT_C:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_C
+    ports:
+      - "7780:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-C.json
+    restart: unless-stopped
+  COPY_TRADING_BOT_D:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_D
+    ports:
+      - "7781:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-D.json
+    restart: unless-stopped
+  COPY_TRADING_BOT_E:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_E
+    ports:
+      - "7782:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-E.json
     restart: unless-stopped
