@@ -23,6 +23,7 @@ faker = "*"
 haikunator = "*"
 petname = "*"
 cachetools = "*"
+logfire = "*"
 
 [dev-packages]
 
