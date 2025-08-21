@@ -7,7 +7,8 @@ from .logger_config import (
     add_logfire_to_logger, 
     remove_logfire_from_logger, 
     get_logfire_instance, 
-    is_logfire_globally_enabled
+    is_logfire_globally_enabled,
+    get_logfire_global_min_level
 )
 
 
@@ -26,11 +27,10 @@ class AppLogger:
         # Configurar Logfire si está habilitado
         if self._enable_logfire:
             # Añadir handler de Logfire al logger
-            tags = logfire_config.get('tags') if logfire_config else None
-            min_level = logfire_config.get('min_level', 'WARNING') if logfire_config else 'WARNING'
-            add_logfire_to_logger(name, tags, min_level)
+            add_logfire_to_logger(name, logfire_config)
 
             # Obtener instancia de Logfire con tags
+            tags = logfire_config.get('tags') if logfire_config else None
             self._logfire_instance = get_logfire_instance(tags)
         else:
             self._logfire_instance = None
@@ -142,8 +142,14 @@ class AppLogger:
 
         # Añadir handler de Logfire
         tags = logfire_config.get('tags') if logfire_config else None
-        min_level = logfire_config.get('min_level', 'WARNING') if logfire_config else 'WARNING'
-        if add_logfire_to_logger(self._logger.name, tags, min_level):
+        # Si no hay logfire_config, crear uno con el nivel global por defecto
+        if not logfire_config:
+            logfire_config = {'min_level': get_logfire_global_min_level()}
+        elif 'min_level' not in logfire_config:
+            # Si hay config pero no min_level, usar el global
+            logfire_config['min_level'] = get_logfire_global_min_level()
+
+        if add_logfire_to_logger(self._logger.name, logfire_config):
             self._logfire_instance = get_logfire_instance(tags)
             self._enable_logfire = True
             self._stats['logfire_enabled'] = True
