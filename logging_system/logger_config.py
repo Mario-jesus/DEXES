@@ -1,18 +1,13 @@
 # -*- coding: utf-8 -*-
-import logging, os, sys
+import logging, logfire, os, sys
 from datetime import datetime
 from typing import List, Union, Literal, Dict, Optional, Any
 from colorama import Fore, Style, init
 
 init(autoreset=True)
 
-# Importar Logfire si está disponible
-try:
-    import logfire
-    LOGFIRE_AVAILABLE = True
-except ImportError:
-    LOGFIRE_AVAILABLE = False
-    print("Warning: Logfire not available. Install with: pip install logfire")
+# Variable global para almacenar el estado de Logfire
+_LOGFIRE_GLOBAL_ENABLED = False
 
 
 class ColorFormatter(logging.Formatter):
@@ -34,6 +29,8 @@ class ColorFormatter(logging.Formatter):
 def setup_logging(
     console_output: bool = True, 
     file_output: bool = True, 
+    log_directory: str = "logs",
+    log_filename: str = "dexes_%Y-%m-%d_%H-%M-%S.log",
     min_level_to_process: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = 'INFO',
     module_levels: Optional[Dict[str, Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']]] = None,
     enable_logfire: bool = False,
@@ -45,6 +42,8 @@ def setup_logging(
     Args:
         console_output: Si se debe mostrar logs en consola
         file_output: Si se debe guardar logs en archivo
+        log_directory: Directorio donde se guardarán los logs
+        log_filename: Nombre del archivo de logs
         min_level_to_process: Nivel mínimo general para todos los módulos
         module_levels: Diccionario con niveles específicos por módulo
             Ejemplo: {'Module1': 'DEBUG', 'Module2': 'WARNING'}
@@ -59,10 +58,9 @@ def setup_logging(
     handlers: List[Union[logging.FileHandler, logging.StreamHandler]] = []
 
     if file_output:
-        log_directory = "logs"
         if not os.path.exists(log_directory):
             os.makedirs(log_directory)
-        log_filename = datetime.now().strftime("copy_trading_%Y-%m-%d_%H-%M-%S.log")
+        log_filename = datetime.now().strftime(log_filename)
         log_filepath = os.path.join(log_directory, log_filename)
         file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
         handlers.append(file_handler)
@@ -83,10 +81,12 @@ def setup_logging(
     )
 
     # Configurar Logfire si está habilitado
-    if enable_logfire and LOGFIRE_AVAILABLE:
+    global _LOGFIRE_GLOBAL_ENABLED
+    if enable_logfire:
         setup_logfire_global(logfire_config)
-    elif enable_logfire and not LOGFIRE_AVAILABLE:
-        print("Warning: Logfire requested but not available. Install with: pip install logfire")
+        _LOGFIRE_GLOBAL_ENABLED = True
+    else:
+        _LOGFIRE_GLOBAL_ENABLED = False
 
     # Configuración de niveles específicos por módulo
     if module_levels:
@@ -127,10 +127,6 @@ def setup_logfire_global(logfire_config: Optional[Dict[str, Any]] = None):
     1. Variable de entorno: export LOGFIRE_TOKEN="your_token"
     2. Parámetro directo: logfire_config['token'] = "your_token"
     """
-    if not LOGFIRE_AVAILABLE:
-        print("Warning: Logfire not available. Cannot setup Logfire.")
-        return
-
     try:
         # Configurar Logfire con los parámetros proporcionados
         config_kwargs = {}
@@ -178,10 +174,6 @@ def add_logfire_to_logger(logger_name: str, tags: Optional[Dict[str, str]] = Non
     Returns:
         True si se añadió correctamente, False en caso contrario
     """
-    if not LOGFIRE_AVAILABLE:
-        print("Warning: Logfire not available. Cannot add Logfire handler.")
-        return False
-
     try:
         logger = logging.getLogger(logger_name)
 
@@ -215,9 +207,6 @@ def remove_logfire_from_logger(logger_name: str) -> bool:
     Returns:
         True si se removió correctamente, False en caso contrario
     """
-    if not LOGFIRE_AVAILABLE:
-        return True  # No hay nada que remover
-
     try:
         logger = logging.getLogger(logger_name)
         handlers_to_remove = [
@@ -240,9 +229,10 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def is_logfire_available() -> bool:
-    """Retorna True si Logfire está disponible."""
-    return LOGFIRE_AVAILABLE
+def is_logfire_globally_enabled() -> bool:
+    """Retorna True si Logfire está habilitado globalmente en setup_logging()."""
+    global _LOGFIRE_GLOBAL_ENABLED
+    return _LOGFIRE_GLOBAL_ENABLED
 
 
 def get_logfire_instance(tags: Optional[Dict[str, str]] = None):
@@ -255,9 +245,6 @@ def get_logfire_instance(tags: Optional[Dict[str, str]] = None):
     Returns:
         Instancia de Logfire o None si no está disponible
     """
-    if not LOGFIRE_AVAILABLE:
-        return None
-
     if tags:
         return logfire.with_tags(*tags.values())
     else:
