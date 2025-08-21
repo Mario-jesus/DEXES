@@ -2,17 +2,29 @@
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
-from .logger_config import get_logger, add_logfire_to_logger, remove_logfire_from_logger, get_logfire_instance, is_logfire_available
+from .logger_config import (
+    get_logger, 
+    add_logfire_to_logger, 
+    remove_logfire_from_logger, 
+    get_logfire_instance, 
+    is_logfire_globally_enabled
+)
 
 
 class AppLogger:
 
-    def __init__(self, name: str, enable_logfire: bool = False, logfire_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str, enable_logfire: Optional[bool] = None, logfire_config: Optional[Dict[str, Any]] = None):
         self._logger = get_logger(name)
-        self._enable_logfire = enable_logfire
+
+        # Detectar automáticamente si Logfire está habilitado globalmente
+        if enable_logfire is None:
+            # Si no se especifica, usar Logfire si está habilitado globalmente
+            self._enable_logfire = is_logfire_globally_enabled()
+        else:
+            self._enable_logfire = enable_logfire
 
         # Configurar Logfire si está habilitado
-        if enable_logfire:
+        if self._enable_logfire:
             # Añadir handler de Logfire al logger
             tags = logfire_config.get('tags') if logfire_config else None
             min_level = logfire_config.get('min_level', 'WARNING') if logfire_config else 'WARNING'
@@ -37,9 +49,42 @@ class AppLogger:
             'last_log_time': None,
             'last_error': None,
             'last_error_time': None,
-            'logfire_enabled': enable_logfire,
+            'logfire_enabled': self._enable_logfire,
             'logfire_connected': self._logfire_instance is not None,
         }
+
+    def _has_global_logfire_config(self) -> bool:
+        """
+        Verifica si Logfire está configurado globalmente.
+        
+        Returns:
+            True si Logfire está configurado globalmente, False en caso contrario
+        """
+        try:
+            # Verificar si hay algún logger con handler de Logfire
+            root_logger = logging.getLogger()
+            for handler in root_logger.handlers:
+                if hasattr(handler, '__class__') and 'LogfireLoggingHandler' in str(handler.__class__):
+                    return True
+
+            # Verificar si hay algún logger específico con handler de Logfire
+            for logger_name in logging.root.manager.loggerDict:
+                logger = logging.getLogger(logger_name)
+                for handler in logger.handlers:
+                    if hasattr(handler, '__class__') and 'LogfireLoggingHandler' in str(handler.__class__):
+                        return True
+
+            # Verificar si Logfire está configurado globalmente (aunque no haya handlers)
+            # Esto es útil cuando setup_logging() configuró Logfire pero no agregó handlers específicos
+            try:
+                # Si logfire está configurado, intentar obtener una instancia
+                logfire_instance = get_logfire_instance()
+                return logfire_instance is not None
+            except Exception:
+                return False
+
+        except Exception:
+            return False
 
     def _record(self, level: str, message: str) -> None:
         self._stats['total_logs'] += 1
@@ -95,10 +140,6 @@ class AppLogger:
         if self._logfire_instance:
             return True  # Ya está habilitado
 
-        if not is_logfire_available():
-            print("Warning: Logfire not available. Cannot enable Logfire.")
-            return False
-
         # Añadir handler de Logfire
         tags = logfire_config.get('tags') if logfire_config else None
         min_level = logfire_config.get('min_level', 'WARNING') if logfire_config else 'WARNING'
@@ -130,7 +171,7 @@ class AppLogger:
 
     def is_logfire_enabled(self) -> bool:
         """Retorna True si Logfire está habilitado."""
-        return self._enable_logfire and self._logfire_instance is not None
+        return bool(self._enable_logfire and self._logfire_instance is not None)
 
     def stats(self):
         """Devuelve estadísticas y configuración relevante del logger."""
@@ -142,7 +183,7 @@ class AppLogger:
             }
             if isinstance(handler, logging.FileHandler):
                 handler_info['filename'] = handler.baseFilename
-            elif is_logfire_available() and hasattr(handler, '__class__') and 'LogfireLoggingHandler' in str(handler.__class__):
+            elif hasattr(handler, '__class__') and 'LogfireLoggingHandler' in str(handler.__class__):
                 handler_info['logfire'] = 'True'
             handlers_info.append(handler_info)
 
