@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Literal
 from enum import Enum
 from pathlib import Path
-from decimal import Decimal, getcontext, ROUND_DOWN
+from decimal import Decimal, getcontext
 from haikunator import Haikunator
 
 from logging_system import AppLogger, setup_logging
@@ -206,9 +206,21 @@ class CopyTradingConfig:
 
     # Logging
     logging_level: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = "INFO"
-    log_to_file: bool = True
+    log_to_file: bool = False
     log_to_console: bool = True
     log_file_path: str = "copy_trading/logs"
+    log_filename: str = "copy_trading_%Y-%m-%d_%H-%M-%S.log"
+    enable_logfire: bool = False
+    min_logfire_level: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = "WARNING"
+    logfire_config: Dict[str, Any] = {
+        'service_name': 'copy_trading_development',
+        'environment': 'development',
+        'tags': {
+            'project': 'pumpfun-copy-trading-system',
+            'version': '1.0.0'
+        },
+        'min_level': 'WARNING'
+    }
 
     # Sistema
     dry_run: bool = False
@@ -235,7 +247,10 @@ class CopyTradingConfig:
             min_level_to_process=self.logging_level,
             file_output=self.log_to_file,
             console_output=self.log_to_console,
-            log_directory=self.log_file_path
+            log_directory=self.log_file_path,
+            log_filename=self.log_filename,
+            enable_logfire=self.enable_logfire,
+            logfire_config=self.logfire_config
         )
         _logger.info("Inicializando configuración de Copy Trading")
 
@@ -363,6 +378,10 @@ class CopyTradingConfig:
             'log_to_file': self.log_to_file,
             'log_to_console': self.log_to_console,
             'log_file_path': self.log_file_path,
+            'log_filename': self.log_filename,
+            'enable_logfire': self.enable_logfire,
+            'min_logfire_level': self.min_logfire_level,
+            'logfire_config': self.logfire_config,
             'dry_run': self.dry_run,
             'auto_close_positions': self.auto_close_positions,
             'position_tracking_interval': self.position_tracking_interval,
@@ -445,9 +464,13 @@ class CopyTradingConfig:
 
             # Logging
             logging_level=data.get('logging_level', 'INFO'),
-            log_to_file=data.get('log_to_file', True),
+            log_to_file=data.get('log_to_file', False),
             log_to_console=data.get('log_to_console', True),
             log_file_path=data.get('log_file_path', 'copy_trading/logs'),
+            log_filename=data.get('log_filename', 'copy_trading_%Y-%m-%d_%H-%M-%S.log'),
+            enable_logfire=data.get('enable_logfire', False),
+            min_logfire_level=data.get('min_logfire_level', 'WARNING'),
+            logfire_config=data.get('logfire_config', cls.logfire_config),
 
             # Sistema
             dry_run=data.get('dry_run', False),
