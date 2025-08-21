@@ -218,8 +218,7 @@ class CopyTradingConfig:
         'tags': {
             'project': 'pumpfun-copy-trading-system',
             'version': '1.0.0'
-        },
-        'min_level': 'WARNING'
+        }
     }
 
     # Sistema
@@ -244,13 +243,14 @@ class CopyTradingConfig:
 
     def __post_init__(self):
         setup_logging(
-            min_level_to_process=self.logging_level,
-            file_output=self.log_to_file,
             console_output=self.log_to_console,
+            file_output=self.log_to_file,
             log_directory=self.log_file_path,
             log_filename=self.log_filename,
+            min_level_to_process=self.logging_level,
             enable_logfire=self.enable_logfire,
-            logfire_config=self.logfire_config
+            logfire_config=self.logfire_config,
+            logfire_min_level=self.min_logfire_level
         )
         _logger.info("Inicializando configuración de Copy Trading")
 
