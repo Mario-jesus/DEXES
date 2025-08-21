@@ -8,6 +8,7 @@ init(autoreset=True)
 
 # Variable global para almacenar el estado de Logfire
 _LOGFIRE_GLOBAL_ENABLED = False
+_LOGFIRE_GLOBAL_MIN_LEVEL = 'WARNING'
 
 
 class ColorFormatter(logging.Formatter):
@@ -34,7 +35,8 @@ def setup_logging(
     min_level_to_process: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = 'INFO',
     module_levels: Optional[Dict[str, Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']]] = None,
     enable_logfire: bool = False,
-    logfire_config: Optional[Dict[str, Any]] = None
+    logfire_config: Optional[Dict[str, Any]] = None,
+    logfire_min_level: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = 'WARNING'
 ):
     """
     Configura el sistema de logging con soporte para niveles específicos por módulo y Logfire.
@@ -54,6 +56,9 @@ def setup_logging(
                 'service_name': 'dexes-trading',
                 'environment': 'development'
             }
+        logfire_min_level: Nivel mínimo global para todos los loggers de Logfire
+            Opciones: 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+            Por defecto: 'WARNING' (para reducir costos)
     """
     handlers: List[Union[logging.FileHandler, logging.StreamHandler]] = []
 
@@ -81,10 +86,11 @@ def setup_logging(
     )
 
     # Configurar Logfire si está habilitado
-    global _LOGFIRE_GLOBAL_ENABLED
+    global _LOGFIRE_GLOBAL_ENABLED, _LOGFIRE_GLOBAL_MIN_LEVEL
     if enable_logfire:
         setup_logfire_global(logfire_config)
         _LOGFIRE_GLOBAL_ENABLED = True
+        _LOGFIRE_GLOBAL_MIN_LEVEL = logfire_min_level
     else:
         _LOGFIRE_GLOBAL_ENABLED = False
 
@@ -161,15 +167,17 @@ def setup_logfire_global(logfire_config: Optional[Dict[str, Any]] = None):
         print(f"Error configuring Logfire: {e}")
 
 
-def add_logfire_to_logger(logger_name: str, tags: Optional[Dict[str, str]] = None, min_level: str = 'WARNING') -> bool:
+def add_logfire_to_logger(logger_name: str, logfire_config: Optional[Dict[str, Any]] = None) -> bool:
     """
     Añade Logfire a un logger específico.
     
     Args:
         logger_name: Nombre del logger
-        tags: Tags adicionales para este logger específico
-        min_level: Nivel mínimo para enviar logs a Logfire (default: 'WARNING')
-            Opciones: 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+        logfire_config: Configuración de Logfire para este logger
+            Ejemplo: {
+                'tags': {'component': 'trading'},
+                'min_level': 'WARNING'  # Opciones: 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+            }
     
     Returns:
         True si se añadió correctamente, False en caso contrario
@@ -179,6 +187,11 @@ def add_logfire_to_logger(logger_name: str, tags: Optional[Dict[str, str]] = Non
 
         # Crear y agregar el handler de Logfire
         logfire_handler = logfire.LogfireLoggingHandler()
+
+        # Extraer configuración
+        tags = logfire_config.get('tags') if logfire_config else None
+        # Usar min_level del config específico o el nivel global por defecto
+        min_level = logfire_config.get('min_level', _LOGFIRE_GLOBAL_MIN_LEVEL) if logfire_config else _LOGFIRE_GLOBAL_MIN_LEVEL
 
         # Configurar nivel mínimo para Logfire (por defecto WARNING para reducir costos)
         if hasattr(logging, min_level.upper()):
@@ -233,6 +246,12 @@ def is_logfire_globally_enabled() -> bool:
     """Retorna True si Logfire está habilitado globalmente en setup_logging()."""
     global _LOGFIRE_GLOBAL_ENABLED
     return _LOGFIRE_GLOBAL_ENABLED
+
+
+def get_logfire_global_min_level() -> str:
+    """Retorna el nivel mínimo global configurado para Logfire."""
+    global _LOGFIRE_GLOBAL_MIN_LEVEL
+    return _LOGFIRE_GLOBAL_MIN_LEVEL
 
 
 def get_logfire_instance(tags: Optional[Dict[str, str]] = None):

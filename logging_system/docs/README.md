@@ -67,7 +67,8 @@ setup_logging(
             'version': '1.0.0'
         }
         # No incluir 'token' aquí - se usa LOGFIRE_TOKEN del entorno
-    }
+    },
+    logfire_min_level='WARNING'    # ✅ Nivel global para todos los loggers de Logfire
 )
 
 # ✅ Detección automática - AppLogger detecta que Logfire está habilitado
@@ -93,8 +94,14 @@ setup_logfire_global({
 })
 
 # Añadir Logfire a loggers específicos
-add_logfire_to_logger('trading_bot', {'component': 'trading'})
-add_logfire_to_logger('price_tracker', {'component': 'tracking'})
+add_logfire_to_logger('trading_bot', {
+    'tags': {'component': 'trading'},
+    'min_level': 'WARNING'
+})
+add_logfire_to_logger('price_tracker', {
+    'tags': {'component': 'tracking'},
+    'min_level': 'INFO'
+})
 ```
 
 ## Uso
@@ -198,6 +205,7 @@ logging_system/
 | `module_levels` | `Dict[str, str]` | `None` | Niveles específicos por módulo |
 | `enable_logfire` | `bool` | `False` | Habilitar Logfire globalmente |
 | `logfire_config` | `Dict[str, Any]` | `None` | Configuración específica de Logfire |
+| `logfire_min_level` | `str` | `'WARNING'` | Nivel mínimo global para todos los loggers de Logfire |
 
 ### Ejemplos de Configuración de Archivos
 
@@ -289,6 +297,46 @@ logfire_config = {
 
 ### Niveles Mínimos para Logfire
 
+#### Configuración Global (Recomendado)
+
+El nivel mínimo se puede configurar **globalmente** en `setup_logging()`:
+
+```python
+# Configuración global para todos los loggers de Logfire
+setup_logging(
+    enable_logfire=True,
+    logfire_config={'service_name': 'dexes-trading'},
+    logfire_min_level='WARNING'  # ✅ Nivel global para todos los loggers
+)
+
+# Todos los loggers usarán WARNING por defecto
+logger1 = AppLogger('trading')  # Usa WARNING automáticamente
+logger2 = AppLogger('price')    # Usa WARNING automáticamente
+```
+
+#### Configuración Específica por Logger
+
+También se puede sobrescribir el nivel para loggers específicos:
+
+```python
+# Configuración global
+setup_logging(
+    enable_logfire=True,
+    logfire_config={'service_name': 'dexes-trading'},
+    logfire_min_level='WARNING'  # Nivel global
+)
+
+# Logger específico con nivel diferente
+debug_logger = AppLogger('debug', enable_logfire=True, logfire_config={
+    'min_level': 'DEBUG'  # ✅ Sobrescribe el nivel global
+})
+
+# Logger que usa el nivel global
+normal_logger = AppLogger('normal')  # ✅ Usa WARNING automáticamente
+```
+
+#### Niveles Disponibles
+
 Por defecto, Logfire solo envía logs de nivel **WARNING** en adelante para reducir costos:
 
 - **`'WARNING'`** (por defecto): Solo WARNING, ERROR, CRITICAL
@@ -330,11 +378,11 @@ specific_logger = AppLogger('specific', enable_logfire=True,
 ### Configuración Centralizada
 - `setup_logging()` - Configura todo el sistema de logging
 - `setup_logfire_global()` - Configura Logfire globalmente
-- `add_logfire_to_logger()` - Añade Logfire a un logger específico
+- `add_logfire_to_logger()` - Añade Logfire a un logger específico usando logfire_config
 - `remove_logfire_from_logger()` - Remueve Logfire de un logger
 - `get_logfire_instance()` - Obtiene instancia de Logfire con tags
-- `is_logfire_available()` - Verifica si Logfire está disponible
 - `is_logfire_globally_enabled()` - Verifica si Logfire está habilitado globalmente
+- `get_logfire_global_min_level()` - Obtiene el nivel mínimo global configurado para Logfire
 
 ### AppLogger
 - `AppLogger()` - Logger con estadísticas y control de Logfire

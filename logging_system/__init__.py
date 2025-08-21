@@ -9,7 +9,8 @@ from .logger_config import (
     add_logfire_to_logger,
     remove_logfire_from_logger,
     get_logfire_instance,
-    is_logfire_globally_enabled
+    is_logfire_globally_enabled,
+    get_logfire_global_min_level
 )
 from .custom_logger import AppLogger
 
@@ -21,5 +22,6 @@ __all__ = [
     "remove_logfire_from_logger",
     "get_logfire_instance",
     "is_logfire_globally_enabled",
+    "get_logfire_global_min_level",
     "AppLogger"
 ]
