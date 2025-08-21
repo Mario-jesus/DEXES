@@ -4,15 +4,17 @@ Procesador de cierre de posiciones para Copy Trading.
 Maneja toda la lógica de cierre de posiciones abiertas.
 """
 import asyncio
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 from decimal import Decimal, getcontext
 
 from logging_system import AppLogger
 from ..models import OpenPosition, ClosePosition, SubClosePosition, ClosePositionStatus
-from ..queues.open_position_queue import OpenPositionQueue
-from ..queues.closed_position_queue import ClosedPositionQueue
-from ..queues.notification_queue import PositionNotificationQueue
 from ..services import PositionCalculationService
+
+if TYPE_CHECKING:
+    from ..queues.open_position_queue import OpenPositionQueue
+    from ..queues.closed_position_queue import ClosedPositionQueue
+    from ..queues.notification_queue import PositionNotificationQueue
 
 getcontext().prec = 26
 
@@ -24,9 +26,9 @@ class PositionClosureProcessor:
     """
 
     def __init__(self, 
-                    open_position_queue: OpenPositionQueue,
-                    closed_position_queue: ClosedPositionQueue,
-                    notification_queue: Optional[PositionNotificationQueue] = None):
+                    open_position_queue: 'OpenPositionQueue',
+                    closed_position_queue: 'ClosedPositionQueue',
+                    notification_queue: Optional['PositionNotificationQueue'] = None):
         self.open_position_queue = open_position_queue
         self.closed_position_queue = closed_position_queue
         self.notification_queue = notification_queue
@@ -71,6 +73,7 @@ class PositionClosureProcessor:
         Lógica exacta del módulo original evaluate_and_process_closure
         """
         if not close_position.trader_trade_data:
+            # Los datos de trader_wallet y token_address se obtienen del trader_trade_data
             self._logger.error(f"Error cerrando posición {close_position.id}: no se encontró el trader_trade_data")
             return False
 
@@ -83,11 +86,11 @@ class PositionClosureProcessor:
         )
 
         processed_positions = 0
-        while close_amount_sol_remaining > 0:
+        while close_amount_tokens_remaining > 0:
 
             open_position = await self.open_position_queue.get_first_position(
-                close_position.trader_trade_data.trader_wallet,
-                close_position.trader_trade_data.token_address
+                close_position.trader_wallet,
+                close_position.token_address
             )
 
             if not open_position:
@@ -108,7 +111,7 @@ class PositionClosureProcessor:
             )
 
             # Cierre completo de la posición abierta
-            if close_amount_sol_remaining > open_amount_sol_remaining:
+            if close_amount_tokens_remaining > open_amount_tokens_remaining:
                 self._logger.debug(
                     f"Cierre completo de open_position {open_position.id} con subcierre de "
                     f"{format(open_amount_sol_remaining, 'f')} SOL, {format(open_amount_tokens_remaining, 'f')} tokens"
@@ -150,7 +153,7 @@ class PositionClosureProcessor:
                 close_position.status = ClosePositionStatus.SUCCESS
                 open_position.add_close(close_position)
 
-            if close_amount_sol_remaining == open_amount_sol_remaining:
+            if close_amount_tokens_remaining == open_amount_tokens_remaining:
                 self._logger.debug(
                     f"Se cierra completamente open_position {open_position.id} (match exacto con el cierre solicitado)"
                 )
@@ -165,8 +168,8 @@ class PositionClosureProcessor:
             close_amount_sol_remaining -= open_amount_sol_remaining
             close_amount_tokens_remaining -= open_amount_tokens_remaining
 
-        if close_amount_sol_remaining > 0:
-            if close_position.amount_sol == close_amount_sol_remaining:
+        if close_amount_tokens_remaining > 0:
+            if close_position.amount_tokens == close_amount_tokens_remaining:
                 self._logger.error(
                     f"No se encontró la posición abierta para cerrar y no se pudo cerrar ninguna posición para close_position {close_position.id}."
                 )
@@ -207,8 +210,6 @@ class PositionClosureProcessor:
 
             was_removed = await self.open_position_queue.remove_position(position)
             if was_removed:
-                self._logger.debug(f"Posición {position.id} removida de cola abierta, agregando a cola cerrada")
-                await self.closed_position_queue.add_closed_position(position)
                 self._logger.info(f"Posición {position.id} cerrada exitosamente")
             else:
                 self._logger.warning(f"No se pudo remover posición {position.id} de la cola abierta")
@@ -218,7 +219,7 @@ class PositionClosureProcessor:
             self._logger.error(f"Error completando cierre de posición {position.id}: {e}")
             return False
 
-    async def _notify_position(self, position: Union[OpenPosition, ClosePosition, SubClosePosition]) -> None:
+    async def _notify_position(self, position: Union[ClosePosition, SubClosePosition]) -> None:
         """
         Envía posiciones a la cola de notificaciones de forma asíncrona.
         No bloquea el flujo principal del sistema.
@@ -227,7 +228,7 @@ class PositionClosureProcessor:
             position: Posición a notificar
         """
         try:
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
 
             if self.notification_queue:
                 await self.notification_queue.add_position(position)
@@ -235,7 +236,7 @@ class PositionClosureProcessor:
             else:
                 self._logger.warning(f"No hay cola de notificaciones disponible para posición {position_id}")
         except Exception as e:
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
             self._logger.error(f"Error enviando posición {position_id} a notificaciones: {e}")
 
     async def get_closure_statistics(self) -> dict:

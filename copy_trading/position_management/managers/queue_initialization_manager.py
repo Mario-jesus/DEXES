@@ -6,24 +6,31 @@ Separa la lógica de inicialización compleja de la gestión de colas.
 import asyncio
 from typing import Optional, TypedDict
 
-from pumpfun import PumpFunTradeAnalyzer
 from logging_system import AppLogger
 
 from ...config import CopyTradingConfig
 from ...callbacks.notification_callback import PositionNotificationCallback
-from ...data_management import TradingDataFetcher, TokenTraderManager
+from ...data_management import TradingDataFetcher, TokenTraderManager, SolanaTxAnalyzer, SolanaWebsocketManager
 from ...notifications import NotificationManager
-from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue, ClosedPositionQueue, PositionNotificationQueue
-from ..processors import PositionClosureProcessor
+from ...balance_management import BalanceManager
+from ..queues import (
+    PendingPositionQueue,
+    AnalysisPositionQueue,
+    OpenPositionQueue,
+    ClosedPositionQueue,
+    PositionNotificationQueue
+)
+from ..processors import PositionClosureProcessor, TradeAnalysisProcessor
 
 
 class QueueInitializationManagerComponents(TypedDict):
-    pending_queue: PendingPositionQueue
-    analysis_queue: AnalysisPositionQueue
-    open_queue: OpenPositionQueue
-    closed_queue: ClosedPositionQueue
-    notification_queue: PositionNotificationQueue
+    pending_queue: 'PendingPositionQueue'
+    analysis_queue: 'AnalysisPositionQueue'
+    open_queue: 'OpenPositionQueue'
+    closed_queue: 'ClosedPositionQueue'
+    notification_queue: 'PositionNotificationQueue'
     closure_processor: PositionClosureProcessor
+    analysis_processor: TradeAnalysisProcessor
     notification_callback: PositionNotificationCallback
 
 
@@ -35,15 +42,18 @@ class QueueInitializationManager:
 
     def __init__(self, 
                     config: CopyTradingConfig,
-                    trader_analyzer: PumpFunTradeAnalyzer,
+                    solana_analyzer: SolanaTxAnalyzer,
+                    solana_websocket: SolanaWebsocketManager,
                     trading_data_fetcher: TradingDataFetcher,
                     token_trader_manager: TokenTraderManager,
+                    balance_manager: BalanceManager,
                     notification_manager: Optional[NotificationManager] = None):
         self._logger = AppLogger(self.__class__.__name__)
-        self.config = config
-        self.trader_analyzer = trader_analyzer
+        self.solana_analyzer = solana_analyzer
+        self.solana_websocket = solana_websocket
         self.trading_data_fetcher = trading_data_fetcher
         self.token_trader_manager = token_trader_manager
+        self.balance_manager = balance_manager
         self.notification_manager = notification_manager
 
         # Parámetros de configuración
@@ -51,14 +61,15 @@ class QueueInitializationManager:
         self.max_size = config.max_queue_size
 
         # Referencias a las colas (se inicializarán)
-        self.pending_queue: Optional[PendingPositionQueue] = None
-        self.analysis_queue: Optional[AnalysisPositionQueue] = None
-        self.open_queue: Optional[OpenPositionQueue] = None
-        self.closed_queue: Optional[ClosedPositionQueue] = None
-        self.notification_queue: Optional[PositionNotificationQueue] = None
+        self.pending_queue: Optional['PendingPositionQueue'] = None
+        self.analysis_queue: Optional['AnalysisPositionQueue'] = None
+        self.open_queue: Optional['OpenPositionQueue'] = None
+        self.closed_queue: Optional['ClosedPositionQueue'] = None
+        self.notification_queue: Optional['PositionNotificationQueue'] = None
 
         # Referencias a managers y procesadores
         self.closure_processor: Optional[PositionClosureProcessor] = None
+        self.analysis_processor: Optional[TradeAnalysisProcessor] = None
         self.notification_callback: Optional[PositionNotificationCallback] = None
 
         # Estado de inicialización
@@ -187,11 +198,21 @@ class QueueInitializationManager:
         try:
             self._logger.debug("Inicializando cola de análisis")
             self.analysis_queue = AnalysisPositionQueue(
-                trader_analyzer=self.trader_analyzer,
+                solana_analyzer=self.solana_analyzer,
+                solana_websocket=self.solana_websocket,
                 token_trader_manager=self.token_trader_manager,
+                balance_manager=self.balance_manager,
+                analysis_processor=self.analysis_processor,
                 data_path=self.data_path,
                 max_size=self.max_size
             )
+
+            if self.open_queue:
+                self.analysis_queue.set_open_position_queue(self.open_queue)
+
+            if self.closed_queue:
+                self.analysis_queue.set_closed_position_queue(self.closed_queue)
+
             await self.analysis_queue.__aenter__()
             self._logger.debug("Cola de análisis inicializada")
             return True
@@ -210,6 +231,10 @@ class QueueInitializationManager:
                 position_notification_queue=self.notification_queue
             )
             await self.open_queue.__aenter__()
+
+            if self.analysis_queue:
+                self.analysis_queue.set_open_position_queue(self.open_queue)
+
             self._logger.debug("Cola de posiciones abiertas inicializada")
             return True
         except Exception as e:
@@ -220,11 +245,20 @@ class QueueInitializationManager:
         """Inicializa la cola de posiciones cerradas."""
         try:
             self._logger.debug("Inicializando cola de posiciones cerradas")
+            if not self.analysis_queue:
+                self._logger.error("AnalysisPositionQueue no inicializada antes de ClosedPositionQueue")
+                return False
+
             self.closed_queue = ClosedPositionQueue(
-                data_path=self.data_path,
+                analysis_queue=self.analysis_queue,
+                position_notification_queue=self.notification_queue,
                 max_size=self.max_size
             )
             await self.closed_queue.__aenter__()
+
+            if self.analysis_queue:
+                self.analysis_queue.set_closed_position_queue(self.closed_queue)
+
             self._logger.debug("Cola de posiciones cerradas inicializada")
             return True
         except Exception as e:
@@ -235,9 +269,9 @@ class QueueInitializationManager:
         """Inicializa los procesadores."""
         try:
             self._logger.debug("Inicializando procesadores")
-            
+
             # Verificar que las colas necesarias estén inicializadas
-            if not self.open_queue or not self.closed_queue:
+            if not self.open_queue or not self.closed_queue or not self.analysis_queue:
                 self._logger.error("Colas requeridas no están inicializadas para procesadores")
                 return False
 
@@ -247,6 +281,19 @@ class QueueInitializationManager:
                 closed_position_queue=self.closed_queue,
                 notification_queue=self.notification_queue
             )
+
+            self.analysis_processor = TradeAnalysisProcessor(
+                solana_analyzer=self.solana_analyzer,
+                token_trader_manager=self.token_trader_manager,
+                balance_manager=self.balance_manager
+            )
+
+            # Inyectar closure_processor a closed_queue ahora que existe
+            try:
+                self.closed_queue.set_closure_processor(self.closure_processor)
+                self.analysis_queue.set_analysis_processor(self.analysis_processor)
+            except Exception:
+                pass
 
             self._logger.debug("Procesadores inicializados")
             return True
@@ -290,7 +337,7 @@ class QueueInitializationManager:
             self._logger.error(error_msg)
             raise Exception(error_msg)
 
-        if not self.closure_processor or not self.notification_callback:
+        if not self.closure_processor or not self.notification_callback or not self.analysis_processor:
             error_msg = "Componentes requeridos no están inicializados"
             self._logger.error(error_msg)
             raise Exception(error_msg)
@@ -303,6 +350,7 @@ class QueueInitializationManager:
             'closed_queue': self.closed_queue,
             'notification_queue': self.notification_queue,
             'closure_processor': self.closure_processor,
+            'analysis_processor': self.analysis_processor,
             'notification_callback': self.notification_callback
         }
 

@@ -1,480 +1,316 @@
 # -*- coding: utf-8 -*-
 """
-Sistema de gestión de posiciones cerradas para Copy Trading.
-Utiliza una cola de posiciones por trader y por token para historial y análisis.
+Cola de posiciones cerradas con coordinación por token.
+Su objetivo ya no es almacenar historial, sino retener temporalmente posiciones cerradas
+hasta que no existan análisis pendientes de posiciones abiertas del mismo token,
+evitando bloquear cierres de otros tokens.
 """
-import aiofiles
-import json
 import asyncio
 from collections import defaultdict, deque
-from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
-from decimal import Decimal, getcontext
-from datetime import datetime, timedelta
+from typing import Dict, Optional, Any, List, TYPE_CHECKING
 
 from logging_system import AppLogger
-from ..models import OpenPosition, PositionStatus
+from ..models import ClosePosition, ClosePositionStatus, ProcessedAnalysisResult, Position
+from .notification_queue import PositionNotificationQueue
 
-getcontext().prec = 26
+if TYPE_CHECKING:
+    from .analysis_position_queue import AnalysisPositionQueue
+    from ..processors import PositionClosureProcessor
 
 
 class ClosedPositionQueue:
-    """Gestión de posiciones cerradas con persistencia, agrupadas por trader y luego por token para historial y análisis."""
+    """Puerta de salida de posiciones cerradas coordinada por token."""
 
-    def __init__(self, data_path: str = "copy_trading/data", max_size: Optional[int] = None):
-        self.data_path = Path(data_path)
-        self.max_size = max_size
+    def __init__(self, analysis_queue: 'AnalysisPositionQueue', position_notification_queue: Optional[PositionNotificationQueue] = None, closure_processor: Optional['PositionClosureProcessor'] = None, max_size: Optional[int] = None, process_interval: float = 2.0, max_retries: int = 3):
         self._logger = AppLogger(self.__class__.__name__)
+        self.analysis_queue = analysis_queue
+        self.position_notification_queue = position_notification_queue
+        self.max_size = max_size
+        self.process_interval = process_interval
+        self.closure_processor = closure_processor
+        self.max_retries = max_retries
 
-        # Cola principal: Diccionario anidado [trader_wallet -> token_address -> deque]
-        self.closed_positions_queue: Dict[str, Dict[str, deque[OpenPosition]]] = defaultdict(lambda: defaultdict(lambda: deque(maxlen=self.max_size)))
+        # Posiciones cerradas esperando liberación por token
+        self._pending_by_token: Dict[str, deque[ClosePosition]] = defaultdict(lambda: deque(maxlen=self.max_size))
 
+        # Métricas
+        self._stats = {
+            'added_count': 0,
+            'finalized_count': 0,
+            'failed_count': 0,
+            'retry_count': 0,
+        }
+
+        # Concurrencia
         self._lock = asyncio.Lock()
+        self._running = False
+        self._process_task: Optional[asyncio.Task] = None
 
-        self.data_path.mkdir(parents=True, exist_ok=True)
-        self.closed_file = self.data_path / "closed_positions.json"
-        self._initialize_files()
-
-        self._logger.debug(f"ClosedPositionQueue inicializado - Data path: {self.data_path}, Max size: {self.max_size}")
+        self._logger.debug("ClosedPositionQueue inicializada (modo coordinador, sin persistencia)")
 
     async def __aenter__(self):
-        self._logger.debug("Iniciando carga de posiciones cerradas desde disco")
-        await self.load_from_disk()
+        await self.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.stop()
+
+    async def start(self) -> None:
         try:
-            await self.stop()
-            self._logger.debug("ClosedPositionQueue cerrado con async context manager")
+            if self._running:
+                return
+            self._running = True
+            self._process_task = asyncio.create_task(self._process_loop())
+            self._logger.debug("ClosedPositionQueue worker iniciado")
         except Exception as e:
-            self._logger.error(f"Error cerrando ClosedPositionQueue: {e}")
-
-    async def add_closed_position(self, position: OpenPosition) -> bool:
-        """
-        Agrega una posición cerrada al historial.
-        
-        Args:
-            position: Posición que se ha cerrado completamente
-            
-        Returns:
-            True si se agregó exitosamente, False en caso contrario
-        """
-        try:
-            async with self._lock:
-                # Verificar que la posición esté realmente cerrada
-                if position.status != PositionStatus.CLOSED:
-                    self._logger.warning(f"Posición {position.id} no está cerrada (status: {position.status})")
-                    return False
-
-                trader_token_queue = self.closed_positions_queue[position.trader_wallet][position.token_address]
-
-                if any(p.id == position.id for p in trader_token_queue):
-                    self._logger.warning(f"Posición cerrada {position.id} ya existe en el historial para el trader {position.trader_wallet} y token {position.token_address}.")
-                    return False
-
-                trader_token_queue.append(position)
-
-                self._logger.info(f"Posición cerrada {position.id} agregada al historial")
-
-                await self._save_closed()
-                return True
-        except Exception as e:
-            self._logger.error(f"Error agregando posición cerrada {position.id}: {e}")
-            return False
-
-    async def get_closed_positions(self, trader_address: Optional[str] = None, token_address: Optional[str] = None, _lock_acquired: bool = False) -> List[OpenPosition]:
-        """
-        Obtiene posiciones cerradas con filtros opcionales.
-        
-        Args:
-            trader_address: Wallet del trader (opcional)
-            token_address: Dirección del token (opcional)
-            _lock_acquired: Indica si el lock ya está adquirido (para uso interno)
-            
-        Returns:
-            Lista de posiciones cerradas
-        """
-        try:
-            if not _lock_acquired:
-                async with self._lock:
-                    positions = await self._get_closed_positions_internal(trader_address, token_address)
-                    self._logger.debug(f"Obtenidas {len(positions)} posiciones cerradas")
-                    return positions
-            else:
-                positions = await self._get_closed_positions_internal(trader_address, token_address)
-                self._logger.debug(f"Obtenidas {len(positions)} posiciones cerradas (lock ya adquirido)")
-                return positions
-
-        except Exception as e:
-            self._logger.error(f"Error en get_closed_positions: {e}")
-            raise
-
-    async def _get_closed_positions_internal(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> List[OpenPosition]:
-        """Método interno que asume que el lock ya está adquirido."""
-        try:
-            if trader_address and token_address:
-                return list(self.closed_positions_queue.get(trader_address, {}).get(token_address, deque()))
-
-            if trader_address:
-                trader_positions = []
-                trader_tokens = self.closed_positions_queue.get(trader_address, {})
-                for token_addr, queue in trader_tokens.items():
-                    trader_positions.extend(queue)
-                return trader_positions
-
-            # Caso 3: todas las posiciones cerradas
-            all_positions = []
-            for trader_wallet, tokens in self.closed_positions_queue.items():
-                for token_addr, queue in tokens.items():
-                    all_positions.extend(queue)
-
-            return all_positions
-        except Exception as e:
-            self._logger.error(f"Error en _get_closed_positions_internal: {e}")
-            return []
-
-    async def get_closed_positions_by_date_range(self, start_date: datetime, end_date: datetime, trader_address: Optional[str] = None) -> List[OpenPosition]:
-        """
-        Obtiene posiciones cerradas dentro de un rango de fechas.
-        
-        Args:
-            start_date: Fecha de inicio del rango
-            end_date: Fecha de fin del rango
-            trader_address: Wallet del trader (opcional)
-            
-        Returns:
-            Lista de posiciones cerradas en el rango de fechas
-        """
-        try:
-            async with self._lock:
-                all_positions = await self.get_closed_positions(trader_address, _lock_acquired=True)
-
-                filtered_positions = []
-                for position in all_positions:
-                    # Buscar la fecha de cierre en el historial
-                    closed_date = None
-                    for close_item in position.close_history:
-                        if hasattr(close_item, 'created_at'):
-                            closed_date = close_item.created_at
-                            break
-
-                    # Si no hay fecha de cierre, usar la fecha de creación
-                    if not closed_date:
-                        closed_date = position.created_at
-
-                    if start_date <= closed_date <= end_date:
-                        filtered_positions.append(position)
-
-                self._logger.debug(f"Filtradas {len(filtered_positions)} posiciones cerradas en rango de fechas")
-                return filtered_positions
-        except Exception as e:
-            self._logger.error(f"Error obteniendo posiciones por rango de fechas: {e}")
-            return []
-
-    async def get_position_by_id(self, position_id: str) -> Optional[OpenPosition]:
-        """
-        Busca una posición cerrada por ID.
-        
-        Args:
-            position_id: ID de la posición a buscar
-            
-        Returns:
-            La posición encontrada o None
-        """
-        try:
-            async with self._lock:
-                position, _, _ = await self._find_position_in_queue(position_id)
-                if position:
-                    self._logger.debug(f"Posición cerrada encontrada por ID: {position_id}")
-                else:
-                    self._logger.debug(f"Posición cerrada no encontrada por ID: {position_id}")
-                return position
-        except Exception as e:
-            self._logger.error(f"Error buscando posición cerrada por ID {position_id}: {e}")
-            return None
-
-    async def _find_position_in_queue(self, position_id: str) -> Tuple[Optional[OpenPosition], Optional[str], Optional[str]]:
-        """Helper para encontrar una posición y sus claves asociadas (trader, token)."""
-        try:
-            for trader_wallet, tokens in self.closed_positions_queue.items():
-                for token_address, queue in tokens.items():
-                    for position in queue:
-                        if position.id == position_id:
-                            return position, trader_wallet, token_address
-            return None, None, None
-        except Exception as e:
-            self._logger.error(f"Error buscando posición {position_id} en cola cerrada: {e}")
-            return None, None, None
-
-    async def get_queue_size(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> int:
-        """
-        Obtiene el tamaño de la cola de posiciones cerradas.
-        
-        Args:
-            trader_address: Wallet del trader (opcional)
-            token_address: Dirección del token (opcional)
-            
-        Returns:
-            Número de posiciones cerradas en la cola
-        """
-        try:
-            async with self._lock:
-                if trader_address and token_address:
-                    size = len(self.closed_positions_queue.get(trader_address, {}).get(token_address, deque()))
-                    self._logger.debug(f"Tamaño de cola cerrada para trader {trader_address} y token {token_address}: {size}")
-                    return size
-
-                elif trader_address:
-                    total_size = 0
-                    for queue in self.closed_positions_queue.get(trader_address, {}).values():
-                        total_size += len(queue)
-                    self._logger.debug(f"Tamaño total de cola cerrada para trader {trader_address}: {total_size}")
-                    return total_size
-
-                else:
-                    total_size = 0
-                    for tokens in self.closed_positions_queue.values():
-                        for queue in tokens.values():
-                            total_size += len(queue)
-                    self._logger.debug(f"Tamaño total de cola cerrada general: {total_size}")
-                    return total_size
-        except Exception as e:
-            self._logger.error(f"Error obteniendo tamaño de cola cerrada: {e}")
-            return 0
-
-    async def get_pnl_statistics(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Obtiene estadísticas de PnL de posiciones cerradas.
-        
-        Args:
-            trader_address: Wallet del trader (opcional)
-            token_address: Dirección del token (opcional)
-            
-        Returns:
-            Diccionario con estadísticas de PnL
-        """
-        try:
-            async with self._lock:
-                positions = await self.get_closed_positions(trader_address, token_address, _lock_acquired=True)
-
-                total_positions = len(positions)
-                profitable_positions = 0
-                total_pnl_sol = Decimal('0')
-                total_pnl_usd = Decimal('0')
-                total_volume_sol = Decimal('0')
-                total_volume_usd = Decimal('0')
-
-                for position in positions:
-                    # Calcular volumen
-                    volume_sol = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
-                    total_volume_sol += volume_sol
-
-                    # Calcular PnL (asumiendo que está en metadata o se puede calcular)
-                    pnl_sol = Decimal('0')
-                    pnl_usd = Decimal('0')
-
-                    # Intentar obtener PnL de metadata
-                    if 'pnl_sol' in position.metadata:
-                        pnl_sol = Decimal(str(position.metadata['pnl_sol']))
-                    if 'pnl_usd' in position.metadata:
-                        pnl_usd = Decimal(str(position.metadata['pnl_usd']))
-
-                    total_pnl_sol += pnl_sol
-                    total_pnl_usd += pnl_usd
-
-                    if pnl_sol > 0:
-                        profitable_positions += 1
-
-                win_rate = (profitable_positions / total_positions * 100) if total_positions > 0 else 0
-
-                stats = {
-                    'total_positions': total_positions,
-                    'profitable_positions': profitable_positions,
-                    'win_rate_percent': float(win_rate),
-                    'total_pnl_sol': str(total_pnl_sol),
-                    'total_pnl_usd': str(total_pnl_usd),
-                    'total_volume_sol': str(total_volume_sol),
-                    'total_volume_usd': str(total_volume_usd),
-                    'average_pnl_sol': str(total_pnl_sol / total_positions) if total_positions > 0 else '0',
-                    'average_pnl_usd': str(total_pnl_usd / total_positions) if total_positions > 0 else '0'
-                }
-
-                self._logger.info(f"Estadísticas PnL calculadas: {total_positions} posiciones, {profitable_positions} rentables")
-                return stats
-        except Exception as e:
-            self._logger.error(f"Error calculando estadísticas PnL: {e}")
-            return {}
-
-    async def get_trading_performance_by_period(self, period_days: int = 30, trader_address: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Obtiene rendimiento de trading por período.
-        
-        Args:
-            period_days: Número de días para el período
-            trader_address: Wallet del trader (opcional)
-            
-        Returns:
-            Diccionario con estadísticas del período
-        """
-        try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=period_days)
-
-            positions = await self.get_closed_positions_by_date_range(start_date, end_date, trader_address)
-
-            if not positions:
-                self._logger.debug(f"No hay posiciones cerradas en el período de {period_days} días")
-                return {
-                    'period_days': period_days,
-                    'total_positions': 0,
-                    'total_pnl_sol': '0',
-                    'total_pnl_usd': '0',
-                    'win_rate_percent': 0.0
-                }
-
-            # Calcular estadísticas del período
-            total_positions = len(positions)
-            profitable_positions = 0
-            total_pnl_sol = Decimal('0')
-            total_pnl_usd = Decimal('0')
-
-            for position in positions:
-                pnl_sol = Decimal('0')
-                pnl_usd = Decimal('0')
-
-                if 'pnl_sol' in position.metadata:
-                    pnl_sol = Decimal(str(position.metadata['pnl_sol']))
-                if 'pnl_usd' in position.metadata:
-                    pnl_usd = Decimal(str(position.metadata['pnl_usd']))
-
-                total_pnl_sol += pnl_sol
-                total_pnl_usd += pnl_usd
-
-                if pnl_sol > 0:
-                    profitable_positions += 1
-
-            win_rate = (profitable_positions / total_positions * 100) if total_positions > 0 else 0
-
-            stats = {
-                'period_days': period_days,
-                'total_positions': total_positions,
-                'profitable_positions': profitable_positions,
-                'win_rate_percent': float(win_rate),
-                'total_pnl_sol': str(total_pnl_sol),
-                'total_pnl_usd': str(total_pnl_usd),
-                'average_pnl_sol': str(total_pnl_sol / total_positions) if total_positions > 0 else '0',
-                'average_pnl_usd': str(total_pnl_usd / total_positions) if total_positions > 0 else '0'
-            }
-
-            self._logger.info(f"Rendimiento por período calculado: {period_days} días, {total_positions} posiciones")
-            return stats
-        except Exception as e:
-            self._logger.error(f"Error calculando rendimiento por período: {e}")
-            return {}
-
-    async def get_stats(self) -> Dict[str, Any]:
-        """
-        Obtiene estadísticas generales de posiciones cerradas.
-        
-        Returns:
-            Diccionario con estadísticas generales
-        """
-        try:
-            async with self._lock:
-                all_positions = await self.get_closed_positions(_lock_acquired=True)
-                
-                total_closed_value = sum(float(p.amount_sol) for p in all_positions if p.amount_sol)
-                unique_traders = len(self.closed_positions_queue)
-                unique_tokens = len(set(pos.token_address for pos in all_positions))
-
-                stats = {
-                    'closed_count': len(all_positions),
-                    'total_closed_value_sol': total_closed_value,
-                    'unique_traders': unique_traders,
-                    'unique_tokens': unique_tokens,
-                }
-
-                self._logger.info(f"Estadísticas generales: {len(all_positions)} posiciones cerradas")
-                return stats
-
-        except Exception as e:
-            self._logger.error(f"Error en get_stats: {e}")
-            raise
-
-    async def load_from_disk(self):
-        """Carga posiciones cerradas desde el disco."""
-        try:
-            async with self._lock:
-                if not self.closed_file.exists():
-                    self._logger.debug("Archivo de posiciones cerradas no existe, iniciando con cola vacía")
-                    return
-
-                self._logger.debug(f"Cargando posiciones cerradas desde {self.closed_file}")
-                async with aiofiles.open(self.closed_file, 'r') as f:
-                    content = await f.read()
-                    if content.strip():
-                        data: Dict[str, Dict[str, List[Dict]]] = json.loads(content)
-                        self.closed_positions_queue.clear()
-                        total_positions = 0
-                        for trader_wallet, tokens_data in data.items():
-                            for token_address, positions_data in tokens_data.items():
-                                trader_token_deque = deque(maxlen=self.max_size)
-                                for pos_data in positions_data:
-                                    trader_token_deque.append(OpenPosition.from_dict(pos_data))
-                                    total_positions += 1
-                                self.closed_positions_queue[trader_wallet][token_address] = trader_token_deque
-
-                        self._logger.debug(f"Cargadas {total_positions} posiciones cerradas desde disco")
-                    else:
-                        self._logger.debug("Archivo de posiciones cerradas está vacío")
-        except (json.JSONDecodeError, Exception) as e:
-            self._logger.warning(f"Error cargando closed_positions.json: {e}")
-
-    async def save_state(self):
-        """Guarda el estado de posiciones cerradas."""
-        try:
-            self._logger.debug("Guardando estado de posiciones cerradas")
-            await self._save_closed()
-        except Exception as e:
-            self._logger.error(f"Error guardando estado de posiciones cerradas: {e}")
-
-    async def _save_closed(self):
-        """Guarda posiciones cerradas al disco de forma asíncrona."""
-        try:
-            data_to_save = defaultdict(dict)
-            total_positions = 0
-            for trader_wallet, tokens in self.closed_positions_queue.items():
-                for token_address, queue in tokens.items():
-                    if queue:  # Solo guardar si la cola no está vacía
-                        posiciones_dict = [p.to_dict() for p in queue]
-                        data_to_save[trader_wallet][token_address] = posiciones_dict
-                        total_positions += len(queue)
-
-            async with aiofiles.open(self.closed_file, 'w') as f:
-                await f.write(json.dumps(data_to_save, indent=2))
-
-            self._logger.debug(f"Posiciones cerradas guardadas: {total_positions} posiciones")
-        except Exception as e:
-            self._logger.error(f"Error guardando posiciones cerradas en {self.closed_file}: {e}")
-            raise
-
-    def _initialize_files(self):
-        """Inicializa el archivo de posiciones cerradas si no existe."""
-        try:
-            if not self.closed_file.exists() or self.closed_file.stat().st_size == 0:
-                with open(self.closed_file, 'w') as f:
-                    f.write('{}')  # Inicializar como un objeto JSON vacío
-                self._logger.debug(f"Archivo {self.closed_file.name} inicializado")
-        except Exception as e:
-            self._logger.error(f"Error inicializando {self.closed_file.name}: {e}")
+            self._logger.error(f"Error iniciando ClosedPositionQueue: {e}")
 
     async def stop(self) -> None:
-        """Detiene el worker y guarda el estado final."""
         try:
+            if not self._running:
+                return
             self._logger.info("Deteniendo ClosedPositionQueue")
-            # Guardar estado final
-            await self.save_state()
-            self._logger.debug("ClosedPositionQueue detenido exitosamente")
+            self._running = False
+            if self._process_task and not self._process_task.done():
+                self._process_task.cancel()
+                try:
+                    await self._process_task
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    self._process_task = None
+            self._logger.debug("ClosedPositionQueue detenida exitosamente")
         except Exception as e:
-            self._logger.error(f"Error durante la detención: {e}")
-            raise
+            self._logger.error(f"Error durante la detención de ClosedPositionQueue: {e}")
+
+    def set_closure_processor(self, closure_processor: 'PositionClosureProcessor') -> None:
+        self.closure_processor = closure_processor
+
+    async def add_closed_position(self, position: ClosePosition) -> bool:
+        """
+        Encola una ClosePosition y la deja en espera hasta que:
+        - no haya análisis pendientes de OPENs del mismo token, y
+        - la propia ClosePosition esté analizada.
+        """
+        try:
+            async with self._lock:
+                token = position.token_address if hasattr(position, 'token_address') else (position.trader_trade_data.token_address if position.trader_trade_data else None)
+                if not token:
+                    self._logger.error(f"ClosePosition {position.id} no tiene token_address")
+                    return False
+                queue = self._pending_by_token[token]
+
+                # Evitar duplicados por id dentro del mismo token
+                if any(p.id == position.id for p in queue):
+                    self._logger.debug(f"Posición {position.id} ya estaba en espera para token {token}")
+                    return False
+
+                queue.append(position)
+                self._stats['added_count'] += 1
+                self._logger.info(f"ClosePosition {position.id} encolada para token {token}. En espera de condiciones de ejecución")
+            return True
+        except Exception as e:
+            self._logger.error(f"Error en add_closed_position({position.id}): {e}")
+            return False
+
+    async def on_analysis_finished(self, position: ClosePosition, details: ProcessedAnalysisResult) -> None:
+        try:
+            if isinstance(position, ClosePosition):
+                position.status = ClosePositionStatus.SUCCESS if details.success else ClosePositionStatus.FAILED
+            else:
+                raise ValueError(f"Position {position.id} is not a ClosePosition")
+
+            if not details.success:
+                error_kind = details.error_kind
+                if error_kind == "slippage":
+                    position.message_error = "Transaction failed due to slippage. The price moved unfavorably before the transaction could be completed."
+                elif error_kind == "insufficient_tokens":
+                    position.message_error = "insufficient tokens available to complete the operation."
+                elif error_kind == "insufficient_lamports":
+                    position.message_error = "insufficient SOL (lamports) to pay for the transaction or fees."
+                elif error_kind == "transaction_not_found":
+                    position.message_error = "The transaction was not found on the Solana blockchain"
+                else:
+                    position.message_error = details.error_message or "Unknown error occurred during transaction analysis."
+
+                if await self._remove_position_from_queue(position.id, position.token_address):
+                    self._logger.info(f"Position {position.id} removed from closed positions queue")
+                else:
+                    self._logger.warning(f"Position {position.id} not removed from closed positions queue")
+
+                await self._notify_position(position)
+            else:
+                position.is_analyzed = True
+
+            self._logger.info(f"Position {position.id} analysis finished with status {position.status}")
+
+        except Exception as e:
+            self._logger.error(f"Error en on_analysis_finished({position.id}): {e}")
+
+    async def _process_loop(self) -> None:
+        self._logger.debug("ClosedPositionQueue loop iniciado")
+        while self._running:
+            try:
+                await self._process_pending()
+                await asyncio.sleep(self.process_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(f"Error en loop de ClosedPositionQueue: {e}")
+                await asyncio.sleep(self.process_interval)
+
+    async def _remove_position_from_queue(self, position_id: str, token: str) -> bool:
+        """
+        Remueve una posición de la cola por token de forma segura.
+        
+        Args:
+            position_id: ID de la posición a remover
+            token: Token del cual remover la posición
+            
+        Returns:
+            True si se removió exitosamente, False en caso contrario
+        """
+        try:
+            async with self._lock:
+                queue = self._pending_by_token[token]
+                if len(queue) > 0 and queue[0].id == position_id:
+                    # Si es la cabeza de la cola, usar popleft para eficiencia
+                    queue.popleft()
+                    return True
+                else:
+                    # Buscar y remover por ID en caso de desincronización
+                    for item in list(queue):
+                        if item.id == position_id:
+                            queue.remove(item)
+                            return True
+                return False
+        except Exception as e:
+            self._logger.error(f"Error removiendo posición {position_id} de token {token}: {e}")
+            return False
+
+    async def _process_pending(self) -> None:
+        # Revisar por token si aún hay análisis de OPENs; si no, liberar todas las posiciones de ese token
+        tokens_snapshot: List[str] = []
+        async with self._lock:
+            tokens_snapshot = [t for t, q in self._pending_by_token.items() if len(q) > 0]
+
+        for token in tokens_snapshot:
+            try:
+                has_open_analysis = await self._has_pending_open_analysis_for_token(token)
+            except Exception as e:
+                self._logger.error(f"Error consultando análisis pendientes para token {token}: {e}")
+                has_open_analysis = True
+
+            if has_open_analysis:
+                # Aún no liberar este token
+                continue
+
+            # Procesar solo la cabeza de la cola por token (FIFO)
+            pos: Optional[ClosePosition] = None
+            async with self._lock:
+                queue = self._pending_by_token[token]
+                if len(queue) > 0:
+                    pos = queue[0]
+
+            if not pos:
+                continue
+
+            # Requerir que la ClosePosition esté analizada
+            is_analyzed = False
+            try:
+                is_analyzed = bool(pos.is_analyzed) or bool(pos.get_is_analyzed())
+            except Exception:
+                is_analyzed = False
+
+            if not is_analyzed:
+                # No bloquear otros tokens; simplemente saltar este token por ahora
+                continue
+
+            # Ejecutar cierre usando el procesador
+            if not self.closure_processor:
+                self._logger.error("ClosureProcessor no configurado en ClosedPositionQueue")
+                continue
+
+            try:
+                success = await self.closure_processor.process_position_closure(pos)
+            except Exception as e:
+                self._logger.error(f"Error ejecutando cierre para {pos.id}: {e}")
+                success = False
+
+            if success:
+                self._logger.info(f"ClosePosition {pos.id} ejecutada para token {token}")
+            else:
+                self._logger.warning(f"No se pudo ejecutar ClosePosition {pos.id}")
+
+            await self._remove_position_from_queue(pos.id, token)
+            self._stats['finalized_count'] += 1
+
+    async def _has_pending_open_analysis_for_token(self, token_address: str) -> bool:
+        """Consulta directa al AnalysisPositionQueue con fallback estándar."""
+        try:
+            # Método preferido
+            return await self.analysis_queue.has_pending_open_analysis_for_token(token_address)
+        except AttributeError:
+            # Fallback: inspeccionar la cola de análisis
+            positions: List[Position] = await self.analysis_queue.get_analysis_positions()
+            for pos in positions:
+                try:
+                    if pos.token_address == token_address and not pos.is_analyzed:
+                        return True
+                except Exception:
+                    continue
+            return False
+        except Exception as e:
+            self._logger.error(f"Error en _has_pending_open_analysis_for_token({token_address}): {e}")
+            return True
+
+    async def _notify_position(self, position: ClosePosition) -> None:
+        try:
+            position_id = position.id
+
+            if self.position_notification_queue:
+                await self.position_notification_queue.add_position(position)
+            else:
+                self._logger.warning(f"No hay cola de notificaciones disponible para posición {position_id}")
+
+        except Exception as e:
+            position_id = position.id
+            self._logger.error(f"Error enviando posición {position_id} a notificaciones: {e}", exc_info=True)
+
+    async def get_queue_size(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> int:
+        try:
+            async with self._lock:
+                if token_address:
+                    return len(self._pending_by_token.get(token_address, deque()))
+                if trader_address:
+                    total = 0
+                    for queue in self._pending_by_token.values():
+                        total += sum(1 for p in queue if p.trader_wallet == trader_address)
+                    return total
+                return sum(len(q) for q in self._pending_by_token.values())
+        except Exception as e:
+            self._logger.error(f"Error obteniendo tamaño de cola: {e}")
+            return 0
+
+    async def get_stats(self) -> Dict[str, Any]:
+        try:
+            async with self._lock:
+                pending_total = sum(len(q) for q in self._pending_by_token.values())
+                pending_tokens = {token: len(q) for token, q in self._pending_by_token.items() if len(q) > 0}
+                stats = {
+                    'closed_count': self._stats['finalized_count'],
+                    'pending_total': pending_total,
+                    'pending_tokens': pending_tokens,
+                    'added_count': self._stats['added_count'],
+                    'failed_count': self._stats['failed_count'],
+                    'retry_count': self._stats['retry_count'],
+                    'max_retries': self.max_retries
+                }
+                return stats
+        except Exception as e:
+            self._logger.error(f"Error en get_stats: {e}")
+            return {}
+
+    async def save_state(self):
+        # Sin persistencia; método mantenido por compatibilidad
+        return

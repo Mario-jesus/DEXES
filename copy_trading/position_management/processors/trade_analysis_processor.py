@@ -4,13 +4,14 @@ Procesador de análisis de trades para Copy Trading.
 Maneja toda la lógica de análisis de transacciones y extracción de datos.
 """
 import asyncio
-from typing import List, Dict, Any
-from decimal import Decimal, InvalidOperation, DivisionByZero
+from decimal import Decimal
+from typing import Union, cast, Tuple, Optional
 
-from pumpfun import PumpFunTradeAnalyzer, TradeAnalysisResult
 from logging_system import AppLogger
-from ...data_management import TokenTraderManager
-from ..models import Position
+from ...balance_management import BalanceManager
+from ...data_management import TokenTraderManager, SolanaTxAnalyzer
+from ...data_management.models import TransactionAnalysis
+from ..models import Position, OpenPosition, ClosePosition
 
 
 class TradeAnalysisProcessor:
@@ -20,91 +21,79 @@ class TradeAnalysisProcessor:
     """
 
     def __init__(self, 
-                    trader_analyzer: PumpFunTradeAnalyzer,
-                    token_trader_manager: TokenTraderManager):
-        self.trade_analyzer = trader_analyzer
-        self.token_trader_manager = token_trader_manager
+                    solana_analyzer: SolanaTxAnalyzer,
+                    token_trader_manager: TokenTraderManager,
+                    balance_manager: BalanceManager):
         self._logger = AppLogger(self.__class__.__name__)
         self._lock = asyncio.Lock()
-
+        self.solana_analyzer = solana_analyzer
+        self.token_trader_manager = token_trader_manager
+        self.balance_manager = balance_manager
         self._logger.debug("TradeAnalysisProcessor inicializado")
 
-    async def analyze_positions(self, positions: List[Position]) -> bool:
+    async def analyze_position(self, position: Position) -> Tuple[bool, Optional[TransactionAnalysis]]:
         """
-        Analiza una lista de posiciones.
-        
+        Analiza una posición de trading y retorna el resultado del análisis.
+
         Args:
-            positions: Lista de posiciones a analizar
-            
+            position (Position): La posición a analizar.
+
         Returns:
-            True si el análisis fue exitoso, False en caso contrario
+            Tuple[bool, Optional[TransactionAnalysis]]: 
+                - Un booleano que indica si el análisis fue exitoso (True) o fallido (False).
+                - Un objeto TransactionAnalysis con los detalles del análisis si fue exitoso, o None si no se pudo analizar.
         """
-        if not positions:
+        if not position:
             self._logger.debug("No hay posiciones para analizar")
-            return True
+            return False, None
 
         try:
-            self._logger.info(f"Iniciando análisis de {len(positions)} posiciones")
+            self._logger.debug(f"Iniciando análisis de posición {position.id}")
 
             async with self._lock:
-                result = await self._analyze_positions_internal(positions)
+                result = await self._analyze_position_internal(position)
 
                 if result:
-                    self._logger.info(f"Análisis completado exitosamente para {len(positions)} posiciones")
+                    self._logger.debug(f"Análisis completado exitosamente para posición {position.id}")
                 else:
                     self._logger.error("Error en el análisis de posiciones")
 
                 return result
         except Exception as e:
             self._logger.error(f"Error analizando posiciones: {e}", exc_info=True)
-            return False
+            return False, None
 
-    async def _analyze_positions_internal(self, positions: List[Position]) -> bool:
+    async def _analyze_position_internal(self, position: Position) -> Tuple[bool, Optional[TransactionAnalysis]]:
         """
         Lógica interna de análisis de posiciones.
         """
         try:
             # Obtener firmas de transacciones
-            signatures = [position.execution_signature for position in positions if position.execution_signature]
-            if not signatures:
+            signature = position.execution_signature
+            if not signature:
                 self._logger.warning("No se encontraron firmas de transacción válidas")
-                return True
+                return False, None
 
-            self._logger.debug(f"Analizando {len(signatures)} transacciones")
+            self._logger.debug(f"Analizando transacción {signature}")
 
             # Analizar transacciones
-            analysis_results = await self.trade_analyzer.analyze_multiple_transactions(signatures)
+            analysis_result = await self.solana_analyzer.analyze_transaction_by_signature(signature)
 
-            if not analysis_results:
-                self._logger.warning(f"No se encontró análisis para las transacciones")
-                return False
+            if not analysis_result.success:
+                self._logger.warning(f"No se encontró análisis para la transacción {signature}")
+                return False, analysis_result
 
-            self._logger.debug(f"Obtenidos {len(analysis_results)} resultados de análisis")
+            # Aplicar análisis a la posición
+            await self._apply_analysis_to_position(cast(Union[OpenPosition, ClosePosition], position), analysis_result)
 
-            # Procesar resultados para cada posición
-            processed_count = 0
-            for position in positions:
-                if not position.execution_signature:
-                    continue
-
-                analysis_result = analysis_results.get(position.execution_signature)
-                if not analysis_result:
-                    self._logger.warning(f"No se encontró análisis para la posición {position.execution_signature}")
-                    continue
-
-                # Aplicar análisis a la posición
-                await self._apply_analysis_to_position(position, analysis_result)
-                processed_count += 1
-
-            self._logger.info(f"Procesadas {processed_count} posiciones exitosamente")
-            return True
+            self._logger.info(f"Análisis completado exitosamente para la posición {position.id}")
+            return True, analysis_result
 
         except Exception as e:
-            signatures_str = ", ".join(s for s in signatures if s)
-            self._logger.error(f"Error analizando transacciones {signatures_str}: {e}")
-            return False
+            self._logger.error(f"Error analizando posición {position.id}: {e}")
+            return False, None
 
-    async def _apply_analysis_to_position(self, position: Position, analysis_result: TradeAnalysisResult) -> None:
+    async def _apply_analysis_to_position(self, position: Union[OpenPosition, ClosePosition], analysis_result: TransactionAnalysis) -> None:
         """
         Aplica el resultado del análisis a una posición específica.
         
@@ -116,21 +105,14 @@ class TradeAnalysisProcessor:
             self._logger.debug(f"Aplicando análisis a posición {position.id}")
 
             # Actualizar datos básicos de la posición
-            position.amount_tokens = format(analysis_result.token_amount, "f")
-            position.fee_sol = format(analysis_result.fee_in_sol, "f")
-            position.total_cost_sol = format(analysis_result.sol_amount, "f")
+            position.amount_tokens = format(abs(Decimal(analysis_result.token_ui_delta or "0.0")), "f")
+            position.amount_sol = format(abs(Decimal(analysis_result.bonding_curve_sol_delta or "0.0")), "f")
+            position.fee_sol = analysis_result.fee_sol or "0.0"
+            position.total_cost_sol = analysis_result.total_cost_sol or "0.0"
+            position.execution_price = analysis_result.price_sol_per_token or "0.0"
 
-            # Calcular precio de ejecución con validación para evitar división por cero
-            try:
-                amount_tokens_dec = Decimal(position.amount_tokens)
-                amount_sol_dec = Decimal(position.amount_sol)
-
-                if amount_tokens_dec > 0:
-                    position.execution_price = format(amount_sol_dec / amount_tokens_dec, "f")
-                else:
-                    self._logger.warning(f"Posición {position.id}: amount_tokens es 0, no se puede calcular precio de ejecución")
-            except (InvalidOperation, ValueError, DivisionByZero) as e:
-                self._logger.warning(f"Error calculando precio de ejecución para posición {position.id}: {e}")
+            # Agregar resultado del análisis a la posición
+            position.add_metadata("analysis_result", analysis_result)
 
             # Obtener información fresca del token
             token_info = None
@@ -147,17 +129,6 @@ class TradeAnalysisProcessor:
                         self._logger.debug(f"Token info genérico detectado para {position.token_address}, forzando refresh")
                         token_info = await self.token_trader_manager.get_token_info(position.token_address, force_refresh=True)
 
-            # Actualizar metadata con información del análisis
-            position.add_metadata('cost_breakdown', {k: format(Decimal(str(v)), "f") for k, v in analysis_result.total_cost_breakdown.items()})
-            position.add_metadata('compute_units_consumed', analysis_result.compute_units_consumed)
-            position.add_metadata('trade_type', analysis_result.trade_type)
-            position.add_metadata('operation_description', analysis_result.operation_description)
-            position.add_metadata('token_program', analysis_result.token_program)
-            position.add_metadata('slot', analysis_result.slot)
-            position.add_metadata('block_time', analysis_result.block_time)
-            position.add_metadata('recent_blockhash', analysis_result.recent_blockhash)
-            position.add_metadata('token_balances_summary', self._extract_token_balances_summary(analysis_result))
-
             # Agregar información fresca del token
             if token_info:
                 has_valid_name = token_info.name and token_info.name.strip() not in ('Unknown', '')
@@ -170,68 +141,16 @@ class TradeAnalysisProcessor:
             else:
                 self._logger.debug(f"No se pudo obtener token_info para {position.token_address}")
 
-            # Marcar como analizada
-            position.is_analyzed = True
-            self._logger.debug(f"Posición {position.id} marcada como analizada")
+            # Actualizar balances locales por apertura o cierre de posición
+            try:
+                if self.balance_manager and isinstance(position, OpenPosition) and analysis_result.success:
+                    await self.balance_manager.on_position_opened(analysis_result.signer_sol_delta or "0.0")
+                    await self.balance_manager.on_token_received(position.token_address, analysis_result.token_ui_delta or "0.0")
+                elif self.balance_manager and isinstance(position, ClosePosition) and analysis_result.success:
+                    await self.balance_manager.on_position_closed(analysis_result.signer_sol_delta or "0.0")
+                    await self.balance_manager.on_token_spent(position.token_address, analysis_result.token_ui_delta or "0.0")
+            except Exception as e:
+                self._logger.error(f"Error actualizando balances locales: {e}")
 
         except Exception as e:
             self._logger.error(f"Error aplicando análisis a posición {position.id}: {e}")
-
-    def _extract_token_balances_summary(self, analysis_result: TradeAnalysisResult) -> Dict[str, Any]:
-        """
-        Extrae un resumen de los balances de tokens del resultado del análisis.
-        
-        Args:
-            analysis_result: Resultado del análisis de la transacción
-            
-        Returns:
-            Diccionario con el resumen de balances
-        """
-        try:
-            summary = {
-                'trader_pre': {},
-                'trader_post': {},
-                'pool_pre': {},
-                'pool_post': {}
-            }
-
-            # Extraer balance del trader antes de la transacción
-            for balance in analysis_result.token_balances_pre:
-                if str(balance.owner) == analysis_result.trader:
-                    summary['trader_pre'] = {
-                        'amount': format(Decimal(str(balance.ui_amount)), "f"),
-                        'mint': str(balance.mint)
-                    }
-                    break
-
-            # Extraer balance del trader después de la transacción
-            for balance in analysis_result.token_balances_post:
-                if str(balance.owner) == analysis_result.trader:
-                    summary['trader_post'] = {
-                        'amount': format(Decimal(str(balance.ui_amount)), "f"),
-                        'mint': str(balance.mint)
-                    }
-                    break
-
-            # Extraer balance del pool antes de la transacción
-            for balance in analysis_result.token_balances_pre:
-                if balance.account_index == 5:
-                    summary['pool_pre'] = {
-                        'amount': format(Decimal(str(balance.ui_amount)), "f"),
-                        'mint': str(balance.mint)
-                    }
-                    break
-
-            # Extraer balance del pool después de la transacción
-            for balance in analysis_result.token_balances_post:
-                if balance.account_index == 5:
-                    summary['pool_post'] = {
-                        'amount': format(Decimal(str(balance.ui_amount)), "f"),
-                        'mint': str(balance.mint)
-                    }
-                    break
-
-            return summary
-        except Exception as e:
-            self._logger.warning(f"Error extrayendo resumen de balances: {e}")
-            return {}

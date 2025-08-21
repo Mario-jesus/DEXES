@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Literal, NamedTuple
 from decimal import Decimal, InvalidOperation, DivisionByZero, getcontext
 
-from ...config import CopyTradingConfig
 from ...data_management.models import TokenInfo
 from .serialization import serialize_for_json
 
@@ -41,40 +40,21 @@ class TraderTradeData(NamedTuple):
 class PositionTraderTradeData:
     """Clase que envuelve TraderTradeData con funcionalidad de copy trading"""
 
-    def __init__(self, trader_trade_data: TraderTradeData, config: CopyTradingConfig):
+    def __init__(self, trader_trade_data: TraderTradeData, copy_amount_sol: str, copy_amount_tokens: str):
         self._trader_trade_data = trader_trade_data
-        self._config = config
-        self._copy_amount_sol: Optional[str] = None
-        self._copy_amount_tokens: Optional[str] = None
-        self._created_at = datetime.now() # This line is removed as per the new_code, as the created_at is now part of the dataclass.
+        self._copy_amount_sol = copy_amount_sol
+        self._copy_amount_tokens = copy_amount_tokens
+        self._created_at = datetime.now()
 
     @property
     def copy_amount_sol(self) -> str:
         """Calcula el monto en SOL a copiar basado en la configuración"""
-        if self._copy_amount_sol is None:
-            self._copy_amount_sol = self._config.calculate_copy_amount(
-                self._trader_trade_data.trader_wallet,
-                self._trader_trade_data.amount_sol
-            )
         return self._copy_amount_sol
-
-    @copy_amount_sol.setter
-    def copy_amount_sol(self, value: str) -> None:
-        self._copy_amount_sol = value
 
     @property
     def copy_amount_tokens(self) -> str:
         """Calcula el monto de tokens a copiar basado en la configuración"""
-        if self._copy_amount_tokens is None:
-            self._copy_amount_tokens = self._config.calculate_copy_amount(
-                self._trader_trade_data.trader_wallet,
-                self._trader_trade_data.token_amount
-            )
         return self._copy_amount_tokens
-
-    @copy_amount_tokens.setter
-    def copy_amount_tokens(self, value: str) -> None:
-        self._copy_amount_tokens = value
 
     @property
     def trader_wallet(self) -> str:
@@ -140,20 +120,27 @@ class PositionTraderTradeData:
             trader_data_dict['timestamp'] = trader_data_dict['timestamp'].isoformat()
 
         return {
-            'trader_trade_data': serialize_for_json(trader_data_dict)
+            'trader_trade_data': serialize_for_json(trader_data_dict),
+            'copy_amount_sol': self._copy_amount_sol,
+            'copy_amount_tokens': self._copy_amount_tokens,
+            'created_at': self._created_at.isoformat()
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], config: CopyTradingConfig) -> 'PositionTraderTradeData':
+    def from_dict(cls, data: Dict[str, Any]) -> 'PositionTraderTradeData':
         trader_data_dict = data['trader_trade_data'].copy()
         # Convertir string ISO de vuelta a datetime
         if 'timestamp' in trader_data_dict and isinstance(trader_data_dict['timestamp'], str):
             trader_data_dict['timestamp'] = datetime.fromisoformat(trader_data_dict['timestamp'])
 
-        return cls(TraderTradeData(**trader_data_dict), config)
+        return cls(
+            trader_trade_data=TraderTradeData(**trader_data_dict),
+            copy_amount_sol=data['copy_amount_sol'],
+            copy_amount_tokens=data['copy_amount_tokens']
+        )
 
 
-@dataclass
+@dataclass(slots=True)
 class Position:
     """Clase base para posiciones con atributos comunes"""
     # ID de la posición
@@ -216,6 +203,9 @@ class Position:
                 del self.metadata[key_to_remove]
 
         self.metadata[key] = value
+
+    def get_metadata(self, key: str, default: Any = None) -> Any:
+        return self.metadata.get(key, default)
 
     def get_is_analyzed(self) -> bool:
         return self.is_analyzed

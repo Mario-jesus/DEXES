@@ -171,6 +171,7 @@ class CopyTradingConfig:
     # Wallet y Red
     wallet_file: str = "wallets/wallet_pumpportal.json"
     rpc_url: str = "https://api.mainnet-beta.solana.com/"
+    websocket_url: str = "wss://api.mainnet-beta.solana.com/"
 
     general_available_balance_to_invest: str = "0.0"
 
@@ -328,87 +329,6 @@ class CopyTradingConfig:
         if trader_info.wallet_address in self.trader_configs:
             return self.trader_configs[trader_info.wallet_address]
 
-    def calculate_copy_amount(self, trader_wallet: str, original_amount: str) -> str:
-        """
-        Calcula el monto a copiar basado en la configuración usando Decimal
-        
-        Args:
-            trader_wallet: Dirección del trader
-            original_amount: Monto original del trade (como string)
-            
-        Returns:
-            Monto calculado para copiar (como string)
-
-        Exceptions:
-            ValueError: Si el trader no se encuentra
-        """
-
-        # Obtener configuración del trader o usar valores globales
-        trader_info = self.get_trader_info(trader_wallet)
-        if not trader_info:
-            error_msg = f"Trader not found: {trader_wallet}"
-            _logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        trader_config = self.get_trader_config(trader_info)
-
-        # Priorizar la configuracion individual sobre la global
-        mode = AmountMode(trader_config.amount_mode if trader_config and trader_config.amount_mode else self.amount_mode)
-        value = trader_config.amount_value if trader_config and trader_config.amount_value else self.amount_value
-
-        # Convertir a Decimal
-        original_amount_dec = Decimal(original_amount)
-        value_dec = Decimal(value) if value is not None else Decimal("0")
-
-        if mode == AmountMode.EXACT:
-            copy_amount = original_amount_dec
-        elif mode == AmountMode.PERCENTAGE:
-            copy_amount = (original_amount_dec * (value_dec / Decimal("100"))).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
-        elif mode == AmountMode.FIXED:
-            copy_amount = value_dec
-        elif mode == AmountMode.DISTRIBUTED:
-            if (trader_config is not None and trader_config.max_amount_to_invest is not None
-                and trader_config.max_open_tokens is not None and trader_config.max_open_positions_per_token is not None
-                and trader_config.use_balanced_allocation):
-                max_amount_to_invest = Decimal(trader_config.max_amount_to_invest)
-                max_open_tokens = trader_config.max_open_tokens
-                max_open_positions_per_token = trader_config.max_open_positions_per_token
-            elif (self.max_amount_to_invest_per_trader is not None and self.max_open_tokens_per_trader is not None
-                and self.max_open_positions_per_token_per_trader is not None and self.use_balanced_allocation_per_trader):
-                max_amount_to_invest = Decimal(self.max_amount_to_invest_per_trader)
-                max_open_tokens = self.max_open_tokens_per_trader
-                max_open_positions_per_token = self.max_open_positions_per_token_per_trader
-            else:
-                error_msg = "No se puede calcular el monto a copiar en modo DISTRIBUTED, no se encontró la configuración del trader o la configuración global"
-                _logger.error(error_msg)
-                raise ValueError(error_msg)
-
-            # Calcular el monto a copiar para cada posicion de cada token
-            balance_per_token = max_amount_to_invest / max_open_tokens
-            copy_amount = balance_per_token / max_open_positions_per_token
-        else:
-            copy_amount = original_amount_dec
-
-        # Aplicar límites
-        if trader_config and trader_config.adjust_position_size and trader_config.max_position_size:
-            max_pos_dec = Decimal(str(trader_config.max_position_size))
-            copy_amount = min(copy_amount, max_pos_dec)
-        elif self.max_position_size and self.adjust_position_size:
-            max_global_dec = Decimal(str(self.max_position_size))
-            copy_amount = min(copy_amount, max_global_dec)
-
-        if trader_config and trader_config.adjust_position_size and trader_config.min_position_size:
-            min_pos_dec = Decimal(str(trader_config.min_position_size))
-            copy_amount = max(copy_amount, min_pos_dec)
-        elif self.min_position_size and self.adjust_position_size:
-            min_global_dec = Decimal(str(self.min_position_size))
-            copy_amount = max(copy_amount, min_global_dec)
-
-        # Devolver como string para mantener consistencia y evitar problemas de precisión
-        resultado = format(copy_amount, "f")
-        _logger.debug(f"Monto calculado para trader {trader_wallet}: {original_amount} -> {resultado} (modo: {mode.value})")
-        return resultado
-
     def to_dict(self) -> Dict[str, Any]:
         """Convierte la configuración a diccionario"""
         return {
@@ -416,6 +336,7 @@ class CopyTradingConfig:
             'trader_configs': {k: v.to_dict() for k, v in self.trader_configs.items()},
             'wallet_file': self.wallet_file,
             'rpc_url': self.rpc_url,
+            'websocket_url': self.websocket_url,
             'general_available_balance_to_invest': self.general_available_balance_to_invest,
             'amount_mode': self.amount_mode.value,
             'amount_value': self.amount_value,
@@ -490,6 +411,7 @@ class CopyTradingConfig:
             # Wallet y Red
             wallet_file=data.get('wallet_file', 'wallets/wallet_pumpportal.json'),
             rpc_url=data.get('rpc_url', 'https://api.mainnet-beta.solana.com/'),
+            websocket_url=data.get('websocket_url', 'wss://api.mainnet-beta.solana.com/'),
             general_available_balance_to_invest=data.get('general_available_balance_to_invest', "0.0"),
 
             # Modo de copia y valor

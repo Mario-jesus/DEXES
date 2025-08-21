@@ -117,7 +117,7 @@ class PositionNotificationQueue:
         async with self._lock:
             # Verificar límite de tamaño si está configurado
             if self.max_size and len(self._queue) >= self.max_size:
-                position_id = getattr(position, 'id', 'unknown')
+                position_id = position.id
                 self._logger.warning(
                     f"Cola de notificaciones llena (max_size={self.max_size}), "
                     f"descartando posición {position_id}"
@@ -135,7 +135,7 @@ class PositionNotificationQueue:
             self.stats['total_received'] += 1
             self.stats['current_queue_size'] = len(self._queue)
 
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
             self._logger.debug(f"Posición {position_id} añadida a cola de notificaciones (tamaño actual: {len(self._queue)})")
 
             return True
@@ -187,7 +187,7 @@ class PositionNotificationQueue:
                     if item['attempts'] >= 3:  # Máximo 3 intentos
                         items_to_remove.append(i)
                         self.stats['total_failed'] += 1
-                        position_id = getattr(position, 'id', 'unknown')
+                        position_id = position.id
                         self._logger.error(f"Descartando notificación para posición {position_id} después de 3 intentos fallidos")
 
             # Remover elementos procesados (en orden reverso para no afectar índices)
@@ -229,7 +229,7 @@ class PositionNotificationQueue:
                 return True  # Considerar como exitoso para remover de la cola
 
             position = item['position']
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
 
             self._logger.debug(f"Procesando notificación para posición {position_id} (intento {item['attempts'] + 1})")
 
@@ -240,7 +240,7 @@ class PositionNotificationQueue:
             return True
 
         except Exception as e:
-            position_id = getattr(item['position'], 'id', 'unknown')
+            position_id = item['position'].id
             self._logger.error(f"Error procesando notificación para posición {position_id}: {e}", exc_info=True)
             return False
 
@@ -268,7 +268,7 @@ class PositionNotificationQueue:
             except Exception as e:
                 self.stats['total_failed'] += 1
                 failed_count += 1
-                position_id = getattr(item['position'], 'id', 'unknown')
+                position_id = item['position'].id
                 self._logger.error(f"Error procesando elemento restante {position_id}: {e}")
 
         self._logger.info(f"Procesamiento de elementos restantes completado: {processed_count} exitosos, {failed_count} fallidos")

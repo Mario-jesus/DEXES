@@ -3,13 +3,14 @@
 Manager para coordinar el flujo de vida de las posiciones en el sistema de Copy Trading.
 Separa la lógica de coordinación de flujo de la gestión de colas.
 """
-from typing import Union
+from typing import Union, TYPE_CHECKING
 
 from logging_system import AppLogger
 from ..models import PositionTraderTradeData, OpenPosition, ClosePosition, PositionStatus
-from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue
-from ..processors import PositionClosureProcessor
 from ..factories import PositionFactory
+
+if TYPE_CHECKING:
+    from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue, ClosedPositionQueue
 
 
 class PositionLifecycleManager:
@@ -19,17 +20,17 @@ class PositionLifecycleManager:
     """
 
     def __init__(self,
-                    pending_queue: PendingPositionQueue,
-                    analysis_queue: AnalysisPositionQueue,
-                    open_queue: OpenPositionQueue,
-                    closure_processor: PositionClosureProcessor,
+                    pending_queue: 'PendingPositionQueue',
+                    analysis_queue: 'AnalysisPositionQueue',
+                    open_queue: 'OpenPositionQueue',
+                    closed_queue: 'ClosedPositionQueue',
                     position_factory: PositionFactory):
         self._logger = AppLogger(self.__class__.__name__)
 
         self.pending_queue = pending_queue
         self.analysis_queue = analysis_queue
         self.open_queue = open_queue
-        self.closure_processor = closure_processor
+        self.closed_queue = closed_queue
         self.position_factory = position_factory
 
         self._logger.debug("PositionLifecycleManager inicializado")
@@ -62,9 +63,17 @@ class PositionLifecycleManager:
                 self._logger.error(f"No se pudo crear posición para trade {signature[:8]}...")
                 return False
 
+            # 2. Agregar a cola de análisis
+            analysis_success = await self.analysis_queue.add_position(position)
+
+            if not analysis_success:
+                self._logger.warning(f"No se pudo agregar posición {position.id} a análisis")
+            else:
+                self._logger.debug(f"Posición {position.id} agregada a cola de análisis")
+
             self._logger.debug(f"Posición creada exitosamente: {position.id}")
 
-            # 2. Enrutar la posición según su tipo
+            # 3. Enrutar la posición según su tipo
             success = await self._route_position_to_appropriate_queue(position)
 
             if not success:
@@ -72,14 +81,6 @@ class PositionLifecycleManager:
                 return False
 
             self._logger.debug(f"Posición {position.id} enrutada correctamente")
-
-            # 3. Agregar a cola de análisis
-            analysis_success = await self.analysis_queue.add_position(position)
-
-            if not analysis_success:
-                self._logger.warning(f"No se pudo agregar posición {position.id} a análisis")
-            else:
-                self._logger.debug(f"Posición {position.id} agregada a cola de análisis")
 
             self._logger.info(f"Procesamiento de posición {position.id} completado exitosamente")
 
@@ -128,7 +129,6 @@ class PositionLifecycleManager:
         """
         try:
             self._logger.debug(f"Manejando posición abierta: {position.id}")
-            position.status = PositionStatus.OPEN
             success = await self.open_queue.add_open_position(position)
 
             if success:
@@ -144,7 +144,7 @@ class PositionLifecycleManager:
 
     async def _handle_close_position(self, position: ClosePosition) -> bool:
         """
-        Maneja una posición de cierre procesándola con el closure processor.
+        Maneja una posición de cierre agregándola a la cola correspondiente.
         
         Args:
             position: Posición de cierre a manejar
@@ -154,12 +154,12 @@ class PositionLifecycleManager:
         """
         try:
             self._logger.debug(f"Manejando posición de cierre: {position.id}")
-            success = await self.closure_processor.process_position_closure(position)
+            success = await self.closed_queue.add_closed_position(position)
 
             if success:
-                self._logger.debug(f"Posición de cierre {position.id} procesada exitosamente")
+                self._logger.debug(f"Posición de cierre {position.id} agregada exitosamente")
             else:
-                self._logger.warning(f"No se pudo procesar posición de cierre {position.id}")
+                self._logger.warning(f"No se pudo agregar posición de cierre {position.id}")
 
             return success
 

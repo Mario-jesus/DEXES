@@ -36,6 +36,10 @@ class PositionFactory:
             OpenPosition o ClosePosition según el side del trade, None si hay error
         """
         try:
+            if not isinstance(signature, str):
+                self._logger.error(f"Signature no es un string: {signature}")
+                return None
+
             self._logger.info(f"Creando posición desde trade data: {signature[:8]}...")
             self._logger.debug(f"Side: {position_trade_data.side}, Amount SOL: {position_trade_data.copy_amount_sol}")
 

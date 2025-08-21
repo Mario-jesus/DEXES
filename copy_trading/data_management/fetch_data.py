@@ -374,14 +374,14 @@ class TradingDataFetcher:
             sol_price_decimal = Decimal(sol_price_usd)
             price_usd = Decimal(price_sol) * sol_price_decimal
 
-            result: TokenTradingInfo = {
+            result_pump: TokenTradingInfo = {
                 "name": "Unknown",  # No tenemos nombre desde bonding curve
                 "symbol": "UNK",    # No tenemos símbolo desde bonding curve
                 "sol_per_token": price_sol,
                 "usd_per_token": str(price_usd)
             }
             self._logger.debug(f"Información de trading obtenida desde bonding curve para {token_address}")
-            return result
+            return result_pump
 
         except Exception as e:
             self._logger.error(f"Error obteniendo información de trading para {token_address}: {e}")

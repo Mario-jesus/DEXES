@@ -4,20 +4,22 @@ Manager simplificado para coordinar las colas de posiciones en el sistema de Cop
 Delega responsabilidades complejas a managers especializados.
 """
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING
 
-from pumpfun import PumpFunTradeAnalyzer
 from logging_system import AppLogger
 
 from ...config import CopyTradingConfig
-from ...data_management import TradingDataFetcher, TokenTraderManager
+from ...data_management import TradingDataFetcher, TokenTraderManager, SolanaTxAnalyzer, SolanaWebsocketManager
 from ...notifications import NotificationManager
 from ..models import PositionTraderTradeData, Position, OpenPosition, ClosePosition, PositionStatus
-from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue, ClosedPositionQueue, PositionNotificationQueue
-from ..processors import PositionClosureProcessor
+from ..processors import PositionClosureProcessor, TradeAnalysisProcessor
 from ..factories import PositionFactory
+from ...balance_management import BalanceManager
 from .position_lifecycle_manager import PositionLifecycleManager
 from .queue_initialization_manager import QueueInitializationManager
+
+if TYPE_CHECKING:
+    from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue, ClosedPositionQueue, PositionNotificationQueue
 
 
 class PositionQueueManager:
@@ -27,9 +29,11 @@ class PositionQueueManager:
     """
 
     def __init__(self, config: CopyTradingConfig,
-                trader_analyzer: PumpFunTradeAnalyzer,
+                solana_analyzer: SolanaTxAnalyzer,
+                solana_websocket: SolanaWebsocketManager,
                 trading_data_fetcher: TradingDataFetcher,
                 token_trader_manager: TokenTraderManager,
+                balance_manager: BalanceManager,
                 notification_manager: Optional[NotificationManager] = None):
         # Logger
         self._logger = AppLogger(self.__class__.__name__)
@@ -37,23 +41,26 @@ class PositionQueueManager:
         # Managers especializados
         self.initialization_manager = QueueInitializationManager(
             config=config,
-            trader_analyzer=trader_analyzer,
+            solana_analyzer=solana_analyzer,
+            solana_websocket=solana_websocket,
             trading_data_fetcher=trading_data_fetcher,
             token_trader_manager=token_trader_manager,
+            balance_manager=balance_manager,
             notification_manager=notification_manager
         )
 
         self.position_factory = PositionFactory()
 
         # Referencias a las colas (se inicializarán en start())
-        self.pending_queue: Optional[PendingPositionQueue] = None
-        self.analysis_queue: Optional[AnalysisPositionQueue] = None
-        self.open_queue: Optional[OpenPositionQueue] = None
-        self.closed_queue: Optional[ClosedPositionQueue] = None
-        self.notification_queue: Optional[PositionNotificationQueue] = None
+        self.pending_queue: Optional['PendingPositionQueue'] = None
+        self.analysis_queue: Optional['AnalysisPositionQueue'] = None
+        self.open_queue: Optional['OpenPositionQueue'] = None
+        self.closed_queue: Optional['ClosedPositionQueue'] = None
+        self.notification_queue: Optional['PositionNotificationQueue'] = None
 
         # Referencias a managers y procesadores
         self.closure_processor: Optional[PositionClosureProcessor] = None
+        self.analysis_processor: Optional[TradeAnalysisProcessor] = None
 
         # Manager de ciclo de vida
         self.lifecycle_manager: Optional[PositionLifecycleManager] = None
@@ -96,12 +103,13 @@ class PositionQueueManager:
                 self.open_queue = components['open_queue']
                 self.closed_queue = components['closed_queue']
                 self.notification_queue = components['notification_queue']
-                
+
                 # Asignar referencias a managers y procesadores
                 self.closure_processor = components['closure_processor']
+                self.analysis_processor = components['analysis_processor']
 
                 # Verificar que todos los componentes necesarios estén inicializados
-                if not all([self.pending_queue, self.analysis_queue, self.open_queue, self.closure_processor]):
+                if not all([self.pending_queue, self.analysis_queue, self.open_queue, self.closed_queue]):
                     self._logger.error("Componentes requeridos no están inicializados para lifecycle manager")
                     raise Exception("Required components not initialized")
 
@@ -111,7 +119,7 @@ class PositionQueueManager:
                     pending_queue=self.pending_queue,
                     analysis_queue=self.analysis_queue,
                     open_queue=self.open_queue,
-                    closure_processor=self.closure_processor,
+                    closed_queue=self.closed_queue,
                     position_factory=self.position_factory
                 )
 
@@ -251,16 +259,16 @@ class PositionQueueManager:
 
     async def close_position(self, close_position: ClosePosition) -> bool:
         """
-        Cierra una posición abierta usando el procesador de cierre.
+        Agrega una posición cerrada a la cola de posiciones cerradas.
         """
         try:
             await self._ensure_initialized()
-            if not self.closure_processor:
-                self._logger.error("Procesador de cierre no inicializado")
+            if not self.closed_queue:
+                self._logger.error("Cola de posiciones cerradas no inicializada")
                 return False
 
             self._logger.debug(f"Cerrando posición: {close_position.id}")
-            success = await self.closure_processor.process_position_closure(close_position)
+            success = await self.closed_queue.add_closed_position(close_position)
 
             if success:
                 self._logger.debug(f"Posición {close_position.id} cerrada exitosamente")
@@ -306,7 +314,7 @@ class PositionQueueManager:
             analysis_stats = await self.analysis_queue.get_analysis_statistics() if self.analysis_queue else {}
             notification_stats = await self.notification_queue.get_stats() if self.notification_queue else {}
             open_closed_stats = await self.open_queue.get_stats() if self.open_queue else {}
-            closure_stats = await self.closure_processor.get_closure_statistics() if self.closure_processor else {}
+            closed_stats = await self.closed_queue.get_stats() if self.closed_queue else {}
 
             total_positions = (
                 pending_stats['count'] +
@@ -321,28 +329,11 @@ class PositionQueueManager:
                 'analysis': analysis_stats,
                 'open_closed': open_closed_stats,
                 'notifications': notification_stats,
-                'closure_processor': closure_stats,
+                'closed_queue': closed_stats,
                 'total_positions': total_positions
             }
         except Exception as e:
             self._logger.error(f"Error obteniendo estadísticas: {e}")
-            return {}
-
-    async def get_closure_statistics(self) -> Dict[str, Any]:
-        """
-        Obtiene estadísticas específicas de cierre de posiciones.
-        """
-        try:
-            await self._ensure_initialized()
-            if not self.closure_processor:
-                self._logger.warning("Procesador de cierre no inicializado para estadísticas")
-                return {}
-
-            stats = await self.closure_processor.get_closure_statistics()
-            self._logger.debug("Estadísticas de cierre obtenidas")
-            return stats
-        except Exception as e:
-            self._logger.error(f"Error obteniendo estadísticas de cierre: {e}")
             return {}
 
     async def start(self) -> None:

@@ -9,6 +9,14 @@ from .token_trader_manager import TokenTraderManager
 from .analytics.token_analytics import TokenAnalytics
 from .analytics.trader_analytics import TraderAnalytics
 from .analytics.performance_metrics import PerformanceMetrics
+from .solana_manager.solana_rcp import (
+    SolanaTxAnalyzer,
+    TransactionAnalysis,
+    TokenBalance,
+    BalanceResponse
+)
+from .solana_manager.solana_websocket import SolanaWebsocketManager
+
 
 __all__ = [
     'TokenTraderManager',
@@ -16,5 +24,10 @@ __all__ = [
     'TradingDataFetcher',
     'TokenAnalytics',
     'TraderAnalytics',
-    'PerformanceMetrics'
+    'PerformanceMetrics',
+    'SolanaTxAnalyzer',
+    'TransactionAnalysis',
+    'TokenBalance',
+    'BalanceResponse',
+    'SolanaWebsocketManager'
 ]

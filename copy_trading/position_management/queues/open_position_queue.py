@@ -8,12 +8,12 @@ import json
 import asyncio
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Union
+from typing import Dict, List, Optional, Any, Tuple
 from decimal import getcontext
 
 from logging_system import AppLogger
 from ...data_management import TokenTraderManager
-from ..models import OpenPosition, ClosePosition, SubClosePosition, PositionStatus
+from ..models import OpenPosition, PositionStatus, ProcessedAnalysisResult
 from .notification_queue import PositionNotificationQueue
 
 getcontext().prec = 26
@@ -282,6 +282,40 @@ class OpenPositionQueue:
             self._logger.error(f"Error obteniendo tamaño de cola: {e}")
             return 0
 
+    async def on_analysis_finished(self, position: OpenPosition, details: ProcessedAnalysisResult) -> None:
+        try:
+            if isinstance(position, OpenPosition):
+                position.status = PositionStatus.OPEN if details.success else PositionStatus.FAILED
+            else:
+                raise ValueError(f"Position {position.id} is not an OpenPosition")
+
+            if not details.success:
+                error_kind = details.error_kind
+                if error_kind == "slippage":
+                    position.message_error = "Transaction failed due to slippage. The price moved unfavorably before the transaction could be completed."
+                elif error_kind == "insufficient_tokens":
+                    position.message_error = "insufficient tokens available to complete the operation."
+                elif error_kind == "insufficient_lamports":
+                    position.message_error = "insufficient SOL (lamports) to pay for the transaction or fees."
+                elif error_kind == "transaction_not_found":
+                    position.message_error = "The transaction was not found on the Solana blockchain"
+                else:
+                    position.message_error = details.error_message or "Unknown error occurred during transaction analysis."
+
+                if await self.remove_position(position):
+                    self._logger.info(f"Position {position.id} removed from open positions queue")
+                else:
+                    self._logger.warning(f"Position {position.id} not removed from open positions queue")
+
+                await self._notify_position(position)
+            else:
+                position.is_analyzed = True
+
+            self._logger.info(f"Position {position.id} analysis finished with status {position.status}")
+
+        except Exception as e:
+            self._logger.error(f"Error updating position {position.id}: {e}")
+
     async def get_stats(self) -> Dict[str, Any]:
         try:
             async with self._lock:
@@ -351,13 +385,13 @@ class OpenPositionQueue:
         except Exception as e:
             self._logger.error(f"Error inicializando {self.open_file.name}: {e}")
 
-    async def _notify_position(self, position: Union[OpenPosition, ClosePosition, SubClosePosition]):
+    async def _notify_position(self, position: OpenPosition):
         """
         Envía posiciones a la cola de notificaciones de forma asíncrona.
         No bloquea el flujo principal del sistema.
         """
         try:
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
 
             if self.position_notification_queue:
                 await self.position_notification_queue.add_position(position)
@@ -365,7 +399,7 @@ class OpenPositionQueue:
                 self._logger.warning(f"No hay cola de notificaciones disponible para posición {position_id}")
 
         except Exception as e:
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
             self._logger.error(f"Error enviando posición {position_id} a notificaciones: {e}", exc_info=True)
 
     async def stop(self) -> None:

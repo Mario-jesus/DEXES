@@ -11,11 +11,11 @@ from decimal import Decimal, getcontext
 from asyncio import TaskGroup, CancelledError
 import asyncio
 
-from solana_manager.account_info import SolanaAccountInfo
 from logging_system import AppLogger
 
 from .config import CopyTradingConfig
 from .data_management.token_trader_manager import TokenTraderManager
+from .balance_management import BalanceManager
 
 getcontext().prec = 26
 
@@ -65,7 +65,8 @@ class ValidationEngine:
 
     def __init__(self, 
                     config: CopyTradingConfig,
-                    token_trader_manager: Optional[TokenTraderManager] = None):
+                    token_trader_manager: Optional[TokenTraderManager] = None,
+                    balance_manager: Optional[BalanceManager] = None):
         """
         Inicializa el motor de validaciones
         
@@ -77,8 +78,7 @@ class ValidationEngine:
         self.config = config
         self._logger = AppLogger(self.__class__.__name__)
         self.token_trader_manager = token_trader_manager
-        self.keypair: Optional[Keypair] = None
-        self.account_info: Optional[SolanaAccountInfo] = None
+        self.balance_manager = balance_manager
 
         # Estado para validaciones
         self.daily_volume: Dict[str, float] = {}  # {trader: volume}
@@ -101,52 +101,12 @@ class ValidationEngine:
 
         self._logger.debug("ValidationEngine inicializado")
 
-    async def initialize(self, keypair: Keypair):
-        """
-        Inicializa el motor con el keypair y otros recursos asíncronos.
-        
-        Args:
-            keypair: Keypair de la wallet de trading.
-        """
-        try:
-            self._logger.info("Inicializando ValidationEngine con keypair")
-            self.keypair = keypair
-            self.account_info = SolanaAccountInfo(rpc_url=self.config.rpc_url)
-            await self.account_info.__aenter__()
-            self._logger.debug("ValidationEngine inicializado exitosamente")
-        except Exception as e:
-            self._logger.error(f"Error inicializando ValidationEngine: {e}")
-            raise
-
-    async def close(self):
-        """Cierra la sesión del cliente de información de cuenta."""
-        try:
-            self._logger.info("Cerrando ValidationEngine")
-            if self.account_info:
-                try:
-                    # Verificar si el cliente está activo antes de cerrarlo
-                    if hasattr(self.account_info, 'client') and self.account_info.client:
-                        self._logger.debug("Cerrando la sesión de SolanaAccountInfo")
-                        await self.account_info.__aexit__(None, None, None)
-                        self._logger.debug("Sesión de SolanaAccountInfo cerrada")
-                    else:
-                        self._logger.debug("SolanaAccountInfo ya estaba cerrado")
-                except Exception as e:
-                    self._logger.error(f"Error cerrando SolanaAccountInfo: {e}")
-                finally:
-                    self.account_info = None
-            else:
-                self._logger.debug("ValidationEngine no tenía una sesión de SolanaAccountInfo activa para cerrar")
-            self._logger.debug("ValidationEngine cerrado exitosamente")
-        except Exception as e:
-            self._logger.error(f"Error cerrando ValidationEngine: {e}")
-            raise
-
     async def validate_trade(
         self, 
         trader_wallet: str, 
         token_address: str, 
         amount_sol: str,
+        amount_tokens: str,
         side: str
     ) -> Tuple[bool, List[ValidationCheck]]:
         """
@@ -156,6 +116,7 @@ class ValidationEngine:
             trader_wallet: Wallet del trader
             token_address: Dirección del token
             amount_sol: Monto en SOL
+            amount_tokens: Monto en tokens
             side: 'buy' o 'sell'
             
         Returns:
@@ -175,7 +136,7 @@ class ValidationEngine:
         try:
             # Ejecutar validaciones concurrentes
             checks, failed_checks, cancelled_tasks = await self._execute_concurrent_validations(
-                trader_wallet, token_address, amount_sol, side
+                trader_wallet, token_address, amount_sol, amount_tokens, side
             )
 
             # Procesar resultados y estadísticas
@@ -208,10 +169,11 @@ class ValidationEngine:
         return True, [check]
 
     async def _execute_concurrent_validations(
-        self, 
-        trader_wallet: str, 
-        token_address: str, 
-        amount_sol: str, 
+        self,
+        trader_wallet: str,
+        token_address: str,
+        amount_sol: str,
+        amount_tokens: str,
         side: str
     ) -> Tuple[List[ValidationCheck], List[ValidationCheck], List[str]]:
         """
@@ -227,7 +189,7 @@ class ValidationEngine:
         try:
             async with TaskGroup() as tg:
                 # Crear tareas para todas las validaciones
-                tasks = self._create_validation_tasks(tg, trader_wallet, token_address, amount_sol, side)
+                tasks = self._create_validation_tasks(tg, trader_wallet, token_address, amount_sol, amount_tokens, side)
 
                 # Monitorear y procesar resultados
                 checks, failed_checks, cancelled_tasks = await self._monitor_validation_tasks(tasks)
@@ -244,27 +206,29 @@ class ValidationEngine:
 
     def _create_validation_tasks(
         self, 
-        tg: TaskGroup, 
-        trader_wallet: str, 
-        token_address: str, 
-        amount_sol: str, 
+        tg: TaskGroup,
+        trader_wallet: str,
+        token_address: str,
+        amount_sol: str,
+        amount_tokens: str,
         side: str
     ) -> Dict[str, asyncio.Task[ValidationCheck]]:
         """Crea las tareas de validación para ejecutar concurrentemente."""
         tasks = {
-            'sol_balance': tg.create_task(self.check_sol_balance()),
+            'sol_balance': tg.create_task(self.check_sol_balance(amount_sol)),
             'position_size': tg.create_task(self.check_position_size(amount_sol, trader_wallet)),
             'trade_timing': tg.create_task(self.check_trade_timing(trader_wallet, token_address)),
             'max_traders': tg.create_task(self.check_max_traders_per_token(trader_wallet, token_address)),
             'max_amount': tg.create_task(self.check_max_amount_to_invest_per_trader(trader_wallet, amount_sol, side)),
             'max_tokens': tg.create_task(self.check_max_open_tokens_per_trader(trader_wallet, token_address, side)),
             'max_positions': tg.create_task(self.check_max_open_positions_per_token_per_trader(trader_wallet, token_address, side)),
-            'max_daily_volume': tg.create_task(self.check_max_daily_volume_sol_open(trader_wallet, amount_sol, side))
+            'max_daily_volume': tg.create_task(self.check_max_daily_volume_sol_open(trader_wallet, amount_sol, side)),
+            'budget_availability': tg.create_task(self.check_budget_availability(amount_sol))
         }
 
         # Agregar validación de token balance solo para ventas
         if side == "sell":
-            tasks['token_balance'] = tg.create_task(self.check_token_balance(token_address))
+            tasks['token_balance'] = tg.create_task(self.check_token_balance(token_address, amount_tokens))
 
         return tasks
 
@@ -306,6 +270,30 @@ class ValidationEngine:
             await asyncio.sleep(0.01)
 
         return checks, failed_checks, cancelled_tasks
+
+    async def check_budget_availability(self, amount_sol: str) -> ValidationCheck:
+        """Valida que el presupuesto efectivo (global/distribuido) permita el trade."""
+        check = ValidationCheck(name="BudgetAvailabilityCheck")
+
+        if not self.balance_manager:
+            check.passthrough("BalanceManager no disponible; sin verificación de presupuesto efectivo")
+            return check
+
+        try:
+            available_str, is_enough = await self.balance_manager.get_effective_available_sol_for_trade(amount_sol)
+            details = {
+                'requested': amount_sol,
+                'effective_available': available_str
+            }
+            if is_enough:
+                check.passthrough("Presupuesto efectivo suficiente para el trade", details)
+            else:
+                check.fail("Presupuesto efectivo insuficiente para el trade", details)
+        except Exception as e:
+            self._logger.error(f"Error verificando presupuesto efectivo: {e}")
+            check.fail("Error verificando presupuesto efectivo", {'error': str(e)})
+
+        return check
 
     async def _process_completed_task(
         self, 
@@ -383,48 +371,35 @@ class ValidationEngine:
             self.validation_stats['concurrent_validations']
         )
 
-    async def check_sol_balance(self) -> ValidationCheck:
+    async def check_sol_balance(self, amount_sol: str) -> ValidationCheck:
         """Verifica que el balance de SOL sea suficiente."""
         check = ValidationCheck(name="SolBalanceCheck")
-        
-        # Verificar si la validación está configurada
-        if self._should_skip_validation("", 'min_position_size'):
-            check.passthrough("Validación de balance de SOL no configurada")
-            return check
 
-        # Verificar inicialización del motor
-        if not self.account_info or not self.keypair:
-            check.fail("Motor de validación no inicializado correctamente para check de SOL.")
-            return check
-
-        # Verificar si el cliente está activo
-        if not hasattr(self.account_info, 'client') or not self.account_info.client:
-            check.fail("Cliente Solana no está conectado.")
+        # Verificar integración de balances
+        if not self.balance_manager:
+            check.fail("BalanceManager no disponible para verificación de SOL")
             return check
 
         try:
             # Obtener balance actual
-            balance = await self.account_info.get_sol_balance(str(self.keypair.pubkey()))
-            balance_dec = Decimal(str(balance))
+            balance = await self.balance_manager.get_sol_balance()
+            balance_dec = Decimal(balance)
+            amount_sol_dec = Decimal(amount_sol)
 
-            # Obtener configuración de balance mínimo
-            required_sol = self._get_trader_config_value("", 'min_position_size', "0")
-            required_sol_dec = Decimal(required_sol)
-
-            if balance_dec >= required_sol_dec:
+            if balance_dec >= amount_sol_dec:
                 details = {
                     'balance': format(balance_dec, "f"),
-                    'required': required_sol,
-                    'excess': format(balance_dec - required_sol_dec, "f")
+                    'required': amount_sol,
+                    'excess': format(balance_dec - amount_sol_dec, "f")
                 }
-                check.passthrough(f"Balance suficiente: {balance:.6f} SOL", details)
+                check.passthrough(f"Balance suficiente: {format(balance_dec, 'f')} SOL", details)
             else:
                 details = {
                     'balance': format(balance_dec, "f"),
-                    'required': required_sol,
-                    'deficit': format(required_sol_dec - balance_dec, "f")
+                    'required': amount_sol,
+                    'deficit': format(amount_sol_dec - balance_dec, "f")
                 }
-                check.fail(f"Balance insuficiente: {balance:.6f} SOL < {required_sol} SOL requeridos", details)
+                check.fail(f"Balance insuficiente: {format(balance_dec, 'f')} SOL < {amount_sol} SOL requeridos", details)
 
         except Exception as e:
             self._logger.error(f"Error verificando balance de SOL: {e}")
@@ -432,43 +407,35 @@ class ValidationEngine:
 
         return check
 
-    async def check_token_balance(self, token_address: str) -> ValidationCheck:
+    async def check_token_balance(self, token_address: str, amount_tokens: str) -> ValidationCheck:
         """Verifica que se posee el token que se intenta vender."""
         check = ValidationCheck(name="TokenBalanceCheck")
 
-        # Verificar si la validación está configurada (para ventas siempre es requerida)
-        # No usamos _should_skip_validation aquí porque es una validación crítica para ventas
-
-        # Verificar inicialización del motor
-        if not self.account_info or not self.keypair:
-            check.fail("Motor de validación no inicializado correctamente para check de token.")
-            return check
-
-        # Verificar si el cliente está activo
-        if not hasattr(self.account_info, 'client') or not self.account_info.client:
-            check.fail("Cliente Solana no está conectado.")
+        # Verificar integración de balances
+        if not self.balance_manager:
+            check.fail("BalanceManager no disponible para verificación de token")
             return check
 
         try:
             # Obtener balance del token
-            owner_address = str(self.keypair.pubkey())
-            balance = await self.account_info.get_token_balance(
-                mint_address=token_address,
-                owner_address=owner_address
-            )
+            balance = await self.balance_manager.get_token_balance([token_address])
+            balance_dec = Decimal(balance.get(token_address, "0.0"))
+            amount_tokens_dec = Decimal(amount_tokens)
 
-            if balance > 0:
+            if balance_dec >= amount_tokens_dec:
                 details = {
                     'token_address': token_address,
-                    'balance': format(balance, "f"),
-                    'owner_address': owner_address
+                    'balance': format(balance_dec, "f"),
+                    'amount_tokens': amount_tokens,
+                    'excess': format(balance_dec - amount_tokens_dec, "f")
                 }
                 check.passthrough(f"Se posee el token a vender ({balance} tokens)", details)
             else:
                 details = {
                     'token_address': token_address,
-                    'balance': "0",
-                    'owner_address': owner_address
+                    'balance': format(balance_dec, "f"),
+                    'amount_tokens': amount_tokens,
+                    'deficit': format(amount_tokens_dec - balance_dec, "f")
                 }
                 check.fail("No se posee el token que se intenta vender", details)
 

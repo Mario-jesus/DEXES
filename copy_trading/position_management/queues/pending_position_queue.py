@@ -10,18 +10,16 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from logging_system import AppLogger
-from ...config import CopyTradingConfig
 from ..models import PositionTraderTradeData
 
 
 class PendingPositionQueue:
     """Cola FIFO de posiciones pendientes con persistencia"""
 
-    def __init__(self, data_path: str = "copy_trading/data", max_size: Optional[int] = None, config: Optional[CopyTradingConfig] = None):
+    def __init__(self, data_path: str = "copy_trading/data", max_size: Optional[int] = None):
         self._logger = AppLogger(self.__class__.__name__)
         self.data_path = Path(data_path)
         self.max_size = max_size
-        self.config = config
 
         self.pending_queue: deque[PositionTraderTradeData] = deque(maxlen=max_size)
 
@@ -92,7 +90,7 @@ class PendingPositionQueue:
                         if content.strip():
                             data: List[Dict[str, Any]] = json.loads(content)
                             self.pending_queue = deque(
-                                [PositionTraderTradeData.from_dict(p, self.config or CopyTradingConfig()) for p in data],
+                                [PositionTraderTradeData.from_dict(p) for p in data],
                                 maxlen=self.max_size
                             )
                             self._logger.debug(f"Cargadas {len(self.pending_queue)} posiciones pendientes desde disco")

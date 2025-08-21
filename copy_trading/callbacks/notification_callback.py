@@ -3,9 +3,10 @@
 Callback especializado para notificaciones de posiciones en Copy Trading.
 Integra con NotificationManager para procesar diferentes tipos de eventos.
 """
+import re
 from typing import Optional, Union, Dict, Any
 from datetime import datetime
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from cachetools import TTLCache
 
 from logging_system import AppLogger
@@ -79,7 +80,7 @@ class PositionNotificationCallback:
             self.stats['total_notifications'] += 1
             self.stats['last_notification_time'] = datetime.now()
 
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
             self._logger.debug(f"Procesando notificación para posición: {position_id}")
 
             # Determinar el tipo de notificación según el tipo y estado de la posición
@@ -98,7 +99,7 @@ class PositionNotificationCallback:
 
         except Exception as e:
             self.stats['failed_notifications'] += 1
-            position_id = getattr(position, 'id', 'unknown')
+            position_id = position.id
             self._logger.error(f"Error procesando notificación para posición {position_id}: {e}", exc_info=True)
 
     async def _handle_open_position_notification(self, position: OpenPosition) -> None:
@@ -150,7 +151,7 @@ class PositionNotificationCallback:
             self._logger.debug("NotificationManager no disponible, saltando notificación")
             return
 
-        position_id = getattr(close_position, 'id', 'unknown')
+        position_id = close_position.id
         self._logger.debug(f"Manejando notificación de ClosePosition: {position_id}, estado: {close_position.status}")
 
         # Extraer información del token
@@ -180,7 +181,7 @@ class PositionNotificationCallback:
             Dict con name, symbol y address del token
         """
         # Extraer token_address
-        token_address: str = getattr(position, 'token_address', '')
+        token_address: str = position.token_address
         self._logger.debug(f"Extrayendo token_address: {token_address[:8] if token_address else 'None'}...")
 
         if not token_address and hasattr(position, 'trader_trade_data') and isinstance(position, (OpenPosition, ClosePosition)) and position.trader_trade_data:
@@ -265,7 +266,7 @@ class PositionNotificationCallback:
         Returns:
             Dict con el P&L en SOL, USD, P&L acumulado en SOL, USD
         """
-        position_id = getattr(position, 'id', 'N/A')
+        position_id = position.id
         self._logger.debug(f"Iniciando cálculo de P&L para la posición: {position_id}")
 
         pnl_sol = "0.0"
@@ -359,10 +360,12 @@ class PositionNotificationCallback:
         try:
             self._logger.debug(f"Enviando notificación de posición abierta: {position.id}")
 
-            trader_wallet = getattr(position, 'trader_wallet', 'Unknown')
-            amount_sol = getattr(position, 'amount_sol', '0')
-            amount_tokens = getattr(position, 'amount_tokens', '0')
-            entry_price = getattr(position, 'entry_price', '0')
+            trader_wallet = position.trader_wallet
+            amount_sol = position.amount_sol
+            amount_tokens = position.amount_tokens
+            entry_price = position.entry_price
+
+            self._logger.debug(f"amount_sol: {amount_sol}, amount_tokens: {amount_tokens}, entry_price: {entry_price}, total_cost_sol: {position.total_cost_sol}, fee_sol: {position.fee_sol}")
 
             message = (
                 f"🟢 <b>Position Opened</b>\n\n"
@@ -380,7 +383,7 @@ class PositionNotificationCallback:
                 f"{'─'*12}\n"
                 f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
-                f"🧾 <b>Fee:</b> {self._format_amount(position.fee_sol)} SOL\n"
+                f"🧾 <b>Fee:</b> {self._format_amount(position.total_cost_sol)} SOL\n"
                 f"📈 <b>Entry Price:</b> {self._format_amount(entry_price)} SOL\n\n"
 
                 f"⏰ <b>Time:</b> {position.executed_at.strftime('%H:%M:%S') if position.executed_at else 'N/A'}"
@@ -444,8 +447,8 @@ class PositionNotificationCallback:
             total_pnl_usd_with_costs_acc_total = Decimal(pnl_data['pnl_usd_with_costs_acc_total'])
 
             # Obtener wallet del trader
-            trader_wallet = getattr(position, 'trader_wallet', 'Unknown')
-            original_amount = getattr(position, 'amount_sol', '0')
+            trader_wallet = position.trader_wallet
+            original_amount = position.amount_sol
 
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol >= 0 else '🔴'
@@ -512,9 +515,9 @@ class PositionNotificationCallback:
         try:
             self._logger.debug(f"Enviando notificación de posición fallida: {position.id}")
 
-            trader_wallet = getattr(position, 'trader_wallet', 'Unknown')
-            amount_sol = getattr(position, 'amount_sol', '0')
-            error_message = getattr(position, 'message_error', 'Unknown error')
+            trader_wallet = position.trader_wallet
+            amount_sol = position.amount_sol
+            error_message = position.message_error
 
             message = (
                 f"❌ <b>Trade Opening Failed</b>\n\n"
@@ -550,15 +553,15 @@ class PositionNotificationCallback:
     async def _notify_partial_close_success(self, close_position: Union[ClosePosition, SubClosePosition], token_info: Dict[str, str], trader_info: Dict[str, str]) -> None:
         """Notifica éxito de cierre parcial"""
         try:
-            position_id = getattr(close_position, 'id', 'unknown')
+            position_id = close_position.id
             self._logger.debug(f"Enviando notificación de cierre parcial exitoso: {position_id}")
 
             # Extraer información de la posición
-            trader_wallet = getattr(close_position, 'trader_wallet', 'Unknown')
-            amount_sol = getattr(close_position, 'amount_sol', '0')
-            amount_tokens = getattr(close_position, 'amount_tokens', '0')
-            executed_at = getattr(close_position, 'created_at', datetime.now())
-            signature = getattr(close_position, 'signature', None)
+            trader_wallet = close_position.trader_wallet
+            amount_sol = close_position.amount_sol
+            amount_tokens = close_position.amount_tokens
+            executed_at = close_position.created_at
+            signature = close_position.signature
 
             message = (
                 f"🟡 <b>Partial Close Success</b>\n\n"
@@ -594,15 +597,15 @@ class PositionNotificationCallback:
     async def _notify_partial_close_failed(self, close_position: Union[ClosePosition, SubClosePosition], token_info: Dict[str, str], trader_info: Dict[str, str]) -> None:
         """Notifica fallo de cierre parcial"""
         try:
-            position_id = getattr(close_position, 'id', 'unknown')
+            position_id = close_position.id
             self._logger.debug(f"Enviando notificación de cierre parcial fallido: {position_id}")
 
             # Extraer información de la posición
-            trader_wallet = getattr(close_position, 'trader_wallet', 'Unknown')
-            amount_sol = getattr(close_position, 'amount_sol', '0')
-            error_message = getattr(close_position, 'message_error', 'Unknown error')
-            executed_at = getattr(close_position, 'created_at', datetime.now())
-            signature = getattr(close_position, 'signature', None)
+            trader_wallet = close_position.trader_wallet
+            amount_sol = close_position.amount_sol
+            error_message = close_position.message_error
+            executed_at = close_position.created_at
+            signature = close_position.signature
 
             message = (
                 f"❌ <b>Partial Close Failed</b>\n\n"
@@ -636,11 +639,50 @@ class PositionNotificationCallback:
             self._logger.error(f"Error en notificación de cierre parcial fallido: {e}")
 
     def _format_amount(self, value: Union[str, Decimal, float, int]) -> str:
-        if not isinstance(value, Decimal):
-            value = Decimal(str(value))
-        value = format(value.quantize(Decimal('0.0000000000000001'), rounding=ROUND_DOWN), "f")
-        #value = format(value, "f")
-        return value.rstrip('0').rstrip('.') if value else '0'
+        """
+        Formatea un valor numérico para mostrar en notificaciones.
+        Maneja casos de error de conversión decimal de forma segura.
+        """
+        try:
+            # Si el valor es None o vacío, retornar '0'
+            if value is None or value == '':
+                return '0'
+
+            # Si ya es Decimal, usarlo directamente
+            if isinstance(value, Decimal):
+                formatted_value = value
+            else:
+                # Convertir a string y limpiar caracteres problemáticos
+                str_value = str(value).strip()
+
+                # Remover caracteres no válidos para Decimal
+                # Solo permitir dígitos, punto decimal, signo y 'e' para notación científica
+                cleaned_value = re.sub(r'[^0-9.-eE]', '', str_value)
+
+                # Si después de limpiar está vacío, retornar '0'
+                if not cleaned_value or cleaned_value == '.' or cleaned_value == '-':
+                    return '0'
+
+                # Intentar convertir a Decimal
+                try:
+                    formatted_value = Decimal(cleaned_value)
+                except (ValueError, InvalidOperation):
+                    # Si falla la conversión, intentar con el valor original como string
+                    try:
+                        formatted_value = Decimal(str_value)
+                    except (ValueError, InvalidOperation):
+                        # Si todo falla, retornar '0'
+                        self._logger.warning(f"No se pudo convertir valor '{value}' a Decimal, usando '0'")
+                        return '0'
+
+            # Formatear el valor
+            formatted = format(formatted_value.quantize(Decimal('0.0000000000000001'), rounding=ROUND_DOWN), "f")
+            resultado = formatted.rstrip('0').rstrip('.') if formatted else '0'
+            return resultado
+
+        except Exception as e:
+            self._logger.error(f"Error formateando valor '{value}': {e}")
+            return '0'
 
     def get_stats(self) -> Dict[str, Any]:
         """Obtiene estadísticas del callback"""

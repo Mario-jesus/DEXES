@@ -34,20 +34,6 @@ class PnLCalculationService:
         return close_item
 
     @classmethod
-    def _get_cost_basis_or_total_cost(cls, position: OpenPosition, include_transaction_costs: bool = False) -> Decimal:
-        """
-        Obtiene el costo base de la posición o el costo total de la posición si se incluye los costos de transacción.
-        
-        Args:
-            position: Objeto OpenPosition
-            include_transaction_costs: Si incluir costos de transacción
-            
-        Returns:
-            Costo base o costo total como Decimal
-        """
-        return Decimal(position.total_cost_sol) if include_transaction_costs else Decimal(position.amount_sol)
-
-    @classmethod
     def _calculate_pnl_from_amounts(cls, amount: Decimal, cost_basis: Decimal, sol_price_usd: Decimal) -> Tuple[Decimal, Decimal]:
         """
         Calcula P&L a partir de un monto y costo base.
@@ -65,14 +51,14 @@ class PnLCalculationService:
         return pnl_sol, pnl_usd
 
     @classmethod
-    def calculate_pnl(cls, position: OpenPosition, current_price: str, sol_price_usd: str) -> Tuple[str, str]:
+    def calculate_pnl(cls, position: OpenPosition, sol_price_usd: str, include_transaction_costs: bool = False) -> Tuple[str, str]:
         """
         Calcula P&L actual basado en el estado de la posición.
         
         Args:
             position: Objeto OpenPosition
-            current_price: Precio actual del token
             sol_price_usd: Precio de SOL en USD
+            include_transaction_costs: Si incluir costos de transacción en el cálculo
             
         Returns:
             Tuple de (pnl_sol, pnl_usd) como strings
@@ -81,18 +67,18 @@ class PnLCalculationService:
             return "0.0", "0.0"
 
         if position.status == PositionStatus.OPEN:
-            if not position.amount_tokens or Decimal(position.amount_tokens) == 0:
+            if not position.amount_sol or Decimal(position.amount_sol) == 0:
                 return "0.0", "0.0"
 
-            current_value = Decimal(position.amount_tokens) * Decimal(current_price)
-            cost_basis = cls._get_cost_basis_or_total_cost(position)
+            current_value = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
+            cost_basis = Decimal(position.total_cost_sol) if position.total_cost_sol and include_transaction_costs else Decimal('0')
             pnl_sol, pnl_usd = cls._calculate_pnl_from_amounts(current_value, cost_basis, Decimal(sol_price_usd))
 
             return format(pnl_sol, "f"), format(pnl_usd, "f")
 
         elif position.status in [PositionStatus.CLOSED, PositionStatus.PARTIALLY_CLOSED]:
             # Para posiciones cerradas o parcialmente cerradas, usar el P&L realizado
-            return cls.calculate_realized_pnl(position, sol_price_usd)
+            return cls.calculate_realized_pnl(position, sol_price_usd, include_transaction_costs)
 
         return "0.0", "0.0"
 
@@ -114,30 +100,23 @@ class PnLCalculationService:
             return "0.0", "0.0"
 
         # Valor de entrada (cuánto valían los tokens cuando se compraron)
-        entry_value = Decimal(position.amount_tokens) * Decimal(position.execution_price if position.execution_price else position.entry_price)
+        entry_value = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
 
         # Valor total de salida (cuánto se recibió por los tokens)
         total_exit_value = Decimal('0')
+        total_exit_costs = Decimal(position.total_cost_sol) if position.total_cost_sol else Decimal('0')
 
         for close_item in position.close_history:
-            # Obtener datos del cierre
-            if isinstance(close_item, SubClosePosition):
-                close_amount_tokens = Decimal(close_item.amount_tokens) if close_item.amount_tokens else Decimal('0')
-                close_price = Decimal(close_item.close_position.execution_price if close_item.close_position.execution_price else close_item.close_position.entry_price)
-            else:
-                close_amount_tokens = Decimal(close_item.amount_tokens) if close_item.amount_tokens else Decimal('0')
-                close_price = Decimal(close_item.execution_price if close_item.execution_price else close_item.entry_price)
-
             # Calcular valor de salida para este cierre
-            exit_value = close_amount_tokens * close_price
-            total_exit_value += exit_value
+            total_exit_value += Decimal(close_item.amount_sol) if close_item.amount_sol else Decimal('0')
+            total_exit_costs += Decimal(close_item.total_cost_sol) if close_item.total_cost_sol else Decimal('0')
 
         # Calcular P&L base (sin costos)
         pnl_sol = total_exit_value - entry_value
 
         # Si se incluyen costos de transacción, restar fees
-        if include_transaction_costs and position.fee_sol:
-            pnl_sol -= Decimal(position.fee_sol)
+        if include_transaction_costs:
+            pnl_sol -= total_exit_costs
 
         # Convertir a USD
         pnl_usd = pnl_sol * Decimal(sol_price_usd)
@@ -197,9 +176,12 @@ class PnLCalculationService:
             return "0.0", "0.0"
 
         # Calcular la proporción de tokens cerrados
+        open_position_total_cost = Decimal(position.total_cost_sol) if position.total_cost_sol else Decimal('0')
+        close_position_total_cost = Decimal(close_item.total_cost_sol) if close_item.total_cost_sol else Decimal('0')
+        total_cost = open_position_total_cost + close_position_total_cost
+
         proportion = close_amount_tokens / total_original_tokens
-        total_cost = cls._get_cost_basis_or_total_cost(position, include_transaction_costs)
-        proportional_cost = total_cost * proportion
+        proportional_cost = total_cost * proportion if include_transaction_costs else Decimal('0')
 
         # Calcular P&L del cierre individual
         pnl_sol, pnl_usd = cls._calculate_pnl_from_amounts(close_amount_sol, proportional_cost, Decimal(sol_price_usd))
@@ -295,14 +277,13 @@ class PnLCalculationService:
 
     @classmethod
     def batch_calculate_pnl(cls, positions: List[OpenPosition], 
-                            current_prices: Dict[str, str], 
-                            sol_price_usd: str) -> Dict[str, Tuple[str, str]]:
+                            sol_price_usd: str,
+                            include_transaction_costs: bool = False) -> Dict[str, Tuple[str, str]]:
         """
         Calcula P&L para múltiples posiciones de forma eficiente.
         
         Args:
             positions: Lista de posiciones
-            current_prices: Diccionario {token_address: current_price}
             sol_price_usd: Precio de SOL en USD
             
         Returns:
@@ -310,12 +291,8 @@ class PnLCalculationService:
         """
         results = {}
         for position in positions:
-            if position.token_address in current_prices:
-                current_price = current_prices[position.token_address]
-                pnl_sol, pnl_usd = cls.calculate_pnl(position, current_price, sol_price_usd)
-                results[position.id] = (pnl_sol, pnl_usd)
-            else:
-                results[position.id] = ("0.0", "0.0")
+            pnl_sol, pnl_usd = cls.calculate_pnl(position, sol_price_usd, include_transaction_costs=include_transaction_costs)
+            results[position.id] = (pnl_sol, pnl_usd)
 
         return results
 

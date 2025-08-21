@@ -55,8 +55,7 @@ __all__ = [
 ]
 
 # Mensaje de bienvenida
-print("🎯 Módulo Copy Trading Mini cargado")
-print("🚀 Sistema simplificado de copy trading")
+print("🎯 Módulo Copy Trading cargado")
 print("   ✅ Integración directa con PumpFun")
 print("   ✅ Replicación automática de trades")
 print("   ✅ Gestión de posiciones FIFO")

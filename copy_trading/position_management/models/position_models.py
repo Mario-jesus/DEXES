@@ -14,7 +14,7 @@ from .serialization import serialize_for_json
 from ...data_management.models.data_models import TokenInfo
 
 
-@dataclass
+@dataclass(slots=True)
 class ClosePosition(Position):
     """Datos de un cierre individual de posición"""
     status: ClosePositionStatus = ClosePositionStatus.PENDING
@@ -66,12 +66,14 @@ class ClosePosition(Position):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SubClosePosition:
     """Datos de un cierre parcial de posición"""
     close_position: ClosePosition
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
     amount_sol: str = ""
     amount_tokens: str = ""
+    total_cost_sol: str = ""
     status: ClosePositionStatus = ClosePositionStatus.PENDING
     message_error: str = ""
     created_at: datetime = field(default_factory=datetime.now)
@@ -79,6 +81,7 @@ class SubClosePosition:
     def __post_init__(self):
         if not isinstance(self.close_position, ClosePosition):
             raise ValueError("close_position must be an instance of ClosePosition")
+        self.total_cost_sol = self.calculate_proportional_total_cost()
 
     @property
     def trader_wallet(self) -> str:
@@ -96,13 +99,47 @@ class SubClosePosition:
     def metadata(self) -> Dict[str, Any]:
         return self.close_position.metadata
 
+    def calculate_proportional_total_cost(self) -> str:
+        """
+        Calcula el total_cost_sol proporcional basado en el porcentaje de tokens
+        que representa este SubClosePosition del ClosePosition padre.
+        
+        Returns:
+            total_cost_sol proporcional como string
+        """
+        try:
+            # Obtener los montos de tokens del ClosePosition padre
+            parent_tokens = Decimal(self.close_position.amount_tokens) if self.close_position.amount_tokens else Decimal('0')
+            parent_total_cost = Decimal(self.close_position.total_cost_sol) if self.close_position.total_cost_sol else Decimal('0')
+
+            # Obtener los montos de tokens de este SubClosePosition
+            sub_tokens = Decimal(self.amount_tokens) if self.amount_tokens else Decimal('0')
+
+            # Validar que los datos sean válidos
+            if parent_tokens <= 0 or sub_tokens <= 0:
+                return "0"
+
+            # Calcular el porcentaje que representa este SubClosePosition
+            percentage = sub_tokens / parent_tokens
+
+            # Calcular el total_cost proporcional
+            proportional_cost = parent_total_cost * percentage
+
+            return format(proportional_cost, 'f')
+
+        except (ValueError, ZeroDivisionError, TypeError):
+            # En caso de error, retornar 0
+            return "0"
+
     def to_dict(self) -> Dict[str, Any]:
         """Convierte a diccionario"""
         return {
             'type': 'partial',
             'close_position': self.close_position.to_dict(),
+            'id': self.id,
             'amount_sol': self.amount_sol,
             'amount_tokens': self.amount_tokens,
+            'total_cost_sol': self.total_cost_sol,
             'status': self.status.value,
             'message_error': self.message_error,
             'created_at': self.created_at.isoformat()
@@ -114,6 +151,7 @@ class SubClosePosition:
         close_position = ClosePosition.from_dict(data['close_position'])
         return cls(
             close_position=close_position,
+            id=data.get('id', str(uuid.uuid4())),
             amount_sol=data.get('amount_sol', ''),
             amount_tokens=data.get('amount_tokens', ''),
             status=ClosePositionStatus(data.get('status', ClosePositionStatus.PENDING.value)),
@@ -122,7 +160,7 @@ class SubClosePosition:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class OpenPosition(Position):
     """Representa una posición en el sistema"""
     # Estado de la posición

@@ -10,20 +10,21 @@ from pumpfun.api_client import PumpFunApiClient
 from pumpfun.transactions import PumpFunTransactions
 from pumpfun.subscriptions import PumpFunSubscriptions
 from pumpfun.wallet_manager import PumpFunWalletStorage, WalletData, WalletImportException
-from pumpfun.pumpfun_trade_analyzer import PumpFunTradeAnalyzer
 from logging_system import AppLogger
 
 from .config import CopyTradingConfig, TransactionType
 from .validation import ValidationEngine
+from .balance_management import BalanceManager
 from .callbacks import TradeProcessorCallback
 from .position_management import PositionQueueManager
 from .position_management.models import PositionTraderTradeData
-from .data_management import TokenTraderManager, TradingDataFetcher
+from .data_management import TokenTraderManager, TradingDataFetcher, SolanaTxAnalyzer, SolanaWebsocketManager
 from .notifications import (
     NotificationManager,
     TelegramStrategy,
     ConsoleStrategy
 )
+from .transactions_management import TransactionExecutor
 
 
 class CopyTrading:
@@ -59,18 +60,28 @@ class CopyTrading:
         else:
             self._logger.debug("Sistema de notificaciones deshabilitado")
 
+        # Inicializar SolanaTxAnalyzer
+        self.solana_analyzer = SolanaTxAnalyzer(endpoint=config.rpc_url)
+        self.solana_websocket = SolanaWebsocketManager(ws_url=config.websocket_url)
+
+        # Balance manager centralizado (antes de crear colas/managers para inyectarlo)
+        self.balance_manager = BalanceManager(config=config, solana_analyzer=self.solana_analyzer)
+
         self.queue_manager = PositionQueueManager(
             config=config,
-            trader_analyzer=PumpFunTradeAnalyzer(rpc_url=config.rpc_url),
+            solana_analyzer=self.solana_analyzer,
+            solana_websocket=self.solana_websocket,
             trading_data_fetcher=self.trading_data_fetcher,
             token_trader_manager=self.token_trader_manager,
+            balance_manager=self.balance_manager,
             notification_manager=self.notification_manager
         )
         self._logger.debug("PositionQueueManager inicializado")
 
         self.validation_engine = ValidationEngine(
             config=config,
-            token_trader_manager=self.token_trader_manager
+            token_trader_manager=self.token_trader_manager,
+            balance_manager=self.balance_manager
         )
         self._logger.debug("ValidationEngine inicializado")
 
@@ -82,6 +93,9 @@ class CopyTrading:
 
         self.subscriptions: Optional[PumpFunSubscriptions] = None
         self.transactions_manager: Optional[PumpFunTransactions] = None
+
+        # Transaction executor (se inicializará en start())
+        self.transaction_executor: Optional[TransactionExecutor] = None
 
         # Callback (se inicializará después de que las colas estén listas)
         self.trade_processor_callback: Optional[TradeProcessorCallback] = None
@@ -104,7 +118,7 @@ class CopyTrading:
 
         # Flag para indicar si el QueueManager ya fue detenido
         self._queue_manager_stopped: bool = False
-        
+
         self._logger.debug("Sistema Copy Trading inicializado correctamente")
 
     async def __aenter__(self):
@@ -197,14 +211,31 @@ class CopyTrading:
             await self.client.connect()
             self._logger.debug("Cliente API conectado")
 
-            # Inicializar validation engine con el keypair y la conexión rpc
-            self._logger.debug("Inicializando ValidationEngine...")
-            await self.validation_engine.initialize(self.wallet_data.get_keypair())
-            self._logger.debug("ValidationEngine inicializado")
+            # Inicializar SolanaTxAnalyzer
+            await self.solana_analyzer.__aenter__()
+            self._logger.debug("SolanaTxAnalyzer inicializado")
+
+            # Inicializar SolanaWebsocketManager
+            await self.solana_websocket.__aenter__()
+            self._logger.debug("SolanaWebsocketManager inicializado")
+
+            # Inicializar BalanceManager (maneja SolanaAccountInfo) y luego ValidationEngine
+            self._logger.debug("Inicializando BalanceManager...")
+            await self.balance_manager.start(system_wallet_address=self.wallet_data.wallet_public_key)
+            self._logger.debug("BalanceManager inicializado")
 
             # Initialize transaction manager con el cliente centralizado
             self.transactions_manager = PumpFunTransactions(api_client=self.client)
             self._logger.debug("PumpFunTransactions inicializado")
+
+            # Inicializar TransactionExecutor
+            self.transaction_executor = TransactionExecutor(
+                config=self.config,
+                transactions_manager=self.transactions_manager,
+                wallet_data=self.wallet_data,
+                trading_data_fetcher=self.trading_data_fetcher
+            )
+            self._logger.debug("TransactionExecutor inicializado")
 
             # Inicializar subscriptions con el cliente centralizado
             self.subscriptions = PumpFunSubscriptions(api_client=self.client)
@@ -291,10 +322,21 @@ class CopyTrading:
                     self._logger.error(f"Error deteniendo QueueManager: {e}")
 
             # Liberar recursos
-            if self.validation_engine:
-                self._logger.debug("Cerrando ValidationEngine...")
-                await self.validation_engine.close()
-                self._logger.info("Recursos de AccountInfo liberados en ValidationEngine")
+            if self.solana_analyzer:
+                await self.solana_analyzer.__aexit__(None, None, None)
+                self._logger.debug("SolanaTxAnalyzer cerrado")
+
+            if self.solana_websocket:
+                await self.solana_websocket.__aexit__(None, None, None)
+                self._logger.debug("SolanaWebsocketManager cerrado")
+
+            if self.balance_manager:
+                try:
+                    self._logger.debug("Cerrando BalanceManager...")
+                    await self.balance_manager.stop()
+                    self._logger.debug("BalanceManager cerrado")
+                except Exception as e:
+                    self._logger.error(f"Error cerrando BalanceManager: {e}")
 
             # Desconectar API
             if self.client:
@@ -424,9 +466,9 @@ class CopyTrading:
 
         # Obtener balance actual
         current_balance = 0.0
-        if self.validation_engine and self.validation_engine.account_info and self.wallet_data:
+        if self.balance_manager and self.wallet_data:
             try:
-                current_balance = await self.validation_engine.account_info.get_sol_balance(self.wallet_data.wallet_public_key)
+                current_balance = await self.balance_manager.get_sol_balance()
                 self._logger.debug(f"Balance actual obtenido: {current_balance} SOL")
             except Exception as e:
                 # Error: registrar y continuar con balance 0
@@ -436,171 +478,50 @@ class CopyTrading:
         # Obtener estado del cliente API centralizado
         client_status = self.client.get_status() if self.client else None
 
+        # Obtener información del TransactionExecutor
+        transaction_info = self.transaction_executor.get_transaction_type_info() if self.transaction_executor else None
+
         return {
             'system_metrics': self.metrics,
             'callback_stats': callback_stats,
             'queue_stats': queue_stats,
             'client_status': client_status,
+            'transaction_info': transaction_info,
             'wallet_balance': current_balance,
             'is_running': self.is_running,
             'dry_run': self.config.dry_run,
             'traders_count': len(self.config.traders)
         }
 
-    async def _notify_position_status_change(self, position_data: dict) -> None:
-        """
-        Callback para notificar cambios de estado de posiciones
-        
-        Args:
-            position_data: Datos de la posición con el nuevo estado
-        """
-        if self.notification_manager:
-            try:
-                # Determinar el tipo de mensaje según el estado
-                status = position_data.get('status', 'unknown')
-                self._logger.debug(f"Notificando cambio de estado de posición: {status}")
-
-                if status == 'open':
-                    # Posición ejecutada exitosamente
-                    await self.notification_manager.notify_trade({
-                        'side': position_data['side'],
-                        'token_address': position_data['token_address'],
-                        'token_name': f"Token {position_data['token_address'][:8]}...",
-                        'token_symbol': position_data.get('token_symbol', position_data['token_address'][:4].upper()),
-                        'amount': position_data['amount'],
-                        'status': 'executed',
-                        'signature': position_data.get('execution_signature'),
-                        'execution_price': position_data.get('execution_price', 0),
-                        'amount_tokens': position_data.get('amount_tokens', 0),
-                        'slippage': position_data.get('slippage', 0)
-                    })
-
-                elif status == 'closed':
-                    # Posición cerrada
-                    await self.notification_manager.notify_trade({
-                        'side': position_data['side'],
-                        'token_address': position_data['token_address'],
-                        'token_name': f"Token {position_data['token_address'][:8]}...",
-                        'token_symbol': position_data.get('token_symbol', position_data['token_address'][:4].upper()),
-                        'amount': position_data['amount'],
-                        'status': 'closed',
-                        'signature': position_data.get('close_signature'),
-                        'close_price': position_data.get('close_price', 0),
-                        'close_amount_sol': position_data.get('close_amount_sol', 0),
-                        'pnl': position_data.get('realized_pnl_sol', 0),
-                        'pnl_usd': position_data.get('realized_pnl_usd', 0)
-                    })
-
-                elif status == 'failed':
-                    # Posición falló
-                    await self.notification_manager.notify_trade({
-                        'side': position_data['side'],
-                        'token_address': position_data['token_address'],
-                        'token_name': f"Token {position_data['token_address'][:8]}...",
-                        'token_symbol': position_data.get('token_symbol', position_data['token_address'][:4].upper()),
-                        'amount': position_data['amount'],
-                        'status': 'failed',
-                        'error': position_data.get('error', 'Error desconocido')
-                    })
-
-                elif status == 'cancelled':
-                    # Posición cancelada
-                    await self.notification_manager.notify_trade({
-                        'side': position_data['side'],
-                        'token_address': position_data['token_address'],
-                        'token_name': f"Token {position_data['token_address'][:8]}...",
-                        'token_symbol': position_data.get('token_symbol', position_data['token_address'][:4].upper()),
-                        'amount': position_data['amount'],
-                        'status': 'cancelled'
-                    })
-
-            except Exception as e:
-                self._logger.error(f"Error notificando cambio de estado de posición: {e}")
-
     async def _execute_trade(self, trade_data: PositionTraderTradeData) -> None:
         """
-        Ejecuta un trade
+        Ejecuta un trade usando el TransactionExecutor
         
         Args:
-            position: Posición a ejecutar
+            trade_data: Datos del trade a ejecutar
         """
+        if not self.transaction_executor:
+            error_msg = "TransactionExecutor no inicializado"
+            self._logger.error(error_msg)
+            raise ValueError(error_msg)
+
         try:
-            self._logger.info(f"Ejecutando trade: {trade_data.side} {trade_data.token_address[:8]}... por {trade_data.copy_amount_sol} SOL")
+            # Ejecutar trade usando el TransactionExecutor (incluye obtención de precio de entrada)
+            success, signature, entry_price, error_message = await self.transaction_executor.execute_trade(trade_data)
 
-            token_trading_info_task = asyncio.create_task(self.trading_data_fetcher.get_token_trading_info(trade_data.token_address))
-
-            # Ejecutar trade usando execute_lightning_trade
-            signature = None
-            if self.config.transaction_type == TransactionType.LIGHTNING_TRADE:
-                if not self.transactions_manager:
-                    error_msg = "TransactionsManager no inicializado"
-                    self._logger.error(error_msg)
-                    raise ValueError(error_msg)
-
-                self._logger.debug(f"Ejecutando lightning trade para {trade_data.token_address[:8]}...")
-                result = await self.transactions_manager.execute_lightning_trade(
-                    action=trade_data.side,  # "buy" o "sell"
-                    mint=trade_data.token_address,
-                    amount=trade_data.copy_amount_sol,
-                    denominated_in_sol=True,
-                    slippage=str(self.config.slippage_tolerance),
-                    priority_fee=str(self.config.priority_fee_sol),
-                    pool=trade_data.pool, # type: ignore
-                    skip_preflight=True
-                )
-                signature = result.get('signature')
-                self._logger.debug(f"Resultado lightning trade: {result}")
-
-            elif self.config.transaction_type == TransactionType.LOCAL_TRADE:
-                if not self.transactions_manager:
-                    error_msg = "TransactionsManager no inicializado"
-                    self._logger.error(error_msg)
-                    raise ValueError(error_msg)
-                if not self.wallet_data:
-                    error_msg = "WalletData no inicializado"
-                    self._logger.error(error_msg)
-                    raise ValueError(error_msg)
-
-                self._logger.debug(f"Ejecutando local trade para {trade_data.token_address[:8]}...")
-                signature = await self.transactions_manager.create_and_send_local_trade(
-                    keypair=self.wallet_data.get_keypair(),
-                    action=trade_data.side,
-                    mint=trade_data.token_address,
-                    amount=trade_data.copy_amount_sol,
-                    denominated_in_sol=True,
-                    slippage=str(self.config.slippage_tolerance),
-                    priority_fee=str(self.config.priority_fee_sol),
-                    pool=trade_data.pool, # type: ignore
-                    rpc_endpoint=self.config.rpc_url
-                )
-                self._logger.debug(f"Local trade completado, signature: {signature}")
-
-            if signature:
-                self._logger.info(f"Trade ejecutado exitosamente ({self.config.transaction_type.value}): {trade_data.signature}")
-
+            if success and signature:
                 # Incrementar métricas de ejecución
                 self.metrics['trades_executed'] += 1
                 self.metrics['total_volume_sol'] += float(trade_data.copy_amount_sol)
                 self._logger.debug(f"Métricas actualizadas: trades_executed={self.metrics['trades_executed']}, total_volume={self.metrics['total_volume_sol']}")
 
-                entry_price = ""
-                token_trading_info = await token_trading_info_task
-                if token_trading_info:
-                    entry_price = token_trading_info['sol_per_token']
-                    self._logger.debug(f"Precio de entrada obtenido: {entry_price}")
-                else:
-                    self._logger.warning(f"❌ No se pudo obtener el token trading info para {trade_data.token_address}")
-
-                await self.queue_manager.process_executed_position(trade_data, signature, entry_price)
-
+                # Procesar posición ejecutada
+                await self.queue_manager.process_executed_position(trade_data, signature, entry_price or "")
             else:
-                error_msg = f"❌ Error ejecutando trade ({self.config.transaction_type.value})"
-                if self.config.transaction_type == TransactionType.LIGHTNING_TRADE:
-                    error_msg += f": {result.get('error', 'Unknown error')}"
-                self._logger.error(error_msg)
+                self._logger.error(f"Error ejecutando trade: {error_message}")
 
         except Exception as e:
-            self._logger.error(f"Error inesperado ejecutando trade ({self.config.transaction_type.value}): {e}", exc_info=True)
+            self._logger.error(f"Error inesperado ejecutando trade: {e}", exc_info=True)
 
     async def _pending_positions_loop(self):
         """

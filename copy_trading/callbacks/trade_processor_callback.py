@@ -10,6 +10,7 @@ from ..config import CopyTradingConfig
 from ..position_management.models import TraderTradeData, PositionTraderTradeData
 from ..position_management.queues import PendingPositionQueue
 from ..validation import ValidationEngine
+from ..transactions_management import CopyAmountCalculator
 from logging_system import AppLogger
 
 # Configurar precisión decimal según preferencias del usuario
@@ -35,6 +36,7 @@ class TradeProcessorCallback:
         self.pending_position_queue = pending_position_queue
         self.validation_engine = validation_engine
         self._logger = AppLogger(self.__class__.__name__)
+        self._amount_calculator = CopyAmountCalculator(config)
 
         # Validar que pending_position_queue no sea None
         if self.pending_position_queue is None:
@@ -72,15 +74,20 @@ class TradeProcessorCallback:
                 return
 
             # Calcular el monto a copiar según la configuración
-            copy_amount = self.config.calculate_copy_amount(
+            copy_amount_sol = self._amount_calculator.calculate_copy_amount(
                 trade_data.trader_wallet, trade_data.amount_sol
+            )
+
+            copy_amount_tokens = self._amount_calculator.calculate_copy_amount(
+                trade_data.trader_wallet, trade_data.token_amount
             )
 
             # Validar trade con el motor, usando el monto a copiar
             is_valid, validation_checks = await self.validation_engine.validate_trade(
                 trader_wallet=trade_data.trader_wallet,
                 token_address=trade_data.token_address,
-                amount_sol=copy_amount,
+                amount_sol=copy_amount_sol,
+                amount_tokens=copy_amount_tokens,
                 side=trade_data.side
             )
 
@@ -89,13 +96,14 @@ class TradeProcessorCallback:
                     check.message for check in validation_checks if check.result.value == 'failed'
                 ) or 'Validación fallida'
 
-                self._logger.warning(
+                self._logger.info(
                     f"Trade no válido: {error_msg} | trader: {trade_data.trader_wallet} | token: {trade_data.token_address}"
                 )
                 for check in validation_checks:
-                    self._logger.warning(
-                        f"Validación: {check.name} | Resultado: {check.result.value} | Mensaje: {str(check.message)} | Detalles: {str(check.details)}"
-                    )
+                    if check.result.value == 'failed':
+                        self._logger.info(
+                            f"Validación: {check.name} | Resultado: {check.result.value} | Mensaje: {str(check.message)} | Detalles: {str(check.details)}"
+                        )
 
                 self.stats['trades_rejected'] += 1
                 return
@@ -105,7 +113,7 @@ class TradeProcessorCallback:
 
             self._logger.info(f"Validando trade: {trade_data.side} {trade_data.amount_sol} SOL de {trade_data.token_address}")
 
-            position = PositionTraderTradeData(trade_data, self.config)
+            position = PositionTraderTradeData(trade_data, copy_amount_sol, copy_amount_tokens)
 
             # Verificar que pending_position_queue esté inicializado
             if self.pending_position_queue is None:

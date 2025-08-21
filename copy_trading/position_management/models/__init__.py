@@ -7,6 +7,7 @@ from .enums import PositionStatus, ClosePositionStatus
 from .base_models import Position, TraderTradeData, PositionTraderTradeData
 from .position_models import OpenPosition, ClosePosition, SubClosePosition
 from .serialization import serialize_for_json
+from .analysis_models import ProcessedAnalysisResult
 
 __all__ = [
     # Enums
@@ -25,4 +26,7 @@ __all__ = [
     
     # Utilidades de serialización
     'serialize_for_json',
+
+    # Modelos de análisis
+    'ProcessedAnalysisResult',
 ]
