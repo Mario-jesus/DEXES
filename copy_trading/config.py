@@ -212,14 +212,14 @@ class CopyTradingConfig:
     log_filename: str = "copy_trading_%Y-%m-%d_%H-%M-%S.log"
     enable_logfire: bool = False
     min_logfire_level: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] = "WARNING"
-    logfire_config: Dict[str, Any] = {
+    logfire_config: Dict[str, Any] = field(default_factory=lambda: {
         'service_name': 'copy_trading_development',
         'environment': 'development',
         'tags': {
             'project': 'pumpfun-copy-trading-system',
             'version': '1.0.0'
         }
-    }
+    })
 
     # Sistema
     dry_run: bool = False
