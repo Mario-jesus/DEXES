@@ -21,21 +21,15 @@ from ..models import (
 
 getcontext().prec = 26
 
-DEFAULT_RPC_ENDPOINT = "https://api.mainnet-beta.solana.com"
-
-# Dirección de la bonding curve de Pump.fun (hardcodeada)
-PUMPFUN_BONDING_CURVE_PUBKEY = "4sPfXcRDfArmA3y22XeVwstS9bjnjEmJFThexYruiMKC"
-
-# Direcciones de los pools de Pump.fun AMM (WSOL)
-PUMPFUN_AMM_POOL_1_PUBKEY = "8FFrvaxb7xvmE7WSErzGszWmULxuvP8a7xWBdWuPWR8m"
-PUMPFUN_AMM_POOL_2_PUBKEY = "6wP5qoRar1NLUGqdnyLCa2DxAy1p9gbdbanb49W44Mn6"
-
-# Conjunto por defecto que incluye bonding curve y pools conocidos
-DEFAULT_BONDING_CURVE_PUBKEYS: Set[str] = {
-    PUMPFUN_BONDING_CURVE_PUBKEY,
-    PUMPFUN_AMM_POOL_1_PUBKEY,
-    PUMPFUN_AMM_POOL_2_PUBKEY,
-}
+# Constantes de Solana
+PUMPFUN = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMPFUN_AMM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+JITOTIP_6 = "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt"
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+SYSTEM_PROGRAM = "11111111111111111111111111111111"
+COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111"
+ASSOCIATED_TOKEN_ACCOUNT_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 
 
 class SolanaTxAnalyzer:
@@ -43,7 +37,7 @@ class SolanaTxAnalyzer:
 
     def __init__(
         self,
-        endpoint: str = DEFAULT_RPC_ENDPOINT,
+        endpoint: str = "https://api.mainnet-beta.solana.com",
         *,
         session: Optional[aiohttp.ClientSession] = None,
         request_timeout_s: float = 60.0,
@@ -226,7 +220,6 @@ class SolanaTxAnalyzer:
         self,
         signature: str,
         *,
-        bonding_curve_pubkeys: Optional[Set[str]] = None,
         commitment: str = "finalized",
         max_supported_transaction_version: int = 0,
         encoding: str = "jsonParsed",
@@ -239,7 +232,7 @@ class SolanaTxAnalyzer:
                 max_supported_transaction_version=max_supported_transaction_version,
                 encoding=encoding,
             )
-            analysis = self._analyze_transaction(tx, bonding_curve_pubkeys=bonding_curve_pubkeys)
+            analysis = self._analyze_transaction(tx)
             self._logger.info(f"Transaction {signature[:8]}... analysis: success={analysis.success}, op_type={analysis.op_type}")
             return analysis
 
@@ -398,7 +391,7 @@ class SolanaTxAnalyzer:
             params = [
                 owner_pubkey,
                 {
-                    "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+                    "programId": TOKEN_PROGRAM
                 },
                 {
                     "commitment": commitment,
@@ -627,9 +620,7 @@ class SolanaTxAnalyzer:
 
     def _analyze_transaction(
         self,
-        tx: Optional[Dict[str, Any]],
-        *,
-        bonding_curve_pubkeys: Optional[Set[str]] = None,
+        tx: Optional[Dict[str, Any]]
     ) -> TransactionAnalysis:
         """Analiza una transacción y retorna resumen completo."""
         if tx is None:
@@ -657,8 +648,6 @@ class SolanaTxAnalyzer:
                 error_message="Transaction result is null",
             )
 
-        bonding_curve_pubkeys = bonding_curve_pubkeys or set(DEFAULT_BONDING_CURVE_PUBKEYS)
-
         # Detectar operación y errores
         logs = self._extract_logs(tx)
         op_type = self._detect_operation_type(logs)
@@ -679,9 +668,10 @@ class SolanaTxAnalyzer:
 
         # Calcular métricas para transacciones exitosas
         signers = self._extract_signers(tx)
-        # Intentar detectar dinámicamente contrapartes (bonding curve o pools) desde innerInstructions
+        # Detectar dinámicamente contrapartes (bonding curve o pools) desde innerInstructions
         detected_counterparties = self._detect_counterparty_pubkeys(tx, signers)
-        counterparty_pubkeys = bonding_curve_pubkeys | detected_counterparties if bonding_curve_pubkeys else detected_counterparties
+        # Usar contrapartes detectadas dinámicamente, combinadas con cualquier bonding_curve_pubkeys proporcionado
+        counterparty_pubkeys = detected_counterparties
 
         # Excluir contrapartes y firmantes de los costos para no contaminar el costo del usuario
         exclude_for_cost = signers | counterparty_pubkeys
@@ -779,45 +769,209 @@ class SolanaTxAnalyzer:
 
     def _detect_counterparty_pubkeys(self, tx: Dict[str, Any], signers: Set[str]) -> Set[str]:
         """
-        Detecta dinámicamente cuentas contrapartes (bonding curve o pools) a partir de innerInstructions.
+        Detecta la contraparte principal de la operación:
+        - Si el token es no graduado: intenta extraer la bonding curve.
+        - Si el token es graduado (presencia de PUMPFUN_AMM): intenta extraer la dirección AMM del par token/SOL.
 
-        Heurística:
-        - Busca instrucciones del programa System (transfer de SOL) parseadas.
-        - Si uno de los extremos (source/destination) es un signer, el otro extremo se considera contraparte.
-        - Agrega todas las contrapartes detectadas para cubrir escenarios con múltiples pools.
+        Para cada caso aplica 3 opciones y devuelve la dirección con mayor coincidencia.
+        Si no hay consenso o no se puede extraer, cae a la heurística previa basada en transfer del System Program.
         """
-        counterparties: Set[str] = set()
+        # Helpers de acceso seguro
+        def _safe_list(value):
+            return value if isinstance(value, list) else []
+
+        def _safe_dict(value):
+            return value if isinstance(value, dict) else {}
+
         try:
-            meta = tx.get("result", {}).get("meta", {})
-            inner = meta.get("innerInstructions") or []
-            for inner_ix in inner:
-                instructions = inner_ix.get("instructions") or []
-                for ix in instructions:
-                    try:
-                        parsed = ix.get("parsed")
-                        program = ix.get("program")
-                        program_id = ix.get("programId")
+            result = _safe_dict(tx.get("result"))
+            message = _safe_dict(_safe_dict(result.get("transaction")).get("message"))
+            meta = _safe_dict(result.get("meta"))
+
+            account_keys_entries = _safe_list(message.get("accountKeys"))
+            account_keys: List[str] = []
+            for entry in account_keys_entries:
+                if isinstance(entry, dict) and isinstance(entry.get("pubkey"), str):
+                    account_keys.append(entry["pubkey"])
+
+            msg_instructions = _safe_list(message.get("instructions"))
+            inner_blocks = _safe_list(meta.get("innerInstructions"))
+
+            # Detección de token graduado por presencia de PUMPFUN_AMM en accountKeys o en cualquier accounts de instrucciones
+            def _has_constant_anywhere(target: str) -> bool:
+                if target in account_keys:
+                    return True
+                for ix in msg_instructions:
+                    accs = _safe_list(_safe_dict(ix).get("accounts"))
+                    if target in accs:
+                        return True
+                return False
+
+            is_graduated = _has_constant_anywhere(PUMPFUN_AMM)
+
+            # ============ Bonding curve options (no graduado) ============
+            def _bc_opt1_inner_accounts3() -> Optional[str]:
+                best_accs = None
+                best_len = -1
+                for block in inner_blocks:
+                    instructions = _safe_list(_safe_dict(block).get("instructions"))
+                    for ix in instructions:
+                        if not isinstance(ix, dict):
+                            continue
+                        accs = _safe_list(ix.get("accounts"))
+                        if len(accs) >= 4:
+                            # Preferir el que pertenezca/contenga PUMPFUN
+                            pid = ix.get("programId")
+                            has_pump = (pid == PUMPFUN) or (PUMPFUN in accs)
+                            score = len(accs)
+                            if score > best_len or (score == best_len and has_pump and best_accs is not None and (PUMPFUN not in best_accs)):
+                                best_accs = accs
+                                best_len = score
+                if best_accs and len(best_accs) >= 4:
+                    return best_accs[3]
+                return None
+
+            def _bc_opt2_account_keys_4_or_5() -> Optional[str]:
+                idx = 4
+                try:
+                    # Si JITOTIP_6 aparece entre los primeros 5, usar la 5ta posición
+                    first5 = set(k for k in account_keys[:5] if isinstance(k, str))
+                    if JITOTIP_6 in first5:
+                        idx = 5
+                except Exception:
+                    pass
+                if len(account_keys) > idx:
+                    return account_keys[idx]
+                return None
+
+            def _bc_opt3_msg_accounts3() -> Optional[str]:
+                best_accs = None
+                best_len = -1
+                for ix in msg_instructions:
+                    if not isinstance(ix, dict):
+                        continue
+                    accs = _safe_list(ix.get("accounts"))
+                    if len(accs) >= 4:
+                        has_pump = (PUMPFUN in accs)
+                        score = len(accs)
+                        if score > best_len or (score == best_len and has_pump and best_accs is not None and (PUMPFUN not in best_accs)):
+                            best_accs = accs
+                            best_len = score
+                if best_accs and len(best_accs) >= 4:
+                    return best_accs[3]
+                return None
+
+            # ============ AMM options (graduado) ============
+            def _amm_opt1_inner_transfer_checked_destination() -> Optional[str]:
+                candidates: List[tuple] = []  # (mint, destination)
+                for block in inner_blocks:
+                    instructions = _safe_list(_safe_dict(block).get("instructions"))
+                    for ix in instructions:
+                        parsed = _safe_dict(_safe_dict(ix).get("parsed"))
                         if not parsed:
                             continue
-                        is_system = (program == "system") or (program_id == "11111111111111111111111111111111")
-                        if not is_system:
+                        if str(parsed.get("type")) != "transferChecked":
                             continue
-                        if parsed.get("type") != "transfer":
-                            continue
-                        info = parsed.get("info", {})
-                        source = info.get("source")
+                        info = _safe_dict(parsed.get("info"))
+                        authority = info.get("authority")
                         destination = info.get("destination")
-                        # Si el signer envía SOL, la contraparte es el destino
-                        if isinstance(source, str) and source in signers and isinstance(destination, str) and destination not in signers:
-                            counterparties.add(destination)
-                        # Si el signer recibe SOL, la contraparte es el origen
-                        elif isinstance(destination, str) and destination in signers and isinstance(source, str) and source not in signers:
-                            counterparties.add(source)
-                    except Exception:
+                        mint = info.get("mint")
+                        if isinstance(authority, str) and authority in signers and isinstance(destination, str):
+                            if destination == PUMPFUN_AMM:
+                                continue
+                            candidates.append((mint, destination))
+                if not candidates:
+                    return None
+                # Preferir el destino cuando el mint es wSOL
+                for mint, dest in candidates:
+                    if mint == WSOL_MINT:
+                        return dest
+                return candidates[0][1]
+
+            def _amm_opt2_account_keys4() -> Optional[str]:
+                if len(account_keys) > 4:
+                    cand = account_keys[4]
+                    if cand != PUMPFUN_AMM:
+                        return cand
+                return None
+
+            def _amm_opt3_msg_accounts8() -> Optional[str]:
+                best_accs = None
+                best_len = -1
+                for ix in msg_instructions:
+                    if not isinstance(ix, dict):
                         continue
+                    accs = _safe_list(ix.get("accounts"))
+                    if len(accs) >= 9:
+                        pid = ix.get("programId")
+                        has_amm = (pid == PUMPFUN_AMM) or (PUMPFUN_AMM in accs)
+                        score = len(accs)
+                        if score > best_len or (score == best_len and has_amm and best_accs is not None and (PUMPFUN_AMM not in best_accs)):
+                            best_accs = accs
+                            best_len = score
+                if best_accs and len(best_accs) >= 9:
+                    cand = best_accs[8]
+                    if cand != PUMPFUN_AMM:
+                        return cand
+                return None
+
+            # Ejecutar opciones según el estado de graduación
+            if is_graduated:
+                options = [
+                    _amm_opt1_inner_transfer_checked_destination(),
+                    _amm_opt2_account_keys4(),
+                    _amm_opt3_msg_accounts8(),
+                ]
+                opt_labels = [
+                    "amm_opt1_inner_transferChecked_destination",
+                    "amm_opt2_accountKeys[4]",
+                    "amm_opt3_msg_accounts[8]",
+                ]
+            else:
+                options = [
+                    _bc_opt1_inner_accounts3(),
+                    _bc_opt2_account_keys_4_or_5(),
+                    _bc_opt3_msg_accounts3(),
+                ]
+                opt_labels = [
+                    "bc_opt1_inner_accounts[3]",
+                    "bc_opt2_accountKeys[4/5]",
+                    "bc_opt3_msg_accounts[3]",
+                ]
+
+            # Consolidar por mayoría y desempatar por prioridad (opt1 > opt2 > opt3)
+            forbidden = {
+                PUMPFUN,
+                PUMPFUN_AMM,
+                JITOTIP_6,
+                ASSOCIATED_TOKEN_ACCOUNT_PROGRAM,
+                TOKEN_PROGRAM,
+                SYSTEM_PROGRAM,
+                COMPUTE_BUDGET,
+            }
+            freq: Dict[str, int] = {}
+            first_idx: Dict[str, int] = {}
+            for i, addr in enumerate(options):
+                if isinstance(addr, str) and addr and addr not in forbidden:
+                    freq[addr] = freq.get(addr, 0) + 1
+                    if addr not in first_idx:
+                        first_idx[addr] = i
+
+            if freq:
+                selected = sorted(freq.items(), key=lambda kv: (-kv[1], first_idx[kv[0]]))[0][0]
+                self._logger.debug(
+                    f"Counterparty detection ({'amm' if is_graduated else 'bonding'}) options={{" + ", ".join(f"{l}:{o}" for l, o in zip(opt_labels, options)) + f"}} -> selected={selected}"
+                )
+                return {selected}
+            else:
+                self._logger.debug(
+                    f"No majority candidate for {'amm' if is_graduated else 'bonding'} found via options; falling back to system-transfer heuristic."
+                )
         except Exception as e:
-            self._logger.warning(f"Error detecting counterparties from inner instructions: {e}")
-        return counterparties
+            self._logger.warning(f"Error detecting counterparty (bonding/amm): {e}")
+            return set()
+
+        return set()
 
     def _detect_operation_type(self, logs: List[str]) -> str:
         pattern = re.compile(r"\bInstruction:\s*(Buy|Sell)\b", re.IGNORECASE)
@@ -1017,7 +1171,7 @@ class SolanaTxAnalyzer:
 async def get_transaction(
     signature: str,
     *,
-    endpoint: str = DEFAULT_RPC_ENDPOINT,
+    endpoint: str = "https://api.mainnet-beta.solana.com",
     commitment: str = "finalized",
     max_supported_transaction_version: int = 0,
     encoding: str = "jsonParsed",
@@ -1041,7 +1195,7 @@ async def get_transaction(
 async def get_token_balances(
     owner_pubkey: str,
     *,
-    endpoint: str = DEFAULT_RPC_ENDPOINT,
+    endpoint: str = "https://api.mainnet-beta.solana.com",
     commitment: str = "finalized",
     encoding: str = "jsonParsed",
     include_zero_balances: bool = False,
@@ -1065,7 +1219,7 @@ async def get_token_balances(
 async def get_sol_balance(
     account_pubkey: str,
     *,
-    endpoint: str = DEFAULT_RPC_ENDPOINT,
+    endpoint: str = "https://api.mainnet-beta.solana.com",
     commitment: str = "finalized",
 ) -> str:
     """Atajo funcional para obtener el balance de SOL de una cuenta."""
@@ -1085,7 +1239,7 @@ async def get_sol_balance(
 async def get_signature_statuses(
     signatures: List[str],
     *,
-    endpoint: str = DEFAULT_RPC_ENDPOINT,
+    endpoint: str = "https://api.mainnet-beta.solana.com",
     search_transaction_history: bool = False,
 ) -> SignatureStatusesResponse:
     """Atajo funcional para obtener el estado de confirmación de firmas."""
