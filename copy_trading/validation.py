@@ -154,7 +154,7 @@ class ValidationEngine:
             if can_execute:
                 self._logger.info(f"Validaciones completadas exitosamente para trade {side} de {amount_sol} SOL")
             else:
-                self._logger.warning(f"Validaciones fallaron para trade {side} de {amount_sol} SOL")
+                self._logger.info(f"Validaciones fallaron para trade {side} de {amount_sol} SOL")
 
             return can_execute, checks
         except Exception as e:
@@ -356,7 +356,7 @@ class ValidationEngine:
         has_critical_failures = any(self._is_critical_failure(check.name) for check in failed_checks)
 
         if has_critical_failures:
-            self._logger.warning(f"Validaciones completadas con fallos críticos en {validation_duration:.3f}s")
+            self._logger.info(f"Validaciones completadas con fallos críticos en {validation_duration:.3f}s")
             if cancelled_tasks:
                 self._logger.debug(f"Validaciones canceladas: {', '.join(cancelled_tasks)}")
         else:

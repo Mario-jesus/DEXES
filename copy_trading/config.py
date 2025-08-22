@@ -182,7 +182,7 @@ class CopyTradingConfig:
     # Validaciones
     validations_enabled: bool = True
     strict_mode: bool = False                                      # Cambiado a False para permitir WARNING en copy trading
-    max_traders_per_token: Optional[int] = None                    # Maximo de traders que pueden tener una posicion abierta en un token
+    max_traders_per_token: int = 1                                 # Maximo de traders que pueden tener una posicion abierta en un token
     max_amount_to_invest_per_trader: Optional[str] = None          # Maximo de SOL que puede invertir un trader en posiciones abiertas
     max_open_tokens_per_trader: Optional[int] = None               # Maximo de tokens que puede tener un trader
     max_open_positions_per_token_per_trader: Optional[int] = None  # Maximo de posiciones que puede tener un trader en un token
@@ -440,7 +440,7 @@ class CopyTradingConfig:
             # Validaciones
             validations_enabled=data.get('validations_enabled', True),
             strict_mode=data.get('strict_mode', False),
-            max_traders_per_token=data.get('max_traders_per_token'),
+            max_traders_per_token=int(data.get('max_traders_per_token', 1)),
             max_amount_to_invest_per_trader=data.get('max_amount_to_invest_per_trader'),
             max_open_tokens_per_trader=data.get('max_open_tokens_per_trader'),
             max_open_positions_per_token_per_trader=data.get('max_open_positions_per_token_per_trader'),
