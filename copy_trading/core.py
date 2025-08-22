@@ -306,6 +306,11 @@ class CopyTrading:
             self._logger.info("Deteniendo sistema Copy Trading")
             self.is_running = False
 
+            # Cerrar callback
+            if self.trade_processor_callback:
+                await self.trade_processor_callback.shutdown()
+                self._logger.debug("TradeProcessorCallback cerrado")
+
             # Procesar posiciones pendientes
             pending_count = await self.queue_manager.pending_queue.get_pending_count() if self.queue_manager.pending_queue else 0
             if pending_count > 0:
@@ -381,6 +386,8 @@ class CopyTrading:
                     self._logger.error(f"Error cancelando tarea de posiciones pendientes: {e}")
                 finally:
                     self._pending_task = None
+
+            self._logger.warning("Sistema detenido correctamente")
 
         except Exception as e:
             self._logger.error(f"Error deteniendo sistema: {e}")

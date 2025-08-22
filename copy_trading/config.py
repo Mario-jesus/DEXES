@@ -470,7 +470,14 @@ class CopyTradingConfig:
             log_filename=data.get('log_filename', 'copy_trading_%Y-%m-%d_%H-%M-%S.log'),
             enable_logfire=data.get('enable_logfire', False),
             min_logfire_level=data.get('min_logfire_level', 'WARNING'),
-            logfire_config=data.get('logfire_config', cls.logfire_config),
+            logfire_config=data.get('logfire_config', {
+                'service_name': 'copy_trading_development',
+                'environment': 'development',
+                'tags': {
+                    'project': 'pumpfun-copy-trading-system',
+                    'version': '1.0.0'
+                }
+            }),
 
             # Sistema
             dry_run=data.get('dry_run', False),

@@ -22,7 +22,7 @@ class ClosePosition(Position):
     def to_dict(self) -> Dict[str, Any]:
         """Convierte a diccionario"""
         # Obtener el diccionario base de la clase padre
-        base_dict = super().to_dict()
+        base_dict = super(ClosePosition, self).to_dict()
         # Agregar solo los atributos únicos de ClosePosition
         base_dict['status'] = self.status.value
         return base_dict
@@ -154,6 +154,7 @@ class SubClosePosition:
             id=data.get('id', str(uuid.uuid4())),
             amount_sol=data.get('amount_sol', ''),
             amount_tokens=data.get('amount_tokens', ''),
+            total_cost_sol=data.get('total_cost_sol', ''),
             status=ClosePositionStatus(data.get('status', ClosePositionStatus.PENDING.value)),
             message_error=data.get('message_error', ''),
             created_at=datetime.fromisoformat(data['created_at']) if data.get('created_at') else datetime.now()
@@ -280,7 +281,7 @@ class OpenPosition(Position):
     def to_dict(self) -> Dict[str, Any]:
         """Convierte a diccionario"""
         # Obtener el diccionario base de la clase padre
-        base_dict = super().to_dict()
+        base_dict = super(OpenPosition, self).to_dict()
 
         # Procesar close_history usando la función de serialización
         close_history_dict = serialize_for_json(self.close_history)

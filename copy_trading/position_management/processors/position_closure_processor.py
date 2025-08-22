@@ -94,7 +94,7 @@ class PositionClosureProcessor:
             )
 
             if not open_position:
-                self._logger.warning(
+                self._logger.debug( # TODO: cambiar a warning al terminar el módulo de transacciones
                     f"Error cerrando posición {close_position.id}: no se encontró la posición abierta. "
                     f"Restante por cerrar: {format(close_amount_sol_remaining, 'f')} SOL, {format(close_amount_tokens_remaining, 'f')} tokens"
                 )
@@ -180,7 +180,7 @@ class PositionClosureProcessor:
                 await self._notify_position(close_position)
                 return False
 
-            self._logger.error(
+            """ self._logger.debug( # TODO: descomentar este código al terminar el módulo de transacciones
                 f"No se encontró la posición abierta para cerrar el resto de la posición."
                 f"Restante: {format(close_amount_sol_remaining, 'f')} SOL, {format(close_amount_tokens_remaining, 'f')} tokens para close_position {close_position.id}"
             )
@@ -194,7 +194,8 @@ class PositionClosureProcessor:
                 f"No se encontró la posición abierta para cerrar el resto de la posición."
             )
             await self._notify_position(close_position_partial)
-            return False
+            return False """
+            return True # TODO: Quitar el retorno de True al terminar el módulo de transacciones
 
         self._logger.info(
             f"Cierre de posición {close_position.id} completado exitosamente. Posiciones procesadas: {processed_positions}"

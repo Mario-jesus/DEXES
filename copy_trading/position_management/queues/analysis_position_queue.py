@@ -232,28 +232,29 @@ class AnalysisPositionQueue:
 
     async def get_position_by_id(self, position_id: str) -> Optional[Position]:
         try:
-            # Crear una cola temporal para buscar la posición
-            temp_queue: asyncio.Queue[Position] = asyncio.Queue()
-            found_position = None
+            async with self._lock:
+                # Crear una cola temporal para buscar la posición
+                temp_queue: asyncio.Queue[Position] = asyncio.Queue()
+                found_position = None
 
-            # Transferir elementos de la cola original a la temporal
-            while not self._analysis_queue.empty():
-                try:
-                    position = self._analysis_queue.get_nowait()
-                    if position.id == position_id:
-                        found_position = position
-                    else:
-                        temp_queue.put_nowait(position)
-                except asyncio.QueueEmpty:
-                    break
+                # Transferir elementos de la cola original a la temporal
+                while not self._analysis_queue.empty():
+                    try:
+                        position = self._analysis_queue.get_nowait()
+                        if position.id == position_id:
+                            found_position = position
+                        else:
+                            temp_queue.put_nowait(position)
+                    except asyncio.QueueEmpty:
+                        break
 
-            # Transferir elementos de vuelta a la cola original
-            while not temp_queue.empty():
-                try:
-                    position = temp_queue.get_nowait()
-                    self._analysis_queue.put_nowait(position)
-                except asyncio.QueueEmpty:
-                    break
+                # Transferir elementos de vuelta a la cola original
+                while not temp_queue.empty():
+                    try:
+                        position = temp_queue.get_nowait()
+                        self._analysis_queue.put_nowait(position)
+                    except asyncio.QueueEmpty:
+                        break
 
             return found_position
         except Exception as e:
@@ -263,26 +264,27 @@ class AnalysisPositionQueue:
     async def get_analysis_positions(self) -> List[Position]:
         """Obtiene todas las posiciones en análisis"""
         try:
-            # Crear una cola temporal para obtener todas las posiciones
-            temp_queue: asyncio.Queue[Position] = asyncio.Queue()
-            positions: List[Position] = []
+            async with self._lock:
+                # Crear una cola temporal para obtener todas las posiciones
+                temp_queue: asyncio.Queue[Position] = asyncio.Queue()
+                positions: List[Position] = []
 
-            # Transferir elementos de la cola original a la temporal
-            while not self._analysis_queue.empty():
-                try:
-                    position = self._analysis_queue.get_nowait()
-                    positions.append(position)
-                    temp_queue.put_nowait(position)
-                except asyncio.QueueEmpty:
-                    break
+                # Transferir elementos de la cola original a la temporal
+                while not self._analysis_queue.empty():
+                    try:
+                        position = self._analysis_queue.get_nowait()
+                        positions.append(position)
+                        temp_queue.put_nowait(position)
+                    except asyncio.QueueEmpty:
+                        break
 
-            # Transferir elementos de vuelta a la cola original
-            while not temp_queue.empty():
-                try:
-                    position = temp_queue.get_nowait()
-                    self._analysis_queue.put_nowait(position)
-                except asyncio.QueueEmpty:
-                    break
+                # Transferir elementos de vuelta a la cola original
+                while not temp_queue.empty():
+                    try:
+                        position = temp_queue.get_nowait()
+                        self._analysis_queue.put_nowait(position)
+                    except asyncio.QueueEmpty:
+                        break
 
             self._logger.debug(f"Obtenidas {len(positions)} posiciones de análisis")
             return positions
@@ -292,29 +294,32 @@ class AnalysisPositionQueue:
 
     async def remove_position_by_id(self, position_id: str) -> Optional[Position]:
         try:
-            # Crear una cola temporal para buscar y remover la posición
-            temp_queue: asyncio.Queue[Position] = asyncio.Queue()
-            removed_position = None
+            self._logger.debug(f"Removiendo posición {position_id} de cola de análisis")
 
-            # Transferir elementos de la cola original a la temporal
-            while not self._analysis_queue.empty():
-                try:
-                    position = self._analysis_queue.get_nowait()
-                    if position.id == position_id:
-                        removed_position = position
-                        # No lo agregamos de vuelta a la cola temporal
-                    else:
-                        temp_queue.put_nowait(position)
-                except asyncio.QueueEmpty:
-                    break
+            async with self._lock:
+                # Crear una cola temporal para buscar y remover la posición
+                temp_queue: asyncio.Queue[Position] = asyncio.Queue()
+                removed_position = None
 
-            # Transferir elementos de vuelta a la cola original
-            while not temp_queue.empty():
-                try:
-                    position = temp_queue.get_nowait()
-                    self._analysis_queue.put_nowait(position)
-                except asyncio.QueueEmpty:
-                    break
+                # Transferir elementos de la cola original a la temporal
+                while not self._analysis_queue.empty():
+                    try:
+                        position = self._analysis_queue.get_nowait()
+                        if position.id == position_id:
+                            removed_position = position
+                            # No lo agregamos de vuelta a la cola temporal
+                        else:
+                            temp_queue.put_nowait(position)
+                    except asyncio.QueueEmpty:
+                        break
+
+                # Transferir elementos de vuelta a la cola original
+                while not temp_queue.empty():
+                    try:
+                        position = temp_queue.get_nowait()
+                        self._analysis_queue.put_nowait(position)
+                    except asyncio.QueueEmpty:
+                        break
 
             if removed_position:
                 await self._save_analysis_queue()
@@ -329,6 +334,8 @@ class AnalysisPositionQueue:
 
     async def _add_analysis_queue(self, position: Position, no_wait=False) -> bool:
         try:
+            self._logger.debug(f"Agregando posición {position.id} a cola de análisis")
+
             if self._analysis_queue.full():
                 self._logger.warning(f"Cola de análisis llena, no se puede agregar posición {position.id}")
                 return False
@@ -539,7 +546,6 @@ class AnalysisPositionQueue:
 
                     if success and transaction_analysis and transaction_analysis.success:
                         self._logger.debug(f"Posición {position.id} analizada exitosamente en intento {attempt + 1}")
-                        await self.remove_position_by_id(position.id)
                         await self._notify_analysis_finished(position, ProcessedAnalysisResult(
                             success=True,
                             error_kind=None,
@@ -550,7 +556,6 @@ class AnalysisPositionQueue:
                     # Si no fue exitoso, verificar si es un error que no debe reintentarse
                     if transaction_analysis and transaction_analysis.error_kind in ["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found"]:
                         self._logger.debug(f"Posición {position.id} con error no reintentable: {transaction_analysis.error_kind}")
-                        await self.remove_position_by_id(position.id)
                         await self._handle_error_position(
                             position=position,
                             error_kind=cast(
@@ -564,7 +569,6 @@ class AnalysisPositionQueue:
                     # Si es el último intento, manejar como error
                     if attempt == max_retries - 1:
                         self._logger.warning(f"Posición {position.id} falló después de {max_retries} intentos")
-                        await self.remove_position_by_id(position.id)
                         error_kind = transaction_analysis.error_kind if transaction_analysis else "unknown"
                         message = transaction_analysis.error_message if transaction_analysis else "Error después de múltiples reintentos"
 
@@ -592,7 +596,6 @@ class AnalysisPositionQueue:
                     # Si es el último intento, manejar como error
                     if attempt == max_retries - 1:
                         self._logger.error(f"Posición {position.id} falló definitivamente después de {max_retries} intentos")
-                        await self.remove_position_by_id(position.id)
                         await self._handle_error_position(
                             position=position,
                             error_kind="unknown",

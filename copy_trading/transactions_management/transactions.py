@@ -130,7 +130,8 @@ class TransactionExecutor:
         self._logger.debug(f"Resultado lightning trade: {result}")
 
         error = result.get('error')
-        self._logger.error(f"Error lightning trade: {error}")
+        if error:
+            self._logger.error(f"Error lightning trade: {error}")
 
         return signature
 
