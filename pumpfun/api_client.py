@@ -109,6 +109,7 @@ class PumpFunApiClient(metaclass=SingletonMeta):
         self.http_timeout = http_timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.background_tasks: set[asyncio.Task] = set()
 
         # Estado interno
         self._websocket = None
@@ -545,12 +546,18 @@ class PumpFunApiClient(metaclass=SingletonMeta):
         try:
             while self._is_websocket_connected:
                 try:
+                    if not self._websocket:
+                        print("🔌 WebSocket desconectado")
+                        break
+
                     # Escuchar mensaje SIN timeout para no perder trades
                     message = await self._websocket.recv()
 
                     self._websocket_message_count += 1
                     # Procesar mensaje en background para no bloquear la escucha
-                    asyncio.create_task(self._process_websocket_message(message))
+                    task = asyncio.create_task(self._process_websocket_message(message if isinstance(message, str) else message.decode('utf-8')))
+                    self.background_tasks.add(task)
+                    task.add_done_callback(self.background_tasks.discard)
 
                 except ConnectionClosed:
                     print("🔌 WebSocket desconectado")
