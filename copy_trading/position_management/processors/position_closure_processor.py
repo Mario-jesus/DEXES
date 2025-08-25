@@ -77,8 +77,8 @@ class PositionClosureProcessor:
             self._logger.error(f"Error cerrando posición {close_position.id}: no se encontró el trader_trade_data")
             return False
 
-        close_amount_sol_remaining = Decimal(close_position.amount_sol)
-        close_amount_tokens_remaining = Decimal(close_position.amount_tokens)
+        close_amount_sol_remaining = Decimal(close_position.amount_sol_executed)
+        close_amount_tokens_remaining = Decimal(close_position.amount_tokens_executed)
 
         self._logger.debug(
             f"Comenzando proceso de cierre para close_position {close_position.id} - "
@@ -118,8 +118,8 @@ class PositionClosureProcessor:
                 )
                 close_position_partial = SubClosePosition(
                     close_position=close_position,
-                    amount_sol=format(open_amount_sol_remaining, 'f'),
-                    amount_tokens=format(open_amount_tokens_remaining, 'f'),
+                    amount_sol_executed=format(open_amount_sol_remaining, 'f'),
+                    amount_tokens_executed=format(open_amount_tokens_remaining, 'f'),
                     status=ClosePositionStatus.SUCCESS
                 )
 
@@ -140,8 +140,8 @@ class PositionClosureProcessor:
                 close_position.status = ClosePositionStatus.SUCCESS
                 close_position_partial = SubClosePosition(
                     close_position=close_position,
-                    amount_sol=format(close_amount_sol_remaining, 'f'),
-                    amount_tokens=format(close_amount_tokens_remaining, 'f'),
+                    amount_sol_executed=format(close_amount_sol_remaining, 'f'),
+                    amount_tokens_executed=format(close_amount_tokens_remaining, 'f'),
                     status=ClosePositionStatus.SUCCESS
                 )
                 open_position.add_close(close_position_partial)
@@ -186,8 +186,8 @@ class PositionClosureProcessor:
             )
             close_position_partial = SubClosePosition(
                 close_position=close_position,
-                amount_sol=format(close_amount_sol_remaining, 'f'),
-                amount_tokens=format(close_amount_tokens_remaining, 'f'),
+                amount_sol_executed=format(close_amount_sol_remaining, 'f'),
+                amount_tokens_executed=format(close_amount_tokens_remaining, 'f'),
                 status=ClosePositionStatus.FAILED
             )
             close_position_partial.message_error = (

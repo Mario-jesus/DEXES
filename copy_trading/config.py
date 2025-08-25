@@ -106,7 +106,7 @@ class TraderConfig:
     trader_info: TraderInfo
     enabled: bool = True
 
-    amount_mode: Optional[AmountMode] = AmountMode.EXACT
+    amount_mode: Optional[AmountMode] = None
     amount_value: Optional[str] = None
 
     max_amount_to_invest: Optional[str] = None
@@ -117,7 +117,7 @@ class TraderConfig:
     max_position_size: Optional[str] = None
     adjust_position_size: bool = True
     max_daily_volume_sol_open: Optional[str] = None
-    min_trade_interval_seconds: int = 1
+    min_open_trade_interval_seconds: Optional[int] = None
 
     def __post_init__(self):
         _logger.debug(f"TraderConfig inicializado para trader: {self.trader_info.wallet_address}, enabled: {self.enabled}")
@@ -137,7 +137,7 @@ class TraderConfig:
             'max_position_size': self.max_position_size,
             'adjust_position_size': self.adjust_position_size,
             'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
-            'min_trade_interval_seconds': self.min_trade_interval_seconds
+            'min_open_trade_interval_seconds': self.min_open_trade_interval_seconds
         }
 
     @classmethod
@@ -156,7 +156,7 @@ class TraderConfig:
             max_position_size=data.get('max_position_size'),
             adjust_position_size=data.get('adjust_position_size', True),
             max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
-            min_trade_interval_seconds=data.get('min_trade_interval_seconds', 1)
+            min_open_trade_interval_seconds=data.get('min_open_trade_interval_seconds')
         )
 
 
@@ -191,7 +191,7 @@ class CopyTradingConfig:
     max_position_size: Optional[str] = None                        # Maximo de SOL que puede tener una posicion
     adjust_position_size: bool = True                              # Si se ajusta el tamaño de la posicion automaticamente si esta activado en base a max_position_size y min_position_size
     max_daily_volume_sol_open: Optional[str] = None                # Maximo de SOL que puede tener un trader en un dia en posiciones abiertas
-    min_trade_interval_seconds_per_trader: int = 1                 # Minimo de segundos que debe esperar un trader para hacer un trade
+    min_open_trade_interval_seconds_per_trader: Optional[int] = None    # Minimo de segundos que debe esperar un trader para hacer un trade de apertura de posicion
 
     # Configuración de Transacciones
     transaction_type: TransactionType = TransactionType.LIGHTNING_TRADE
@@ -366,7 +366,7 @@ class CopyTradingConfig:
             'max_position_size': self.max_position_size,
             'adjust_position_size': self.adjust_position_size,
             'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
-            'min_trade_interval_seconds_per_trader': self.min_trade_interval_seconds_per_trader,
+            'min_open_trade_interval_seconds_per_trader': self.min_open_trade_interval_seconds_per_trader,
             'transaction_type': self.transaction_type.value,
             'pool_type': self.pool_type,
             'skip_preflight': self.skip_preflight,
@@ -449,7 +449,7 @@ class CopyTradingConfig:
             max_position_size=data.get('max_position_size'),
             adjust_position_size=data.get('adjust_position_size', True),
             max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
-            min_trade_interval_seconds_per_trader=data.get('min_trade_interval_seconds_per_trader', 1),
+            min_open_trade_interval_seconds_per_trader=data.get('min_open_trade_interval_seconds_per_trader'),
 
             # Configuración de Transacciones
             transaction_type=TransactionType(data.get('transaction_type', TransactionType.LIGHTNING_TRADE.value)),

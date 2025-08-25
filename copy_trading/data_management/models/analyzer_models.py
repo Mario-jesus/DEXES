@@ -48,7 +48,7 @@ class TransactionAnalysis:
     """
     success: bool
     op_type: Optional[str] = None
-    error_kind: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'invalid_transaction_format', 'transaction_not_found', 'instruction', 'custom', 'generic', 'unknown']] = None
+    error_kind: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'invalid_transaction_format', 'transaction_not_found', 'insufficient_funds_for_rent', 'unknown']] = None
     error_message: Optional[str] = None
     token_ui_delta: Optional[str] = None
     bonding_curve_sol_delta: Optional[str] = None
@@ -67,7 +67,7 @@ class SignatureStatus:
     confirmations: Optional[int]
     slot: int
     success: bool
-    type_error: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'unknown']] = None
+    type_error: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'unknown']] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -92,26 +92,49 @@ class SignatureStatus:
             err = status_data.get("Err")
             _logger.debug(f"[SignatureStatus.from_dict] err: {err}")
             if err and isinstance(err, dict):
-                ins_err = err.get("InstructionError", [0, {}])
-                _logger.debug(f"[SignatureStatus.from_dict] ins_err: {ins_err}")
-                code_error = 0
-                if (
-                    isinstance(ins_err, list)
-                    and len(ins_err) > 1
-                    and isinstance(ins_err[1], dict)
-                    and isinstance(ins_err[1].get("Custom"), int)
-                ):
-                    code_error = cast(int, ins_err[1]["Custom"])
-                    _logger.debug(f"[SignatureStatus.from_dict] code_error detectado: {code_error}")
-                if code_error == 6002:
-                    type_error = "slippage"
-                elif code_error == 6023:
-                    type_error = "insufficient_tokens"
-                elif code_error == 1:
-                    type_error = "insufficient_lamports"
+                # Mapear InsufficientFundsForRent directamente
+                if "InsufficientFundsForRent" in err:
+                    type_error = "insufficient_funds_for_rent"
+                    _logger.debug(f"[SignatureStatus.from_dict] InsufficientFundsForRent detectado")
                 else:
-                    type_error = "unknown"
-                _logger.debug(f"[SignatureStatus.from_dict] type_error mapeado: {type_error}")
+                    ins_err = err.get("InstructionError", [0, {}])
+                    _logger.debug(f"[SignatureStatus.from_dict] ins_err: {ins_err}")
+                    code_error = 0
+                    if (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], dict)
+                        and isinstance(ins_err[1].get("Custom"), int)
+                    ):
+                        code_error = cast(int, ins_err[1]["Custom"])
+                        _logger.debug(f"[SignatureStatus.from_dict] code_error detectado: {code_error}")
+                    elif (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], dict)
+                        and "InsufficientFundsForRent" in ins_err[1]
+                    ):
+                        type_error = "insufficient_funds_for_rent"
+                        _logger.debug(f"[SignatureStatus.from_dict] InsufficientFundsForRent dentro de InstructionError detectado")
+                    elif (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], str)
+                        and ins_err[1] == "InsufficientFundsForRent"
+                    ):
+                        type_error = "insufficient_funds_for_rent"
+                        _logger.debug(f"[SignatureStatus.from_dict] InsufficientFundsForRent string dentro de InstructionError detectado")
+
+                    if type_error is None:
+                        if code_error == 6002:
+                            type_error = "slippage"
+                        elif code_error == 6023:
+                            type_error = "insufficient_tokens"
+                        elif code_error == 1:
+                            type_error = "insufficient_lamports"
+                        else:
+                            type_error = "unknown"
+                        _logger.debug(f"[SignatureStatus.from_dict] type_error mapeado: {type_error}")
             elif err is not None:
                 type_error = "unknown"
                 _logger.debug(f"[SignatureStatus.from_dict] err no es dict pero existe, type_error=unknown")

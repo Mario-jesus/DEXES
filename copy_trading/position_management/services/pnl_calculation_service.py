@@ -67,10 +67,10 @@ class PnLCalculationService:
             return "0.0", "0.0"
 
         if position.status == PositionStatus.OPEN:
-            if not position.amount_sol or Decimal(position.amount_sol) == 0:
+            if not position.amount_sol_executed or Decimal(position.amount_sol_executed) == 0:
                 return "0.0", "0.0"
 
-            current_value = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
+            current_value = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
             cost_basis = Decimal(position.total_cost_sol) if position.total_cost_sol and include_transaction_costs else Decimal('0')
             pnl_sol, pnl_usd = cls._calculate_pnl_from_amounts(current_value, cost_basis, Decimal(sol_price_usd))
 
@@ -100,7 +100,7 @@ class PnLCalculationService:
             return "0.0", "0.0"
 
         # Valor de entrada (cuánto valían los tokens cuando se compraron)
-        entry_value = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
+        entry_value = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
 
         # Valor total de salida (cuánto se recibió por los tokens)
         total_exit_value = Decimal('0')
@@ -108,7 +108,7 @@ class PnLCalculationService:
 
         for close_item in position.close_history:
             # Calcular valor de salida para este cierre
-            total_exit_value += Decimal(close_item.amount_sol) if close_item.amount_sol else Decimal('0')
+            total_exit_value += Decimal(close_item.amount_sol_executed) if close_item.amount_sol_executed else Decimal('0')
             total_exit_costs += Decimal(close_item.total_cost_sol) if close_item.total_cost_sol else Decimal('0')
 
         # Calcular P&L base (sin costos)
@@ -160,18 +160,18 @@ class PnLCalculationService:
         # Obtener los datos reales del cierre
         if isinstance(close_item, SubClosePosition):
             # Para SubClosePosition, usar los datos del subcierre
-            close_amount_sol = Decimal(close_item.amount_sol) if close_item.amount_sol else Decimal('0')
-            close_amount_tokens = Decimal(close_item.amount_tokens) if close_item.amount_tokens else Decimal('0')
+            close_amount_sol = Decimal(close_item.amount_sol_executed) if close_item.amount_sol_executed else Decimal('0')
+            close_amount_tokens = Decimal(close_item.amount_tokens_executed) if close_item.amount_tokens_executed else Decimal('0')
         else:
             # Para ClosePosition, usar los datos del cierre
-            close_amount_sol = Decimal(close_item.amount_sol) if close_item.amount_sol else Decimal('0')
-            close_amount_tokens = Decimal(close_item.amount_tokens) if close_item.amount_tokens else Decimal('0')
+            close_amount_sol = Decimal(close_item.amount_sol_executed) if close_item.amount_sol_executed else Decimal('0')
+            close_amount_tokens = Decimal(close_item.amount_tokens_executed) if close_item.amount_tokens_executed else Decimal('0')
 
         if close_amount_sol == 0:
             return "0.0", "0.0"
 
         # Calcular el costo proporcional basado en los tokens cerrados
-        total_original_tokens = Decimal(position.amount_tokens) if position.amount_tokens else Decimal('0')
+        total_original_tokens = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
         if total_original_tokens == 0:
             return "0.0", "0.0"
 
@@ -243,13 +243,13 @@ class PnLCalculationService:
             # Obtener datos del cierre
             if isinstance(close_item, SubClosePosition):
                 close_data = close_item.close_position
-                close_amount_sol = close_item.amount_sol
-                close_amount_tokens = close_item.amount_tokens
+                close_amount_sol = close_item.amount_sol_executed
+                close_amount_tokens = close_item.amount_tokens_executed
                 close_type = "partial"
             else:
                 close_data = close_item
-                close_amount_sol = close_item.amount_sol
-                close_amount_tokens = close_item.amount_tokens
+                close_amount_sol = close_item.amount_sol_executed
+                close_amount_tokens = close_item.amount_tokens_executed
                 close_type = "full"
 
             # P&L individual de este cierre
@@ -314,13 +314,13 @@ class PnLCalculationService:
             # Obtener datos del cierre
             if isinstance(close_item, SubClosePosition):
                 close_data = close_item.close_position
-                close_amount_sol = close_item.amount_sol
-                close_amount_tokens = close_item.amount_tokens
+                close_amount_sol = close_item.amount_sol_executed
+                close_amount_tokens = close_item.amount_tokens_executed
                 close_type = "partial"
             else:
                 close_data = close_item
-                close_amount_sol = close_item.amount_sol
-                close_amount_tokens = close_item.amount_tokens
+                close_amount_sol = close_item.amount_sol_executed
+                close_amount_tokens = close_item.amount_tokens_executed
                 close_type = "full"
 
             # P&L individual sin costos de transacción
@@ -384,14 +384,14 @@ class PnLCalculationService:
 
         for close_item in position.close_history:
             if isinstance(close_item, SubClosePosition):
-                if close_item.amount_sol:
-                    total_sol += Decimal(close_item.amount_sol)
-                if close_item.amount_tokens:
-                    total_tokens += Decimal(close_item.amount_tokens)
+                if close_item.amount_sol_executed:
+                    total_sol += Decimal(close_item.amount_sol_executed)
+                if close_item.amount_tokens_executed:
+                    total_tokens += Decimal(close_item.amount_tokens_executed)
             else:
-                if close_item.amount_sol:
-                    total_sol += Decimal(close_item.amount_sol)
-                if close_item.amount_tokens:
-                    total_tokens += Decimal(close_item.amount_tokens)
+                if close_item.amount_sol_executed:
+                    total_sol += Decimal(close_item.amount_sol_executed)
+                if close_item.amount_tokens_executed:
+                    total_tokens += Decimal(close_item.amount_tokens_executed)
 
         return format(total_sol, "f"), format(total_tokens, "f")

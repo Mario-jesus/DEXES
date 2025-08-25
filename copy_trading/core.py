@@ -12,13 +12,19 @@ from pumpfun.subscriptions import PumpFunSubscriptions
 from pumpfun.wallet_manager import PumpFunWalletStorage, WalletData, WalletImportException
 from logging_system import AppLogger
 
-from .config import CopyTradingConfig, TransactionType
+from .config import CopyTradingConfig
 from .validation import ValidationEngine
 from .balance_management import BalanceManager
 from .callbacks import TradeProcessorCallback
 from .position_management import PositionQueueManager
 from .position_management.models import PositionTraderTradeData
-from .data_management import TokenTraderManager, TradingDataFetcher, SolanaTxAnalyzer, SolanaWebsocketManager
+from .data_management import (
+    TokenTraderManager, 
+    TradingDataFetcher, 
+    SolanaTxAnalyzer, 
+    SolanaWebsocketManager,
+    TradingDataStore
+)
 from .notifications import (
     NotificationManager,
     TelegramStrategy,
@@ -46,10 +52,15 @@ class CopyTrading:
         self.trading_data_fetcher = TradingDataFetcher(rpc_url=config.rpc_url)
         self._logger.debug("TradingDataFetcher inicializado")
 
+        # Inicializar TradingDataStore
+        self.trading_data_store = TradingDataStore()
+        self._logger.debug("TradingDataStore inicializado")
+
         # Inicializar TokenTraderManager
         self.token_trader_manager = TokenTraderManager(
             config=config,
-            trading_data_fetcher=self.trading_data_fetcher
+            trading_data_fetcher=self.trading_data_fetcher,
+            trading_data_store=self.trading_data_store
         )
         self._logger.debug("TokenTraderManager inicializado")
 
@@ -163,7 +174,7 @@ class CopyTrading:
                     'messages_per_minute': self.config.telegram_messages_per_minute
                 }
             )
-            strategies.append(telegram_strategy)
+            #strategies.append(telegram_strategy)
             self._logger.debug("Estrategia de Telegram configurada")
         else:
             self._logger.debug("Telegram no configurado (faltan token o chat_id)")
@@ -246,12 +257,18 @@ class CopyTrading:
                 self._logger.error(error_msg)
                 raise ValueError(error_msg)
 
+            # Inicializar TokenTraderManager
+            self._logger.debug("Inicializando TokenTraderManager...")
+            await self.token_trader_manager.initialize_system_trader_stats()
+            self._logger.debug("TokenTraderManager inicializado")
+
             # Inicializar callback después de que las colas estén listas
             self._logger.debug("Inicializando TradeProcessorCallback...")
             self.trade_processor_callback = TradeProcessorCallback(
                 config=self.config,
                 pending_position_queue=self.queue_manager.pending_queue,
-                validation_engine=self.validation_engine
+                validation_engine=self.validation_engine,
+                token_trader_manager=self.token_trader_manager
             )
             self._logger.debug("TradeProcessorCallback inicializado")
 
@@ -265,11 +282,6 @@ class CopyTrading:
             )
 
             self._logger.debug(f"Suscrito a {len(self.config.traders)} traders")
-
-            # Inicializar TokenTraderManager
-            self._logger.debug("Inicializando TokenTraderManager...")
-            await self.token_trader_manager.initialize_system_trader_stats()
-            self._logger.debug("TokenTraderManager inicializado")
 
             # Actualizar estado
             self.is_running = True
@@ -541,9 +553,6 @@ class CopyTrading:
                 if position:
                     self._logger.debug(f"Procesando posición pendiente: {position.token_address[:8]}...")
                     await self._execute_trade(position)
-
-                # Espera un poco entre ejecuciones para evitar rate limits
-                await asyncio.sleep(1)
             except asyncio.CancelledError:
                 # Salir del bucle si la tarea es cancelada
                 self._logger.debug("Loop de posiciones pendientes cancelado")
@@ -551,7 +560,7 @@ class CopyTrading:
             except Exception as e:
                 self._logger.error(f"Error en el loop de ejecución de trades: {e}", exc_info=True)
                 # Esperar antes de reintentar para no sobrecargar en caso de error continuo
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
 
     async def _process_pending_positions(self):
         """Procesa posiciones pendientes en la cola"""

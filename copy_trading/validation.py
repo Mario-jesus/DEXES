@@ -6,7 +6,6 @@ from enum import Enum
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
-from solders.keypair import Keypair
 from decimal import Decimal, getcontext
 from asyncio import TaskGroup, CancelledError
 import asyncio
@@ -756,7 +755,7 @@ class ValidationEngine:
                 return check
 
             # Obtener tokens del trader
-            trader_tokens = await self.token_trader_manager.get_tokens_by_trader(trader_wallet)
+            trader_tokens = self.token_trader_manager.get_tokens_by_trader(trader_wallet)
             current_tokens = len(trader_tokens)
 
             # Contar solo tokens con posiciones activas

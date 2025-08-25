@@ -151,7 +151,7 @@ class SlippageAnalysisService:
             results['execution_slippage_percentage'] = exec_slippage_pct
 
             # Valor del slippage de ejecución
-            expected_value = Decimal(position.amount_sol)
+            expected_value = Decimal(position.amount_sol_executed)
             actual_value = expected_value * (1 + Decimal(exec_slippage_pct) / 100)
             slippage_value_sol = actual_value - expected_value
             results['execution_slippage_value_sol'] = format(slippage_value_sol, "f")
@@ -165,7 +165,7 @@ class SlippageAnalysisService:
 
             for close_item in position.close_history:
                 close_data = cls._get_close_position_data(close_item)
-                if close_data.execution_price and close_data.amount_sol:
+                if close_data.execution_price and close_data.amount_sol_executed:
                     # Calcular slippage vs precio de entrada
                     close_slippage_pct = cls._calculate_close_slippage_vs_entry(position, close_data)
                     if close_slippage_pct != "0.0":
@@ -173,7 +173,7 @@ class SlippageAnalysisService:
                         close_count += 1
 
                         # Valor del slippage de este cierre
-                        close_amount = Decimal(close_data.amount_sol)
+                        close_amount = Decimal(close_data.amount_sol_executed)
                         slippage_impact = close_amount * (Decimal(close_slippage_pct) / 100)
                         total_slippage_value_sol += slippage_impact
 
@@ -251,8 +251,8 @@ class SlippageAnalysisService:
                 'close_id': close_data.id,
                 'close_timestamp': close_data.created_at.isoformat(),
                 'close_type': close_data.status.value,
-                'close_amount_sol': close_data.amount_sol,
-                'close_amount_tokens': close_data.amount_tokens,
+                'close_amount_sol': close_data.amount_sol_executed,
+                'close_amount_tokens': close_data.amount_tokens_executed,
                 'close_entry_price': close_data.entry_price,
                 'close_execution_price': close_data.execution_price,
                 'slippage_analysis': slippage_analysis

@@ -164,38 +164,96 @@ class OpenPositionQueue:
             is_open: True si es una posición abierta, False si es una posición cerrada
         """
         try:
-            if self.token_trader_manager:
-                if is_open:
-                    # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
-                    timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
-                    await self.token_trader_manager.register_trader_token_open_position(
-                        position.trader_wallet, 
-                        position.token_address, 
-                        position.amount_sol,
-                        timestamp
-                    )
+            if self.token_trader_manager is None:
+                return
 
-                    # Agregar trader al token solo si es la primera posición
-                    if len(queue) == 1:
-                        await self.token_trader_manager.add_trader_to_token(position.token_address, position.trader_wallet)
-                else:
-                    # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
-                    timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
-                    await self.token_trader_manager.register_trader_token_closed_position(
-                        position.trader_wallet, 
-                        position.token_address, 
-                        position.amount_sol,
-                        timestamp
-                    )
+            if is_open:
+                # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
+                timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
+                await self.token_trader_manager.register_trader_token_open_position(
+                    position.trader_wallet, 
+                    position.token_address, 
+                    position.amount_sol,
+                    timestamp
+                )
 
-                    # Remover trader del token solo si no quedan posiciones
-                    if len(queue) == 0:
-                        await self.token_trader_manager.remove_trader_from_token(position.token_address, position.trader_wallet)
+                # Agregar trader al token solo si es la primera posición
+                if len(queue) == 1:
+                    await self.token_trader_manager.add_trader_to_token(position.token_address, position.trader_wallet)
+            else:
+                # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
+                timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
+                await self.token_trader_manager.register_trader_token_closed_position(
+                    position.trader_wallet, 
+                    position.token_address, 
+                    position.amount_sol,
+                    timestamp
+                )
+
+                # Remover trader del token solo si no quedan posiciones
+                if len(queue) == 0:
+                    await self.token_trader_manager.remove_trader_from_token(position.token_address, position.trader_wallet)
+                    # Reconciliar contadores cuando la cola queda vacía
+                    try:
+                        manager = self.token_trader_manager
+                        if manager and hasattr(manager, 'reconcile_trader_token_active_positions'):
+                            await getattr(manager, 'reconcile_trader_token_active_positions')(
+                                position.trader_wallet,
+                                position.token_address,
+                                active_count=0
+                            )
+                    except Exception as e:
+                        self._logger.warning(f"No se pudo reconciliar contadores para {position.trader_wallet}-{position.token_address}: {e}")
 
             # Agregar nombre del trader a los metadatos de la posición
             if self.token_trader_manager and is_open and len(queue) == 1:
                 trader_stats = await self.token_trader_manager.get_trader_stats(position.trader_wallet)
                 position.add_metadata('trader_nickname', trader_stats.nickname)
+
+        except Exception as e:
+            self._logger.error(f"Error registrando datos de token/trader para posición {position.id}: {e}", exc_info=True)
+
+    async def _update_token_trader_data(self, position: OpenPosition, is_failed: bool) -> None:
+        try:
+            if self.token_trader_manager is None:
+                return
+
+            trader_token_queue = self.open_positions_queue[position.trader_wallet][position.token_address]
+
+            if not is_failed:
+                # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
+                timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
+                await self.token_trader_manager.update_trader_token_open_position(
+                    position.trader_wallet, 
+                    position.token_address, 
+                    position.amount_sol,
+                    position.amount_sol_executed,
+                    timestamp
+                )
+            else:
+                # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
+                timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
+                await self.token_trader_manager.register_trader_token_failed_position(
+                    position.trader_wallet, 
+                    position.token_address, 
+                    position.amount_sol,
+                    timestamp
+                )
+
+                # Remover trader del token solo si no quedan posiciones
+                if len(trader_token_queue) == 0:
+                    await self.token_trader_manager.remove_trader_from_token(position.token_address, position.trader_wallet)
+                    # Reconciliar contadores: si la cola está vacía, no deben quedar posiciones activas
+                    try:
+                        manager = self.token_trader_manager
+                        if manager and hasattr(manager, 'reconcile_trader_token_active_positions'):
+                            await getattr(manager, 'reconcile_trader_token_active_positions')(
+                                position.trader_wallet,
+                                position.token_address,
+                                active_count=0
+                            )
+                    except Exception as e:
+                        self._logger.warning(f"No se pudo reconciliar contadores para {position.trader_wallet}-{position.token_address}: {e}")
 
         except Exception as e:
             self._logger.error(f"Error registrando datos de token/trader para posición {position.id}: {e}", exc_info=True)
@@ -250,6 +308,33 @@ class OpenPositionQueue:
             self._logger.error(f"Error en _get_open_positions_internal: {e}")
             return []
 
+    async def handle_failed_position(self, position: OpenPosition, details: ProcessedAnalysisResult) -> None:
+        try:
+            if not details.success:
+                error_kind = details.error_kind
+                if error_kind == "slippage":
+                    position.message_error = "Transaction failed due to slippage. The price moved unfavorably before the transaction could be completed."
+                elif error_kind == "insufficient_tokens":
+                    position.message_error = "insufficient tokens available to complete the operation."
+                elif error_kind == "insufficient_lamports":
+                    position.message_error = "insufficient SOL (lamports) to pay for the transaction or fees."
+                elif error_kind == "transaction_not_found":
+                    position.message_error = "The transaction was not found on the Solana blockchain."
+                elif error_kind == "insufficient_funds_for_rent":
+                    position.message_error = "insufficient SOL to cover the account rent requirement."
+                else:
+                    position.message_error = details.error_message or "Unknown error occurred during transaction analysis."
+
+                if await self.remove_position(position):
+                    self._logger.info(f"Position {position.id} removed from open positions queue")
+                else:
+                    self._logger.warning(f"Position {position.id} not removed from open positions queue")
+
+                await self._notify_position(position)
+
+        except Exception as e:
+            self._logger.error(f"Error updating position {position.id}: {e}")
+
     async def get_queue_size(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> int:
         """
         Obtiene el tamaño de la cola de un token, el total de posiciones abiertas de un trader o el total general de posiciones abiertas.
@@ -290,25 +375,10 @@ class OpenPositionQueue:
                 raise ValueError(f"Position {position.id} is not an OpenPosition")
 
             if not details.success:
-                error_kind = details.error_kind
-                if error_kind == "slippage":
-                    position.message_error = "Transaction failed due to slippage. The price moved unfavorably before the transaction could be completed."
-                elif error_kind == "insufficient_tokens":
-                    position.message_error = "insufficient tokens available to complete the operation."
-                elif error_kind == "insufficient_lamports":
-                    position.message_error = "insufficient SOL (lamports) to pay for the transaction or fees."
-                elif error_kind == "transaction_not_found":
-                    position.message_error = "The transaction was not found on the Solana blockchain"
-                else:
-                    position.message_error = details.error_message or "Unknown error occurred during transaction analysis."
-
-                if await self.remove_position(position):
-                    self._logger.info(f"Position {position.id} removed from open positions queue")
-                else:
-                    self._logger.warning(f"Position {position.id} not removed from open positions queue")
-
-                await self._notify_position(position)
+                await self._update_token_trader_data(position, is_failed=True)
+                await self.handle_failed_position(position, details)
             else:
+                await self._update_token_trader_data(position, is_failed=False)
                 position.is_analyzed = True
 
             self._logger.info(f"Position {position.id} analysis finished with status {position.status}")

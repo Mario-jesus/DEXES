@@ -252,6 +252,7 @@ class QueueInitializationManager:
             self.closed_queue = ClosedPositionQueue(
                 analysis_queue=self.analysis_queue,
                 position_notification_queue=self.notification_queue,
+                token_trader_manager=self.token_trader_manager,
                 max_size=self.max_size
             )
             await self.closed_queue.__aenter__()

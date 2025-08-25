@@ -65,35 +65,35 @@ class PositionValidationService:
         issues = []
 
         # Verificar datos básicos
-        if not position.amount_sol or Decimal(position.amount_sol) == 0:
+        if not position.amount_sol_executed or Decimal(position.amount_sol_executed) == 0:
             issues.append("amount_sol is zero or empty")
 
         if not position.amount_tokens or Decimal(position.amount_tokens) == 0:
             issues.append("amount_tokens is zero or empty")
 
-        if not position.total_cost_sol and not position.amount_sol:
+        if not position.total_cost_sol and not position.amount_sol_executed:
             issues.append("no cost basis available")
 
         # Verificar consistencia de cierres
         if position.close_history:
             for i, close_item in enumerate(position.close_history):
-                if not close_item.amount_sol or Decimal(close_item.amount_sol) == 0:
+                if not close_item.amount_sol_executed or Decimal(close_item.amount_sol_executed) == 0:
                     issues.append(f"close {i} has zero amount_sol")
 
-                if not close_item.amount_tokens or Decimal(close_item.amount_tokens) == 0:
+                if not close_item.amount_tokens_executed or Decimal(close_item.amount_tokens_executed) == 0:
                     issues.append(f"close {i} has zero amount_tokens")
 
                 # Verificar que el cierre no exceda la posición original
-                if position.amount_tokens and close_item.amount_tokens:
-                    if Decimal(close_item.amount_tokens) > Decimal(position.amount_tokens):
+                if position.amount_tokens_executed and close_item.amount_tokens_executed:
+                    if Decimal(close_item.amount_tokens_executed) > Decimal(position.amount_tokens_executed):
                         issues.append(f"close {i} amount_tokens exceeds position total")
 
         return {
             'has_issues': len(issues) > 0,
             'issues': issues,
             'position_id': position.id,
-            'amount_sol': position.amount_sol,
-            'amount_tokens': position.amount_tokens,
+            'amount_sol': position.amount_sol_executed,
+            'amount_tokens': position.amount_tokens_executed,
             'total_cost_sol': position.total_cost_sol,
             'close_count': len(position.close_history)
         }
@@ -129,10 +129,10 @@ class PositionValidationService:
             close_data = cls._get_close_position_data(close_item)
 
             # Acumular totales
-            if close_data.amount_tokens:
-                total_closed_tokens += Decimal(close_data.amount_tokens)
-            if close_data.amount_sol:
-                total_closed_sol += Decimal(close_data.amount_sol)
+            if close_data.amount_tokens_executed:
+                total_closed_tokens += Decimal(close_data.amount_tokens_executed)
+            if close_data.amount_sol_executed:
+                total_closed_sol += Decimal(close_data.amount_sol_executed)
 
             # Validar datos del cierre
             if not close_data.execution_price:
@@ -142,13 +142,13 @@ class PositionValidationService:
                 warnings.append(f"close {i} has no execution_signature")
 
         # Verificar que no se exceda la posición original
-        if position.amount_tokens:
-            original_tokens = Decimal(position.amount_tokens)
+        if position.amount_tokens_executed:
+            original_tokens = Decimal(position.amount_tokens_executed)
             if total_closed_tokens > original_tokens:
                 issues.append(f"total closed tokens ({total_closed_tokens}) exceeds original ({original_tokens})")
 
-        if position.amount_sol:
-            original_sol = Decimal(position.amount_sol)
+        if position.amount_sol_executed:
+            original_sol = Decimal(position.amount_sol_executed)
             if total_closed_sol > original_sol:
                 issues.append(f"total closed SOL ({total_closed_sol}) exceeds original ({original_sol})")
 

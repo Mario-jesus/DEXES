@@ -105,14 +105,15 @@ class TradeAnalysisProcessor:
             self._logger.debug(f"Aplicando análisis a posición {position.id}")
 
             # Actualizar datos básicos de la posición
-            position.amount_tokens = format(abs(Decimal(analysis_result.token_ui_delta or "0.0")), "f")
-            position.amount_sol = format(abs(Decimal(analysis_result.bonding_curve_sol_delta or "0.0")), "f")
-            position.fee_sol = analysis_result.fee_sol or "0.0"
-            position.total_cost_sol = analysis_result.total_cost_sol or "0.0"
-            position.execution_price = analysis_result.price_sol_per_token or "0.0"
+            if analysis_result.success:
+                position.amount_tokens_executed = format(abs(Decimal(analysis_result.token_ui_delta or "0.0")), "f")
+                position.amount_sol_executed = format(abs(Decimal(analysis_result.bonding_curve_sol_delta or "0.0")), "f")
+                position.fee_sol = analysis_result.fee_sol or "0.0"
+                position.total_cost_sol = analysis_result.total_cost_sol or "0.0"
+                position.execution_price = analysis_result.price_sol_per_token or "0.0"
 
-            # Agregar resultado del análisis a la posición
-            position.add_metadata("analysis_result", analysis_result)
+                # Agregar resultado del análisis a la posición
+                position.add_metadata("analysis_result", analysis_result)
 
             # Obtener información fresca del token
             token_info = None

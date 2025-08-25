@@ -11,7 +11,7 @@ from logging_system import AppLogger
 from .models import TokenInfo, TraderStats, TraderTokenStats
 
 
-class CacheManager:
+class TradingDataStore:
     """Gestor de cache inteligente con TTL"""
 
     def __init__(self, token_cache_ttl: Optional[int] = None, trader_cache_ttl: Optional[int] = None):
@@ -24,7 +24,7 @@ class CacheManager:
         """
         # Logger
         self._logger = AppLogger(self.__class__.__name__)
-        
+
         # Cache de datos
         self._token_cache: Dict[str, TokenInfo] = {}
         self._trader_cache: Dict[str, TraderStats] = {}
@@ -42,12 +42,11 @@ class CacheManager:
 
         self._logger.debug(f"CacheManager inicializado - Token TTL: {token_cache_ttl}s, Trader TTL: {trader_cache_ttl}s")
 
-    async def get_token_data(self, token_address: str) -> Optional[TokenInfo]:
+    def get_token_data(self, token_address: str) -> Optional[TokenInfo]:
         """Obtiene datos de token del cache"""
-        async with self._lock:
-            if self._is_token_valid(token_address):
-                return self._token_cache.get(token_address)
-            return None
+        if self._is_token_valid(token_address):
+            return self._token_cache.get(token_address)
+        return None
 
     async def set_token_data(self, token_address: str, data: TokenInfo) -> None:
         """Establece datos de token en el cache"""
@@ -56,12 +55,11 @@ class CacheManager:
             self._token_timestamps[token_address] = datetime.now()
             self._logger.debug(f"Token cache actualizado: {token_address}")
 
-    async def get_trader_data(self, trader_wallet: str) -> Optional[TraderStats]:
+    def get_trader_data(self, trader_wallet: str) -> Optional[TraderStats]:
         """Obtiene datos de trader del cache"""
-        async with self._lock:
-            if self._is_trader_valid(trader_wallet):
-                return self._trader_cache.get(trader_wallet)
-            return None
+        if self._is_trader_valid(trader_wallet):
+            return self._trader_cache.get(trader_wallet)
+        return None
 
     async def set_trader_data(self, trader_wallet: str, data: TraderStats) -> None:
         """Establece datos de trader en el cache"""
@@ -70,12 +68,11 @@ class CacheManager:
             self._trader_timestamps[trader_wallet] = datetime.now()
             self._logger.debug(f"Trader cache actualizado: {trader_wallet}")
 
-    async def get_trader_token_data(self, key: str) -> Optional[TraderTokenStats]:
+    def get_trader_token_data(self, key: str) -> Optional[TraderTokenStats]:
         """Obtiene datos de trader-token del cache"""
-        async with self._lock:
-            if self._is_trader_token_valid(key):
-                return self._trader_token_cache.get(key)
-            return None
+        if self._is_trader_token_valid(key):
+            return self._trader_token_cache.get(key)
+        return None
 
     async def set_trader_token_data(self, key: str, data: TraderTokenStats) -> None:
         """Establece datos de trader-token en el cache"""
@@ -120,15 +117,13 @@ class CacheManager:
         timestamp = self._trader_token_timestamps[key]
         return datetime.now() - timestamp < timedelta(seconds=self.trader_cache_ttl)
 
-    async def should_refresh_token(self, token_address: str) -> bool:
+    def should_refresh_token(self, token_address: str) -> bool:
         """Determina si se debe refrescar el cache de token"""
-        async with self._lock:
-            return not self._is_token_valid(token_address)
+        return not self._is_token_valid(token_address)
 
-    async def should_refresh_trader(self, trader_wallet: str) -> bool:
+    def should_refresh_trader(self, trader_wallet: str) -> bool:
         """Determina si se debe refrescar el cache de trader"""
-        async with self._lock:
-            return not self._is_trader_valid(trader_wallet)
+        return not self._is_trader_valid(trader_wallet)
 
     async def clear_token_cache(self, token_address: Optional[str] = None) -> None:
         """Limpia el cache de tokens"""
@@ -163,35 +158,34 @@ class CacheManager:
             self._trader_timestamps.clear()
             self._logger.info("Todo el cache limpiado")
 
-    async def get_cache_stats(self) -> Dict[str, Any]:
+    def get_cache_stats(self) -> Dict[str, Any]:
         """Obtiene estadísticas del cache"""
-        async with self._lock:
-            now = datetime.now()
+        now = datetime.now()
 
-            # Contar tokens expirados
-            expired_tokens = 0
-            if self.token_cache_ttl is not None:
-                expired_tokens = sum(
-                    1 for timestamp in self._token_timestamps.values()
-                    if now - timestamp >= timedelta(seconds=self.token_cache_ttl)
-                )
+        # Contar tokens expirados
+        expired_tokens = 0
+        if self.token_cache_ttl is not None:
+            expired_tokens = sum(
+                1 for timestamp in self._token_timestamps.values()
+                if now - timestamp >= timedelta(seconds=self.token_cache_ttl)
+            )
 
-            # Contar traders expirados
-            expired_traders = 0
-            if self.trader_cache_ttl is not None:
-                expired_traders = sum(
-                    1 for timestamp in self._trader_timestamps.values()
-                    if now - timestamp >= timedelta(seconds=self.trader_cache_ttl)
-                )
+        # Contar traders expirados
+        expired_traders = 0
+        if self.trader_cache_ttl is not None:
+            expired_traders = sum(
+                1 for timestamp in self._trader_timestamps.values()
+                if now - timestamp >= timedelta(seconds=self.trader_cache_ttl)
+            )
 
-            return {
-                'token_cache_size': len(self._token_cache),
-                'trader_cache_size': len(self._trader_cache),
-                'expired_tokens': expired_tokens,
-                'expired_traders': expired_traders,
-                'token_cache_ttl': self.token_cache_ttl,
-                'trader_cache_ttl': self.trader_cache_ttl
-            }
+        return {
+            'token_cache_size': len(self._token_cache),
+            'trader_cache_size': len(self._trader_cache),
+            'expired_tokens': expired_tokens,
+            'expired_traders': expired_traders,
+            'token_cache_ttl': self.token_cache_ttl,
+            'trader_cache_ttl': self.trader_cache_ttl
+        }
 
     def set_token_ttl(self, ttl_seconds: Optional[int]) -> None:
         """
@@ -219,25 +213,23 @@ class CacheManager:
         else:
             self._logger.info(f"TTL de traders actualizado a {ttl_seconds} segundos")
 
-    async def get_all_token_data(self) -> Dict[str, Any]:
+    def get_all_token_data(self) -> Dict[str, Any]:
         """Obtiene todos los datos de tokens del cache"""
-        async with self._lock:
-            # Solo retornar datos válidos
-            valid_tokens = {}
-            for token_address, data in self._token_cache.items():
-                if self._is_token_valid(token_address):
-                    valid_tokens[token_address] = data
-            return valid_tokens
+        # Solo retornar datos válidos
+        valid_tokens = {}
+        for token_address, data in self._token_cache.items():
+            if self._is_token_valid(token_address):
+                valid_tokens[token_address] = data
+        return valid_tokens
 
-    async def get_all_trader_data(self) -> Dict[str, Any]:
+    def get_all_trader_data(self) -> Dict[str, Any]:
         """Obtiene todos los datos de traders del cache"""
-        async with self._lock:
-            # Solo retornar datos válidos
-            valid_traders = {}
-            for trader_wallet, data in self._trader_cache.items():
-                if self._is_trader_valid(trader_wallet):
-                    valid_traders[trader_wallet] = data
-            return valid_traders
+        # Solo retornar datos válidos
+        valid_traders = {}
+        for trader_wallet, data in self._trader_cache.items():
+            if self._is_trader_valid(trader_wallet):
+                valid_traders[trader_wallet] = data
+        return valid_traders
 
     def disable_token_cache_expiration(self) -> None:
         """Deshabilita la expiración del cache de tokens"""

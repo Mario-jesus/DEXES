@@ -12,7 +12,6 @@ getcontext().prec = 26
 @dataclass
 class TokenInfo:
     """Información de un token"""
-    num_traders: int = 0
     traders: Set[str] = field(default_factory=set)
     name: str = ""
     symbol: str = ""
@@ -20,17 +19,19 @@ class TokenInfo:
     def add_trader(self, trader_wallet: str) -> None:
         """Añade un trader a la lista de traders"""
         self.traders.add(trader_wallet)
-        self.num_traders += 1
 
     def remove_trader(self, trader_wallet: str) -> None:
         """Elimina un trader de la lista de traders"""
         if trader_wallet in self.traders:
             self.traders.remove(trader_wallet)
-            self.num_traders -= 1
+
+    @property
+    def num_traders(self) -> int:
+        """Obtiene el total de traders"""
+        return len(self.traders)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            'num_traders': self.num_traders,
             'traders': list(self.traders),
             'name': self.name,
             'symbol': self.symbol
@@ -39,7 +40,6 @@ class TokenInfo:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'TokenInfo':
         return cls(
-            num_traders=data.get('num_traders', 0),
             traders=set(data.get('traders', [])),
             name=data.get('name', ''),
             symbol=data.get('symbol', '')
@@ -93,6 +93,25 @@ class TraderTokenStats:
         """Registra una posición cerrada para este trader en este token"""
         self.closed_positions += 1
         self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol), "f")
+        if timestamp:
+            self.last_trade_timestamp = timestamp
+
+    def update_open_position(self, previous_volume_sol: str, volume_sol: str, timestamp: Optional[str] = None) -> None:
+        """Actualiza una posición abierta para este trader en este token"""
+        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
+        if timestamp:
+            self.last_trade_timestamp = timestamp
+
+    def update_closed_position(self, previous_volume_sol: str, volume_sol: str, timestamp: Optional[str] = None) -> None:
+        """Actualiza una posición cerrada para este trader en este token"""
+        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
+        if timestamp:
+            self.last_trade_timestamp = timestamp
+
+    def register_failed_position(self, volume_sol: str, timestamp: Optional[str] = None) -> None:
+        """Registra una posición fallida para este trader en este token"""
+        self.open_positions = max(0, self.open_positions - 1)
+        self.total_volume_sol_open = format(max(0, Decimal(self.total_volume_sol_open) - Decimal(volume_sol)), "f")
         if timestamp:
             self.last_trade_timestamp = timestamp
 
@@ -185,6 +204,17 @@ class TraderStats:
     def register_closed_position(self, volume_sol: str) -> None:
         self.closed_positions += 1
         self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol), "f")
+
+    def update_open_position(self, previous_volume_sol: str, volume_sol: str) -> None:
+        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
+
+    def update_closed_position(self, previous_volume_sol: str, volume_sol: str) -> None:
+        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
+
+    # Registrar posicion fallida, volumen y total de trades
+    def register_failed_position(self, volume_sol: str) -> None:
+        self.open_positions = max(0, self.open_positions - 1)
+        self.total_volume_sol_open = format(max(0, Decimal(self.total_volume_sol_open) - Decimal(volume_sol)), "f")
 
     # Registrar P&Ls
     def register_pnl(self, pnl_sol: str, pnl_sol_with_costs: str) -> None:

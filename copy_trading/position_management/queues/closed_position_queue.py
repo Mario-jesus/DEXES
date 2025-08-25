@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from typing import Dict, Optional, Any, List, TYPE_CHECKING
 
 from logging_system import AppLogger
+from ...data_management import TokenTraderManager
 from ..models import ClosePosition, ClosePositionStatus, ProcessedAnalysisResult, Position
 from .notification_queue import PositionNotificationQueue
 
@@ -19,18 +20,26 @@ if TYPE_CHECKING:
 
 
 class ClosedPositionQueue:
-    """Puerta de salida de posiciones cerradas coordinada por token."""
+    """Puerta de salida de posiciones de cierre coordinada por token."""
 
-    def __init__(self, analysis_queue: 'AnalysisPositionQueue', position_notification_queue: Optional[PositionNotificationQueue] = None, closure_processor: Optional['PositionClosureProcessor'] = None, max_size: Optional[int] = None, process_interval: float = 2.0, max_retries: int = 3):
+    def __init__(self,
+            analysis_queue: 'AnalysisPositionQueue',
+            position_notification_queue: Optional[PositionNotificationQueue] = None,
+            closure_processor: Optional['PositionClosureProcessor'] = None,
+            token_trader_manager: Optional[TokenTraderManager] = None,
+            max_size: Optional[int] = None,
+            process_interval: float = 5.0,
+            max_retries: int = 3,):
         self._logger = AppLogger(self.__class__.__name__)
         self.analysis_queue = analysis_queue
         self.position_notification_queue = position_notification_queue
-        self.max_size = max_size
-        self.process_interval = process_interval
         self.closure_processor = closure_processor
+        self.token_trader_manager = token_trader_manager
+        self.process_interval = process_interval
+        self.max_size = max_size
         self.max_retries = max_retries
 
-        # Posiciones cerradas esperando liberación por token
+        # Posiciones de cierre esperando liberación por token
         self._pending_by_token: Dict[str, deque[ClosePosition]] = defaultdict(lambda: deque(maxlen=self.max_size))
 
         # Métricas
@@ -113,6 +122,51 @@ class ClosedPositionQueue:
             self._logger.error(f"Error en add_closed_position({position.id}): {e}")
             return False
 
+    async def _update_token_trader_data(self, position: ClosePosition, is_failed: bool) -> None:
+        try:
+            if self.token_trader_manager is None:
+                return
+
+            trader_token_queue = self._pending_by_token[position.token_address]
+
+            if not is_failed:
+                # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
+                timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
+                await self.token_trader_manager.update_trader_token_closed_position(
+                    position.trader_wallet, 
+                    position.token_address, 
+                    position.amount_sol,
+                    position.amount_sol_executed,
+                    timestamp
+                )
+            else:
+                # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
+                timestamp = str(position.trader_trade_data.timestamp) if position.trader_trade_data and position.trader_trade_data.timestamp else None
+                await self.token_trader_manager.register_trader_token_failed_position(
+                    position.trader_wallet, 
+                    position.token_address, 
+                    position.amount_sol,
+                    timestamp
+                )
+
+                # Remover trader del token solo si no quedan posiciones
+                if len(trader_token_queue) == 0:
+                    await self.token_trader_manager.remove_trader_from_token(position.token_address, position.trader_wallet)
+                    # Reconciliar contadores: si la cola está vacía, no deben quedar posiciones activas
+                    try:
+                        manager = self.token_trader_manager
+                        if manager and hasattr(manager, 'reconcile_trader_token_active_positions'):
+                            await getattr(manager, 'reconcile_trader_token_active_positions')(
+                                position.trader_wallet,
+                                position.token_address,
+                                active_count=0
+                            )
+                    except Exception as e:
+                        self._logger.warning(f"No se pudo reconciliar contadores para {position.trader_wallet}-{position.token_address}: {e}")
+
+        except Exception as e:
+            self._logger.error(f"Error registrando datos de token/trader para posición {position.id}: {e}", exc_info=True)
+
     async def on_analysis_finished(self, position: ClosePosition, details: ProcessedAnalysisResult) -> None:
         try:
             if isinstance(position, ClosePosition):
@@ -129,7 +183,9 @@ class ClosedPositionQueue:
                 elif error_kind == "insufficient_lamports":
                     position.message_error = "insufficient SOL (lamports) to pay for the transaction or fees."
                 elif error_kind == "transaction_not_found":
-                    position.message_error = "The transaction was not found on the Solana blockchain"
+                    position.message_error = "The transaction was not found on the Solana blockchain."
+                elif error_kind == "insufficient_funds_for_rent":
+                    position.message_error = "insufficient SOL to cover the account rent requirement."
                 else:
                     position.message_error = details.error_message or "Unknown error occurred during transaction analysis."
 
@@ -138,8 +194,11 @@ class ClosedPositionQueue:
                 else:
                     self._logger.warning(f"Position {position.id} not removed from closed positions queue")
 
+                await self._update_token_trader_data(position, is_failed=True)
+
                 await self._notify_position(position)
             else:
+                await self._update_token_trader_data(position, is_failed=False)
                 position.is_analyzed = True
 
             self._logger.info(f"Position {position.id} analysis finished with status {position.status}")
@@ -194,6 +253,9 @@ class ClosedPositionQueue:
         async with self._lock:
             tokens_snapshot = [t for t, q in self._pending_by_token.items() if len(q) > 0]
 
+        if not tokens_snapshot:
+            return
+
         for token in tokens_snapshot:
             try:
                 has_open_analysis = await self._has_pending_open_analysis_for_token(token)
@@ -203,6 +265,7 @@ class ClosedPositionQueue:
 
             if has_open_analysis:
                 # Aún no liberar este token
+                self._logger.debug(f"Aún no liberar este token {token}")
                 continue
 
             # Procesar solo la cabeza de la cola por token (FIFO)
@@ -213,6 +276,7 @@ class ClosedPositionQueue:
                     pos = queue[0]
 
             if not pos:
+                self._logger.debug(f"No se encontró posición para token {token}")
                 continue
 
             # Requerir que la ClosePosition esté analizada
@@ -224,6 +288,7 @@ class ClosedPositionQueue:
 
             if not is_analyzed:
                 # No bloquear otros tokens; simplemente saltar este token por ahora
+                self._logger.debug(f"No bloquear otros tokens; simplemente saltar este token por ahora {token}")
                 continue
 
             # Ejecutar cierre usando el procesador

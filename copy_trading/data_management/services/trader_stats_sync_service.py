@@ -11,8 +11,10 @@ from ..models import TraderStats, TraderTokenStats
 logger = logging.getLogger(__name__)
 
 class SyncOperation(TypedDict):
+    previous_volume_sol: NotRequired[str]
     volume_sol_open: NotRequired[str]
     volume_sol_closed: NotRequired[str]
+    volume_sol_failed: NotRequired[str]
     pnl_sol: NotRequired[str]
     pnl_sol_with_costs: NotRequired[str]
     timestamp: NotRequired[Optional[str]]
@@ -26,14 +28,14 @@ class TraderStatsSyncService:
 
     @staticmethod
     def sync_models(trader_stats: TraderStats, trader_token_stats: TraderTokenStats, 
-                    operation: Literal['open_position', 'closed_position', 'pnl'], sync_operation: SyncOperation) -> Tuple[TraderStats, TraderTokenStats]:
+                    operation: Literal['open_position', 'closed_position', 'update_open_position', 'update_closed_position', 'failed_position', 'pnl'], sync_operation: SyncOperation) -> Tuple[TraderStats, TraderTokenStats]:
         """
         Actualiza simultáneamente TraderStats y TraderTokenStats sin iteraciones innecesarias.
         
         Args:
             trader_stats: Instancia de TraderStats a actualizar
             trader_token_stats: Instancia de TraderTokenStats a actualizar
-            operation: Tipo de operación ('open_position', 'closed_position', 'pnl')
+            operation: Tipo de operación ('open_position', 'closed_position', 'update_open_position', 'update_closed_position', 'failed_position', 'pnl')
             **kwargs: Parámetros adicionales (volume_sol, pnl_sol, pnl_sol_with_costs, timestamp)
             
         Returns:
@@ -82,6 +84,38 @@ class TraderStatsSyncService:
 
             # Actualizar TraderStats
             updated_trader_stats.register_closed_position(volume_sol_closed)
+
+        elif operation == 'update_open_position':
+            previous_volume_sol = sync_operation.get('previous_volume_sol', '0')
+            volume_sol_open = sync_operation.get('volume_sol_open', '0')
+            timestamp = sync_operation.get('timestamp')
+
+            # Actualizar TraderTokenStats
+            updated_trader_token_stats.update_open_position(previous_volume_sol, volume_sol_open, timestamp)
+
+            # Actualizar TraderStats
+            updated_trader_stats.update_open_position(previous_volume_sol, volume_sol_open)
+
+        elif operation == 'update_closed_position':
+            previous_volume_sol = sync_operation.get('previous_volume_sol', '0')
+            volume_sol_closed = sync_operation.get('volume_sol_closed', '0')
+            timestamp = sync_operation.get('timestamp')
+
+            # Actualizar TraderTokenStats
+            updated_trader_token_stats.update_closed_position(previous_volume_sol, volume_sol_closed, timestamp)
+            
+            # Actualizar TraderStats
+            updated_trader_stats.update_closed_position(previous_volume_sol, volume_sol_closed)
+
+        elif operation == 'failed_position':
+            volume_sol_failed = sync_operation.get('volume_sol_failed', '0')
+            timestamp = sync_operation.get('timestamp')
+
+            # Actualizar TraderTokenStats
+            updated_trader_token_stats.register_failed_position(volume_sol_failed, timestamp)
+
+            # Actualizar TraderStats
+            updated_trader_stats.register_failed_position(volume_sol_failed)
 
         elif operation == 'pnl':
             pnl_sol = sync_operation.get('pnl_sol', '0')

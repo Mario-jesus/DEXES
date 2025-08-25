@@ -186,7 +186,7 @@ class SolanaTxAnalyzer:
                     last_error = exc
                     if exc.status == 429:  # Too Many Requests
                         # Sleep agresivo para rate limiting: 10s a 2min
-                        base_sleep = 15  # 10 segundos base
+                        base_sleep = 15  # 15 segundos base
                         max_sleep = 120   # 2 minutos máximo
                         sleep_time = min(max_sleep, base_sleep + (attempt * 30))  # Incrementa 30s por intento
                         self._logger.warning(f"Rate limit hit (429) for SOL balance, sleeping {sleep_time}s before retry {attempt + 1}")
@@ -311,7 +311,7 @@ class SolanaTxAnalyzer:
                     last_error = exc
                     if exc.status == 429:  # Too Many Requests
                         # Sleep agresivo para rate limiting: 10s a 2min
-                        base_sleep = 15  # 10 segundos base
+                        base_sleep = 15  # 15 segundos base
                         max_sleep = 120   # 2 minutos máximo
                         sleep_time = min(max_sleep, base_sleep + (attempt * 30))  # Incrementa 30s por intento
                         self._logger.warning(f"Rate limit hit (429) for signature statuses, sleeping {sleep_time}s before retry {attempt + 1}")
@@ -437,7 +437,7 @@ class SolanaTxAnalyzer:
                     last_error = exc
                     if exc.status == 429:  # Too Many Requests
                         # Sleep agresivo para rate limiting: 10s a 2min
-                        base_sleep = 15  # 10 segundos base
+                        base_sleep = 15  # 15 segundos base
                         max_sleep = 120   # 2 minutos máximo
                         sleep_time = min(max_sleep, base_sleep + (attempt * 30))  # Incrementa 30s por intento
                         self._logger.warning(f"Rate limit hit (429) for token accounts {owner_pubkey[:8]}..., sleeping {sleep_time}s before retry {attempt + 1}")
@@ -587,7 +587,7 @@ class SolanaTxAnalyzer:
                     last_error = exc
                     if exc.status == 429:  # Too Many Requests
                         # Sleep agresivo para rate limiting: 10s a 2min
-                        base_sleep = 15  # 10 segundos base
+                        base_sleep = 15  # 15 segundos base
                         max_sleep = 120   # 2 minutos máximo
                         sleep_time = min(max_sleep, base_sleep + (attempt * 30))  # Incrementa 30s por intento
                         self._logger.info(f"Rate limit hit (429) for {signature[:8]}..., sleeping {sleep_time}s before retry {attempt + 1}")
@@ -653,10 +653,11 @@ class SolanaTxAnalyzer:
         op_type = self._detect_operation_type(logs)
 
         meta = result.get("meta", {})
-        success = meta.get("err") in (None, {})
+        err = meta.get("err")
+        success = err in (None, {})
 
         if not success:
-            error = self._detect_error(logs, meta.get("err"))
+            error = self._detect_error(err)
             error_kind = error.get("kind", "unknown") if error else "unknown"
             self._logger.warning(f"Transaction failed with error kind: {error_kind}")
             return TransactionAnalysis(
@@ -985,78 +986,147 @@ class SolanaTxAnalyzer:
         self._logger.debug("No operation type detected.")
         return ""
 
-    def _detect_error(self, logs: List[str], meta_err: Any = None) -> Optional[Dict[str, Any]]:
-        if not logs and meta_err is None:
-            self._logger.debug("No logs or meta_err provided for error detection.")
-            return None
-
+    def _detect_error(self, err: Any = None) -> Optional[Dict[str, Any]]:
         error_info: Dict[str, Any] = {"kind": None, "message": None}
 
-        # Meta error
-        if meta_err is not None:
+        # Meta error (usar err para clasificar el tipo)
+        if err is not None:
             try:
-                self._logger.debug(f"Attempting to parse meta_err: {meta_err}")
-                if isinstance(meta_err, dict) and "InstructionError" in meta_err:
-                    err_val = meta_err.get("InstructionError")
-                    if isinstance(err_val, list) and len(err_val) >= 2:
-                        detail = err_val[1]
-                        if isinstance(detail, dict) and "Custom" in detail:
-                            error_info["kind"] = "custom"
-                            self._logger.debug("Meta error categorized as custom instruction error.")
+                self._logger.debug(f"Attempting to parse err: {err}")
+                kind: Optional[str] = None
+                message: Optional[str] = None
+
+                if isinstance(err, dict):
+                    # Caso directo: {'InsufficientFundsForRent': {...}}
+                    if "InsufficientFundsForRent" in err:
+                        rent_detail = err.get("InsufficientFundsForRent")
+                        account_index = None
+                        if isinstance(rent_detail, dict):
+                            account_index = rent_detail.get("account_index") or rent_detail.get("accountIndex")
+                        elif isinstance(rent_detail, int):
+                            account_index = rent_detail
+                        kind = "insufficient_funds_for_rent"
+                        message = (
+                            f"insufficient funds for rent-exemption on account_index {account_index}"
+                            if account_index is not None else
+                            "insufficient funds for rent-exemption"
+                        )
+                        self._logger.debug("Err indicates insufficient_funds_for_rent.")
+
+                    # Caso InstructionError
+                    elif "InstructionError" in err:
+                        err_val = err.get("InstructionError")
+                        if isinstance(err_val, list) and len(err_val) >= 2:
+                            detail = err_val[1]
+
+                            # Variante: {'Custom': code}
+                            if isinstance(detail, dict) and isinstance(detail.get("Custom"), int):
+                                code = int(detail["Custom"])  # anchor custom code
+                                if code == 6002:
+                                    kind = "slippage"
+                                elif code == 6023:
+                                    kind = "insufficient_tokens"
+                                elif code == 1:
+                                    kind = "insufficient_lamports"
+                                else:
+                                    kind = "unknown"
+                                message = f"custom program error: {code}"
+
+                            # Variante: {'InsufficientFundsForRent': {...}} dentro de InstructionError
+                            elif isinstance(detail, dict) and "InsufficientFundsForRent" in detail:
+                                rent_detail = detail.get("InsufficientFundsForRent")
+                                account_index = None
+                                if isinstance(rent_detail, dict):
+                                    account_index = rent_detail.get("account_index") or rent_detail.get("accountIndex")
+                                elif isinstance(rent_detail, int):
+                                    account_index = rent_detail
+                                kind = "insufficient_funds_for_rent"
+                                message = (
+                                    f"insufficient funds for rent-exemption on account_index {account_index}"
+                                    if account_index is not None else
+                                    "insufficient funds for rent-exemption"
+                                )
+
+                            # Variante: string builtin
+                            elif isinstance(detail, str):
+                                if detail == "InsufficientFundsForRent":
+                                    kind = "insufficient_funds_for_rent"
+                                    message = "insufficient funds for rent-exemption"
+                                elif detail.lower().startswith("insufficient"):
+                                    # Podrían aparecer mensajes genéricos de insuficiencia
+                                    kind = "unknown"
+                                    message = detail
+                                else:
+                                    kind = "unknown"
+                                    message = detail
+                            else:
+                                kind = "unknown"
+                                message = str(detail)
+
                         else:
-                            error_info["kind"] = "instruction"
-                            error_info["message"] = str(detail)
-                            self._logger.debug(f"Meta error categorized as instruction error: {detail}")
+                            kind = "unknown"
+                            message = str(err)
+
+                    # Cualquier otra clave en err => unknown
+                    else:
+                        kind = "unknown"
+                        message = str(err)
+
+                elif isinstance(err, str):
+                    if "InsufficientFundsForRent" in err:
+                        kind = "insufficient_funds_for_rent"
+                        message = err
+                    else:
+                        kind = "unknown"
+                        message = err
                 else:
-                    error_info["kind"] = "generic"
-                    error_info["message"] = str(meta_err)
-                    self._logger.debug(f"Meta error categorized as generic: {meta_err}")
+                    kind = "unknown"
+                    message = str(err)
+
+                error_info["kind"] = kind
+                if message:
+                    error_info["message"] = message
             except Exception as e:
                 self._logger.warning(f"Error processing meta_err: {e}")
                 pass
 
-        # Log patterns
-        re_anchor = re.compile(r"AnchorError.*?Error Code:\s*([\w]+).*?Error Message:\s*(.*)", re.IGNORECASE)
-        re_insuff = re.compile(r"Transfer:\s*insufficient lamports\s*(\d+),\s*need\s*(\d+)", re.IGNORECASE)
+        # Ya no usamos logs para mensajes; construir mensajes descriptivos.
+        # Si no hubo mapeo previo (kind None) o no se asignó mensaje, definimos por defecto más abajo
 
-        for line in logs:
-            # AnchorError
-            m = re_anchor.search(line)
-            if m:
-                error_code = m.group(1).strip()
-                error_message = m.group(2).strip()
-                self._logger.debug(f"Detected AnchorError: Code={error_code}, Message={error_message}")
-
-                # Categorizar errores específicos de Anchor
-                if "TooMuchSolRequired" in error_code or "slippage" in error_message.lower():
-                    error_info["kind"] = "slippage"
-                    self._logger.debug("Categorized as slippage error.")
-                elif "NotEnoughTokensToSell" in error_code or "not enough tokens" in error_message.lower():
-                    error_info["kind"] = "insufficient_tokens"
-                    self._logger.debug("Categorized as insufficient tokens error.")
-                else:
-                    error_info["kind"] = "unknown"
-                    self._logger.debug("Categorized as unknown Anchor error.")
-
-                error_info["message"] = error_message
-                continue
-
-            # Insufficient lamports
-            m = re_insuff.search(line)
-            if m:
+        # Completar mensajes descriptivos estándar según kind mapeado
+        if error_info["kind"] in ("slippage", "insufficient_tokens", "insufficient_lamports", "insufficient_funds_for_rent"):
+            if not error_info.get("message"):
+                if error_info["kind"] == "slippage":
+                    error_info["message"] = "price slippage exceeded allowed threshold"
+                elif error_info["kind"] == "insufficient_tokens":
+                    error_info["message"] = "not enough tokens to complete operation"
+                elif error_info["kind"] == "insufficient_lamports":
+                    error_info["message"] = "insufficient lamports to cover fees or transfer"
+                elif error_info["kind"] == "insufficient_funds_for_rent":
+                    error_info["message"] = "insufficient funds for rent-exemption"
+        else:
+            # Caso unknown u otro no permitido: construir mensaje a partir de err
+            if isinstance(err, dict):
                 try:
-                    have = int(m.group(1))
-                    need = int(m.group(2))
-                    error_info["kind"] = "insufficient_lamports"
-                    error_info["message"] = f"insufficient lamports: have {have}, need {need}"
-                    self._logger.debug(f"Detected insufficient lamports: have {have}, need {need}")
-                except Exception as e:
-                    self._logger.warning(f"Error parsing insufficient lamports details: {e}")
-                    pass
-                continue
+                    # Tomar primera clave y valor completo
+                    if err:
+                        first_key = next(iter(err.keys()))
+                        first_value = err[first_key]
+                        value_str = str(first_value) if not isinstance(first_value, dict) else str(first_value)
+                        error_info["kind"] = "unknown"
+                        error_info["message"] = f"{first_key}: {value_str}"
+                    else:
+                        error_info["kind"] = "unknown"
+                        error_info["message"] = "{}"
+                except Exception:
+                    error_info["kind"] = "unknown"
+                    error_info["message"] = str(err)
+            elif err is not None:
+                error_info["kind"] = "unknown"
+                error_info["message"] = str(err)
 
-        if error_info["kind"] is None and meta_err is not None:
-            self._logger.warning(f"Could not categorize meta error: {meta_err}")
+        if error_info["kind"] is None:
+            self._logger.warning(f"Could not categorize meta error: {err}")
 
         return error_info if error_info["kind"] else None
 

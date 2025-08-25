@@ -148,7 +148,9 @@ class Position:
 
     # Datos básicos de la posición
     amount_sol: str = ""
+    amount_sol_executed: str = ""
     amount_tokens: str = ""
+    amount_tokens_executed: str = ""
     entry_price: str = ""
     fee_sol: str = ""
     total_cost_sol: str = ""
@@ -226,7 +228,9 @@ class Position:
         return {
             'id': self.id,
             'amount_sol': self.amount_sol,
+            'amount_sol_executed': self.amount_sol_executed,
             'amount_tokens': self.amount_tokens,
+            'amount_tokens_executed': self.amount_tokens_executed,
             'entry_price': self.entry_price,
             'fee_sol': self.fee_sol,
             'total_cost_sol': self.total_cost_sol,
@@ -263,7 +267,9 @@ class Position:
         return cls(
             id=data.get('id', str(uuid.uuid4())),
             amount_sol=data.get('amount_sol', ''),
+            amount_sol_executed=data.get('amount_sol_executed', ''),
             amount_tokens=data.get('amount_tokens', ''),
+            amount_tokens_executed=data.get('amount_tokens_executed', ''),
             entry_price=data.get('entry_price', ''),
             fee_sol=data.get('fee_sol', ''),
             total_cost_sol=data.get('total_cost_sol', ''),

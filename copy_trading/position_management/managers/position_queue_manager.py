@@ -164,7 +164,7 @@ class PositionQueueManager:
             self._logger.error(f"Error agregando posición {position.signature[:8]}... a pending: {e}")
             return False
 
-    async def get_next_pending(self) -> Optional[PositionTraderTradeData]:
+    async def get_next_pending(self, timeout: Optional[float] = None) -> Optional[PositionTraderTradeData]:
         """
         Obtiene la siguiente posición de la cola de pendientes.
         """
@@ -173,7 +173,7 @@ class PositionQueueManager:
             if not self.pending_queue:
                 return None
 
-            position = await self.pending_queue.get_next_pending()
+            position = await self.pending_queue.get_next_pending_wait(timeout=timeout)
             if position:
                 self._logger.debug(f"Obtenida posición pendiente: {position.signature[:8]}...")
             return position

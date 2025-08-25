@@ -65,7 +65,7 @@ class RpcContext:
 @dataclass(slots=True)
 class SignatureNotificationValue:
     """Valor de la notificación de firma."""
-    err: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'unknown']] = None
+    err: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'unknown']] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -85,27 +85,47 @@ class SignatureNotificationValue:
 
             if err_data and isinstance(err_data, dict):
                 _logger.debug(f"[SignatureNotificationValue] err_data es dict: {err_data}")
-                ins_err = err_data.get("InstructionError", [0, {}])
-                code_error = 0
-                if (
-                    isinstance(ins_err, list)
-                    and len(ins_err) > 1
-                    and isinstance(ins_err[1], dict)
-                    and isinstance(ins_err[1].get("Custom"), int)
-                ):
-                    code_error = ins_err[1]["Custom"]
-                    _logger.debug(f"[SignatureNotificationValue] code_error detectado: {code_error}")
-                if code_error == 6002:
-                    type_error = "slippage"
-                elif code_error == 6023:
-                    type_error = "insufficient_tokens"
-                elif code_error == 1:
-                    type_error = "insufficient_lamports"
+                # Mapear InsufficientFundsForRent en err directo
+                if "InsufficientFundsForRent" in err_data:
+                    type_error = "insufficient_funds_for_rent"
                 else:
-                    type_error = "unknown"
-                _logger.debug(f"[SignatureNotificationValue] type_error mapeado: {type_error}")
+                    ins_err = err_data.get("InstructionError", [0, {}])
+                    code_error = 0
+                    if (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], dict)
+                        and isinstance(ins_err[1].get("Custom"), int)
+                    ):
+                        code_error = ins_err[1]["Custom"]
+                        _logger.debug(f"[SignatureNotificationValue] code_error detectado: {code_error}")
+                    elif (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], dict)
+                        and "InsufficientFundsForRent" in ins_err[1]
+                    ):
+                        type_error = "insufficient_funds_for_rent"
+                    elif (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], str)
+                        and ins_err[1] == "InsufficientFundsForRent"
+                    ):
+                        type_error = "insufficient_funds_for_rent"
+
+                    if type_error is None:
+                        if code_error == 6002:
+                            type_error = "slippage"
+                        elif code_error == 6023:
+                            type_error = "insufficient_tokens"
+                        elif code_error == 1:
+                            type_error = "insufficient_lamports"
+                        else:
+                            type_error = "unknown"
+                    _logger.debug(f"[SignatureNotificationValue] type_error mapeado: {type_error}")
             elif (isinstance(err_data, str) and
-                err_data in ["slippage", "insufficient_tokens", "insufficient_lamports", "unknown"]):
+                err_data in ["slippage", "insufficient_tokens", "insufficient_lamports", "insufficient_funds_for_rent", "unknown"]):
                 _logger.debug(f"[SignatureNotificationValue] err_data es string conocido: {err_data}")
                 type_error = err_data
             elif err_data is not None:
@@ -117,7 +137,7 @@ class SignatureNotificationValue:
         _logger.debug(f"[SignatureNotificationValue] Retornando err={type_error}")
         return SignatureNotificationValue(
             err=cast(
-                Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'unknown']],
+                Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'unknown']],
                 type_error
             )
         )
@@ -209,7 +229,7 @@ class SignatureNotification:
         return isinstance(self.result.value, str) and self.result.value == "receivedSignature"
 
     @property
-    def error(self) -> Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'unknown']]:
+    def error(self) -> Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'unknown']]:
         """Obtiene el error si existe."""
         if not self.result or isinstance(self.result.value, str):
             return None

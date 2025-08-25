@@ -50,7 +50,9 @@ class ClosePosition(Position):
         return cls(
             id=data.get('id', str(uuid.uuid4())),
             amount_sol=data.get('amount_sol', ''),
+            amount_sol_executed=data.get('amount_sol_executed', ''),
             amount_tokens=data.get('amount_tokens', ''),
+            amount_tokens_executed=data.get('amount_tokens_executed', ''),
             entry_price=data.get('entry_price', ''),
             fee_sol=data.get('fee_sol', ''),
             total_cost_sol=data.get('total_cost_sol', ''),
@@ -71,8 +73,8 @@ class SubClosePosition:
     """Datos de un cierre parcial de posición"""
     close_position: ClosePosition
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    amount_sol: str = ""
-    amount_tokens: str = ""
+    amount_sol_executed: str = ""
+    amount_tokens_executed: str = ""
     total_cost_sol: str = ""
     status: ClosePositionStatus = ClosePositionStatus.PENDING
     message_error: str = ""
@@ -109,11 +111,11 @@ class SubClosePosition:
         """
         try:
             # Obtener los montos de tokens del ClosePosition padre
-            parent_tokens = Decimal(self.close_position.amount_tokens) if self.close_position.amount_tokens else Decimal('0')
+            parent_tokens = Decimal(self.close_position.amount_tokens_executed) if self.close_position.amount_tokens_executed else Decimal('0')
             parent_total_cost = Decimal(self.close_position.total_cost_sol) if self.close_position.total_cost_sol else Decimal('0')
 
             # Obtener los montos de tokens de este SubClosePosition
-            sub_tokens = Decimal(self.amount_tokens) if self.amount_tokens else Decimal('0')
+            sub_tokens = Decimal(self.amount_tokens_executed) if self.amount_tokens_executed else Decimal('0')
 
             # Validar que los datos sean válidos
             if parent_tokens <= 0 or sub_tokens <= 0:
@@ -137,8 +139,8 @@ class SubClosePosition:
             'type': 'partial',
             'close_position': self.close_position.to_dict(),
             'id': self.id,
-            'amount_sol': self.amount_sol,
-            'amount_tokens': self.amount_tokens,
+            'amount_sol_executed': self.amount_sol_executed,
+            'amount_tokens_executed': self.amount_tokens_executed,
             'total_cost_sol': self.total_cost_sol,
             'status': self.status.value,
             'message_error': self.message_error,
@@ -152,8 +154,8 @@ class SubClosePosition:
         return cls(
             close_position=close_position,
             id=data.get('id', str(uuid.uuid4())),
-            amount_sol=data.get('amount_sol', ''),
-            amount_tokens=data.get('amount_tokens', ''),
+            amount_sol_executed=data.get('amount_sol_executed', ''),
+            amount_tokens_executed=data.get('amount_tokens_executed', ''),
             total_cost_sol=data.get('total_cost_sol', ''),
             status=ClosePositionStatus(data.get('status', ClosePositionStatus.PENDING.value)),
             message_error=data.get('message_error', ''),
@@ -188,7 +190,7 @@ class OpenPosition(Position):
         Returns:
             Tuple de (amount_sol, amount_tokens)
         """
-        return close_item.amount_sol, close_item.amount_tokens
+        return close_item.amount_sol_executed, close_item.amount_tokens_executed
 
     @classmethod
     def calculate_remaining_amounts(cls, position: 'OpenPosition') -> Tuple[str, str]:
@@ -202,8 +204,8 @@ class OpenPosition(Position):
             Tuple de (remaining_sol, remaining_tokens) como strings
         """
         total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original_tokens = Decimal(position.amount_tokens) if position.amount_tokens else Decimal('0')
-        total_original_sol = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
+        total_original_tokens = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
+        total_original_sol = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
         remaining_sol = max(Decimal('0'), total_original_sol - Decimal(total_closed_sol))
         remaining_tokens = max(Decimal('0'), total_original_tokens - Decimal(total_closed_tokens))
         return format(remaining_sol, "f"), format(remaining_tokens, "f")
@@ -223,11 +225,11 @@ class OpenPosition(Position):
         total_tokens = Decimal('0')
 
         for close_item in position.close_history:
-            amount_sol, amount_tokens = cls._get_close_amounts(close_item)
-            if amount_sol:
-                total_sol += Decimal(amount_sol)
-            if amount_tokens:
-                total_tokens += Decimal(amount_tokens)
+            amount_sol_executed, amount_tokens_executed = cls._get_close_amounts(close_item)
+            if amount_sol_executed:
+                total_sol += Decimal(amount_sol_executed)
+            if amount_tokens_executed:
+                total_tokens += Decimal(amount_tokens_executed)
 
         return format(total_sol, "f"), format(total_tokens, "f")
 
@@ -243,7 +245,7 @@ class OpenPosition(Position):
             Cantidad de tokens restantes como string
         """
         _, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original = Decimal(position.amount_tokens) if position.amount_tokens else Decimal('0')
+        total_original = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
         remaining = max(Decimal('0'), total_original - Decimal(total_closed_tokens))
         return format(remaining, "f")
 
@@ -253,7 +255,7 @@ class OpenPosition(Position):
         Calcula la cantidad de SOL restantes
         """
         total_closed_sol, _ = cls.calculate_total_closed_amounts(position)
-        total_original = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
+        total_original = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
         remaining = max(Decimal('0'), total_original - Decimal(total_closed_sol))
         return format(remaining, "f")
 
@@ -328,7 +330,9 @@ class OpenPosition(Position):
         return cls(
             id=data.get('id', str(uuid.uuid4())),
             amount_sol=data.get('amount_sol', ''),
+            amount_sol_executed=data.get('amount_sol_executed', ''),
             amount_tokens=data.get('amount_tokens', ''),
+            amount_tokens_executed=data.get('amount_tokens_executed', ''),
             entry_price=data.get('entry_price', ''),
             fee_sol=data.get('fee_sol', ''),
             total_cost_sol=data.get('total_cost_sol', ''),

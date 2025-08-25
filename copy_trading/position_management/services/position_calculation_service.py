@@ -57,7 +57,7 @@ class PositionCalculationService:
         Returns:
             Tuple de (amount_sol, amount_tokens)
         """
-        return close_item.amount_sol, close_item.amount_tokens
+        return close_item.amount_sol_executed, close_item.amount_tokens_executed
 
     @classmethod
     def get_last_close_data(cls, position: OpenPosition) -> Dict[str, Any]:
@@ -83,8 +83,8 @@ class PositionCalculationService:
         close_position = cls._get_close_position_data(last_close)
 
         return {
-            'amount_sol': close_position.amount_sol,
-            'amount_tokens': close_position.amount_tokens,
+            'amount_sol': close_position.amount_sol_executed,
+            'amount_tokens': close_position.amount_tokens_executed,
             'execution_price': close_position.execution_price,
             'fee_sol': close_position.fee_sol,
             'signature': close_position.execution_signature
@@ -105,11 +105,11 @@ class PositionCalculationService:
         total_tokens = Decimal('0')
 
         for close_item in position.close_history:
-            amount_sol, amount_tokens = cls._get_close_amounts(close_item)
-            if amount_sol:
-                total_sol += Decimal(amount_sol)
-            if amount_tokens:
-                total_tokens += Decimal(amount_tokens)
+            amount_sol_executed, amount_tokens_executed = cls._get_close_amounts(close_item)
+            if amount_sol_executed:
+                total_sol += Decimal(amount_sol_executed)
+            if amount_tokens_executed:
+                total_tokens += Decimal(amount_tokens_executed)
 
         return format(total_sol, "f"), format(total_tokens, "f")
 
@@ -125,7 +125,7 @@ class PositionCalculationService:
             Cantidad de tokens restantes como string
         """
         _, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original = Decimal(position.amount_tokens) if position.amount_tokens else Decimal('0')
+        total_original = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
         remaining = max(Decimal('0'), total_original - Decimal(total_closed_tokens))
         return format(remaining, "f")
 
@@ -141,8 +141,8 @@ class PositionCalculationService:
             Tuple de (remaining_sol, remaining_tokens) como strings
         """
         total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original_tokens = Decimal(position.amount_tokens) if position.amount_tokens else Decimal('0')
-        total_original_sol = Decimal(position.amount_sol) if position.amount_sol else Decimal('0')
+        total_original_tokens = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
+        total_original_sol = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
         remaining_sol = max(Decimal('0'), total_original_sol - Decimal(total_closed_sol))
         remaining_tokens = max(Decimal('0'), total_original_tokens - Decimal(total_closed_tokens))
         return format(remaining_sol, "f"), format(remaining_tokens, "f")
@@ -203,8 +203,8 @@ class PositionCalculationService:
         return {
             'position_id': position.id,
             'status': position.status.value,
-            'original_amount_sol': position.amount_sol,
-            'original_amount_tokens': position.amount_tokens,
+            'original_amount_sol': position.amount_sol_executed,
+            'original_amount_tokens': position.amount_tokens_executed,
             'total_closed_sol': total_closed_sol,
             'total_closed_tokens': total_closed_tokens,
             'remaining_sol': remaining_sol,
@@ -220,13 +220,13 @@ class PositionCalculationService:
         }
 
     @classmethod
-    def calculate_position_performance(cls, position: OpenPosition, current_price: str, sol_price_usd: str) -> Dict[str, Any]:
+    def calculate_position_performance(cls, position: OpenPosition, sol_price_usd: str) -> Dict[str, Any]:
         """
         Calcula métricas de rendimiento de una posición.
         
         Args:
             position: Objeto OpenPosition
-            current_price: Precio actual del token (opcional)
+            sol_price_usd: Precio de SOL en USD
             
         Returns:
             Diccionario con métricas de rendimiento
@@ -268,8 +268,8 @@ class PositionCalculationService:
             })
 
         # P&L no realizado (si la posición está abierta y hay precio actual)
-        if position.status.value == 'OPEN' and current_price and remaining_tokens != '0.0':
-            unrealized_pnl_sol, unrealized_pnl_usd = PnLCalculationService.calculate_pnl(position, current_price, sol_price_usd)
+        if position.status.value == 'OPEN' and remaining_tokens != '0.0':
+            unrealized_pnl_sol, unrealized_pnl_usd = PnLCalculationService.calculate_pnl(position, sol_price_usd)
             metrics.update({
                 'unrealized_pnl_sol': unrealized_pnl_sol,
                 'unrealized_pnl_usd': unrealized_pnl_usd

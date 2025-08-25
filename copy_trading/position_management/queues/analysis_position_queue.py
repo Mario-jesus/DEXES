@@ -164,7 +164,7 @@ class AnalysisPositionQueue:
 
     async def _handle_error_position(self,
         position: Position,
-        error_kind: Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "unknown"],
+        error_kind: Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"],
         error_message: Optional[str] = None
     ) -> None:
         """
@@ -232,6 +232,9 @@ class AnalysisPositionQueue:
 
     async def get_position_by_id(self, position_id: str) -> Optional[Position]:
         try:
+            if self._analysis_queue.empty():
+                return None
+
             async with self._lock:
                 # Crear una cola temporal para buscar la posición
                 temp_queue: asyncio.Queue[Position] = asyncio.Queue()
@@ -245,6 +248,8 @@ class AnalysisPositionQueue:
                             found_position = position
                         else:
                             temp_queue.put_nowait(position)
+                        # Marcar como completada en la cola original
+                        self._analysis_queue.task_done()
                     except asyncio.QueueEmpty:
                         break
 
@@ -253,6 +258,8 @@ class AnalysisPositionQueue:
                     try:
                         position = temp_queue.get_nowait()
                         self._analysis_queue.put_nowait(position)
+                        # Marcar como completada en la cola temporal
+                        temp_queue.task_done()
                     except asyncio.QueueEmpty:
                         break
 
@@ -264,6 +271,9 @@ class AnalysisPositionQueue:
     async def get_analysis_positions(self) -> List[Position]:
         """Obtiene todas las posiciones en análisis"""
         try:
+            if self._analysis_queue.empty():
+                return []
+
             async with self._lock:
                 # Crear una cola temporal para obtener todas las posiciones
                 temp_queue: asyncio.Queue[Position] = asyncio.Queue()
@@ -275,6 +285,8 @@ class AnalysisPositionQueue:
                         position = self._analysis_queue.get_nowait()
                         positions.append(position)
                         temp_queue.put_nowait(position)
+                        # Marcar como completada en la cola original
+                        self._analysis_queue.task_done()
                     except asyncio.QueueEmpty:
                         break
 
@@ -283,6 +295,8 @@ class AnalysisPositionQueue:
                     try:
                         position = temp_queue.get_nowait()
                         self._analysis_queue.put_nowait(position)
+                        # Marcar como completada en la cola temporal
+                        temp_queue.task_done()
                     except asyncio.QueueEmpty:
                         break
 
@@ -294,7 +308,8 @@ class AnalysisPositionQueue:
 
     async def remove_position_by_id(self, position_id: str) -> Optional[Position]:
         try:
-            self._logger.debug(f"Removiendo posición {position_id} de cola de análisis")
+            if self._analysis_queue.empty():
+                return None
 
             async with self._lock:
                 # Crear una cola temporal para buscar y remover la posición
@@ -310,6 +325,8 @@ class AnalysisPositionQueue:
                             # No lo agregamos de vuelta a la cola temporal
                         else:
                             temp_queue.put_nowait(position)
+                        # Marcar como completada en la cola original
+                        self._analysis_queue.task_done()
                     except asyncio.QueueEmpty:
                         break
 
@@ -318,6 +335,8 @@ class AnalysisPositionQueue:
                     try:
                         position = temp_queue.get_nowait()
                         self._analysis_queue.put_nowait(position)
+                        # Marcar como completada en la cola temporal
+                        temp_queue.task_done()
                     except asyncio.QueueEmpty:
                         break
 
@@ -535,81 +554,88 @@ class AnalysisPositionQueue:
             # get() se quedará esperando indefinidamente hasta que llegue una posición
             position = await self._analysis_queue.get()
 
-            # Implementar backoff exponencial con 3 reintentos
-            max_retries = 3
-            base_delay = 1.0  # 1 segundo base
+            try:
+                # Implementar backoff exponencial con 3 reintentos
+                max_retries = 3
+                base_delay = 5  # 5 segundos base
 
-            for attempt in range(max_retries):
-                try:
-                    self._logger.debug(f"Analizando posición {position.id} - Intento {attempt + 1}/{max_retries}")
-                    success, transaction_analysis = await self._analyze_position(position)
+                for attempt in range(max_retries):
+                    try:
+                        self._logger.debug(f"Analizando posición {position.id} - Intento {attempt + 1}/{max_retries}")
+                        success, transaction_analysis = await self._analyze_position(position)
 
-                    if success and transaction_analysis and transaction_analysis.success:
-                        self._logger.debug(f"Posición {position.id} analizada exitosamente en intento {attempt + 1}")
-                        await self._notify_analysis_finished(position, ProcessedAnalysisResult(
-                            success=True,
-                            error_kind=None,
-                            error_message=None
-                        ))
-                        return
+                        if success and transaction_analysis and transaction_analysis.success:
+                            self._logger.debug(f"Posición {position.id} analizada exitosamente en intento {attempt + 1}")
+                            await self._notify_analysis_finished(position, ProcessedAnalysisResult(
+                                success=True,
+                                error_kind=None,
+                                error_message=None
+                            ))
+                            return
 
-                    # Si no fue exitoso, verificar si es un error que no debe reintentarse
-                    if transaction_analysis and transaction_analysis.error_kind in ["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found"]:
-                        self._logger.debug(f"Posición {position.id} con error no reintentable: {transaction_analysis.error_kind}")
-                        await self._handle_error_position(
-                            position=position,
-                            error_kind=cast(
-                                Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "unknown"],
-                                transaction_analysis.error_kind
-                            ),
-                            error_message=transaction_analysis.error_message
-                        )
-                        return
+                        # Si no fue exitoso, verificar si es un error que no debe reintentarse
+                        if transaction_analysis and transaction_analysis.error_kind in ["slippage", "insufficient_tokens", "insufficient_lamports", "insufficient_funds_for_rent"]:
+                            self._logger.debug(f"Posición {position.id} con error no reintentable: {transaction_analysis.error_kind}")
+                            await self._handle_error_position(
+                                position=position,
+                                error_kind=cast(
+                                    Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"],
+                                    transaction_analysis.error_kind
+                                ),
+                                error_message=transaction_analysis.error_message
+                            )
+                            return
 
-                    # Si es el último intento, manejar como error
-                    if attempt == max_retries - 1:
-                        self._logger.warning(f"Posición {position.id} falló después de {max_retries} intentos")
-                        error_kind = transaction_analysis.error_kind if transaction_analysis else "unknown"
-                        message = transaction_analysis.error_message if transaction_analysis else "Error después de múltiples reintentos"
+                        # Si es el último intento, manejar como error
+                        if attempt == max_retries - 1:
+                            self._logger.warning(f"Posición {position.id} falló después de {max_retries} intentos")
+                            error_kind = transaction_analysis.error_kind if transaction_analysis else "unknown"
+                            message = transaction_analysis.error_message if transaction_analysis else "Error después de múltiples reintentos"
 
-                        if error_kind not in ["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found"]:
-                            error_kind = "unknown"
+                            if error_kind not in ["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent"]:
+                                error_kind = "unknown"
 
-                        await self._handle_error_position(
-                            position=position,
-                            error_kind=cast(
-                                Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "unknown"],
-                                error_kind
-                            ),
-                            error_message=message
-                        )
-                        return
+                            await self._handle_error_position(
+                                position=position,
+                                error_kind=cast(
+                                    Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"],
+                                    error_kind
+                                ),
+                                error_message=message
+                            )
+                            return
 
-                    # Calcular delay exponencial para el siguiente intento
-                    delay = base_delay * (2 ** attempt)
-                    self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos")
-                    await asyncio.sleep(delay)
+                        # Calcular delay exponencial para el siguiente intento
+                        delay = base_delay * (2 ** attempt)
+                        self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos")
+                        await asyncio.sleep(delay)
 
-                except Exception as e:
-                    self._logger.error(f"Error en intento {attempt + 1} para posición {position.id}: {e}")
+                    except Exception as e:
+                        self._logger.error(f"Error en intento {attempt + 1} para posición {position.id}: {e}")
 
-                    # Si es el último intento, manejar como error
-                    if attempt == max_retries - 1:
-                        self._logger.error(f"Posición {position.id} falló definitivamente después de {max_retries} intentos")
-                        await self._handle_error_position(
-                            position=position,
-                            error_kind="unknown",
-                            error_message=f"Error después de {max_retries} reintentos: {str(e)}"
-                        )
-                        return
+                        # Si es el último intento, manejar como error
+                        if attempt == max_retries - 1:
+                            self._logger.error(f"Posición {position.id} falló definitivamente después de {max_retries} intentos")
+                            await self._handle_error_position(
+                                position=position,
+                                error_kind="unknown",
+                                error_message=f"Error después de {max_retries} reintentos: {str(e)}"
+                            )
+                            return
 
-                    # Calcular delay exponencial para el siguiente intento
-                    delay = base_delay * (2 ** attempt)
-                    self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos después de excepción")
-                    await asyncio.sleep(delay)
+                        # Calcular delay exponencial para el siguiente intento
+                        delay = base_delay * (2 ** attempt)
+                        self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos después de excepción")
+                        await asyncio.sleep(delay)
+            finally:
+                # Siempre marcar la tarea como completada, sin importar el resultado
+                self._analysis_queue.task_done()
 
         except Exception as e:
             self._logger.error(f"Error procesando cola de análisis: {e}")
+            # Asegurar que task_done() se llame incluso si hay excepción al obtener la posición
+            if 'position' in locals():
+                self._analysis_queue.task_done()
 
     async def _process_signatures_queue(self) -> None:
         try:
@@ -680,6 +706,8 @@ class AnalysisPositionQueue:
                         while not self._analysis_queue.empty():
                             try:
                                 self._analysis_queue.get_nowait()
+                                # Marcar como completada al limpiar
+                                self._analysis_queue.task_done()
                             except asyncio.QueueEmpty:
                                 break
 

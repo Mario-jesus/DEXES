@@ -3,7 +3,7 @@ Módulo de optimizaciones para TokenTraderManager
 Proporciona componentes especializados para mejorar el rendimiento del sistema de copy trading.
 """
 
-from .cache_manager import CacheManager
+from .trading_data_store import TradingDataStore
 from .fetch_data import TradingDataFetcher
 from .token_trader_manager import TokenTraderManager
 from .analytics.token_analytics import TokenAnalytics
@@ -20,7 +20,7 @@ from .solana_manager.solana_websocket import SolanaWebsocketManager
 
 __all__ = [
     'TokenTraderManager',
-    'CacheManager', 
+    'TradingDataStore', 
     'TradingDataFetcher',
     'TokenAnalytics',
     'TraderAnalytics',

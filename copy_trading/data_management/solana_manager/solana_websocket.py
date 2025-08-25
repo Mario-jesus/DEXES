@@ -764,11 +764,15 @@ class SolanaWebsocketManager:
                 item = await self.pending_subscription_queue.get()
                 queue_items.append(item)
                 await temp_queue.put(item)
+                # Marcar como completada en la cola original
+                self.pending_subscription_queue.task_done()
 
             # Restaurar la cola
             while not temp_queue.empty():
                 item = await temp_queue.get()
                 await self.pending_subscription_queue.put(item)
+                # Marcar como completada en la cola temporal
+                temp_queue.task_done()
 
             for item in queue_items:
                 wait_time = (current_time - item.queued_at).total_seconds()

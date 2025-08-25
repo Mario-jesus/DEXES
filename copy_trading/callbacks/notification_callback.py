@@ -361,8 +361,8 @@ class PositionNotificationCallback:
             self._logger.debug(f"Enviando notificación de posición abierta: {position.id}")
 
             trader_wallet = position.trader_wallet
-            amount_sol = position.amount_sol
-            amount_tokens = position.amount_tokens
+            amount_sol = position.amount_sol_executed
+            amount_tokens = position.amount_tokens_executed
             entry_price = position.entry_price
 
             self._logger.debug(f"amount_sol: {amount_sol}, amount_tokens: {amount_tokens}, entry_price: {entry_price}, total_cost_sol: {position.total_cost_sol}, fee_sol: {position.fee_sol}")
@@ -406,7 +406,7 @@ class PositionNotificationCallback:
             self._logger.debug(f"Enviando notificación de posición cerrada: {position.id}")
 
             # Debug: Log información de la posición
-            self._logger.debug(f"Position debug - ID: {position.id}, Amount SOL: {position.amount_sol}, Amount Tokens: {position.amount_tokens}, Total Cost: {position.total_cost_sol}")
+            self._logger.debug(f"Position debug - ID: {position.id}, Amount SOL: {position.amount_sol_executed}, Amount Tokens: {position.amount_tokens_executed}, Total Cost: {position.total_cost_sol}")
             self._logger.debug(f"Close history count: {len(position.close_history)}")
 
             # Validar datos de la posición
@@ -558,8 +558,8 @@ class PositionNotificationCallback:
 
             # Extraer información de la posición
             trader_wallet = close_position.trader_wallet
-            amount_sol = close_position.amount_sol
-            amount_tokens = close_position.amount_tokens
+            amount_sol = close_position.amount_sol_executed
+            amount_tokens = close_position.amount_tokens_executed
             executed_at = close_position.created_at
             signature = close_position.signature
 
@@ -602,7 +602,7 @@ class PositionNotificationCallback:
 
             # Extraer información de la posición
             trader_wallet = close_position.trader_wallet
-            amount_sol = close_position.amount_sol
+            amount_sol = close_position.amount_sol_executed
             error_message = close_position.message_error
             executed_at = close_position.created_at
             signature = close_position.signature
