@@ -174,7 +174,7 @@ class CopyTrading:
                     'messages_per_minute': self.config.telegram_messages_per_minute
                 }
             )
-            #strategies.append(telegram_strategy)
+            strategies.append(telegram_strategy)
             self._logger.debug("Estrategia de Telegram configurada")
         else:
             self._logger.debug("Telegram no configurado (faltan token o chat_id)")
