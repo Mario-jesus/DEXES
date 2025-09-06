@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 
 from ..config import CopyTradingConfig
 from ..position_management.models import TraderTradeData, PositionTraderTradeData
-from ..position_management.queues import PendingPositionQueue
+from ..position_management.queues import PendingPositionQueue, OpenPositionQueue
 from ..validation import ValidationEngine
 from ..transactions_management import CopyAmountCalculator
 from ..data_management import TokenTraderManager
+from ..events import PositionEventBus, PositionValidationFailedEvent
 from logging_system import AppLogger
 
 # Configurar precisión decimal según preferencias del usuario
@@ -31,7 +32,12 @@ class TraderRateLimitData:
 @dataclass(slots=True)
 class TokenRateLimitData:
     """Datos de rate limiting para un token específico"""
-    traders_per_token: int = 0
+    traders: Set[str] = field(default_factory=set)
+
+    @property
+    def traders_per_token(self) -> int:
+        """Obtiene el total de traders"""
+        return len(self.traders)
 
 
 @dataclass(slots=True)
@@ -47,7 +53,10 @@ class TradeProcessorCallback:
                     config: CopyTradingConfig,
                     pending_position_queue: PendingPositionQueue,
                     validation_engine: ValidationEngine,
-                    token_trader_manager: TokenTraderManager):
+                    token_trader_manager: TokenTraderManager,
+                    amount_calculator: CopyAmountCalculator,
+                    position_event_bus: PositionEventBus,
+                    open_position_queue: Optional[OpenPositionQueue] = None):
         """
         Inicializa el callback
         
@@ -56,13 +65,18 @@ class TradeProcessorCallback:
             pending_position_queue: Cola de posiciones pendientes
             validation_engine: Motor de validaciones
             token_trader_manager: Gestor de cache inteligente
+            amount_calculator: Calculador de montos de copia
+            position_event_bus: EventBus para notificaciones de eventos de posición
+            open_position_queue: Cola de posiciones abiertas
         """
         self.config = config
         self.pending_position_queue = pending_position_queue
+        self.open_position_queue = open_position_queue
         self.validation_engine = validation_engine
         self._token_trader_manager = token_trader_manager
         self._logger = AppLogger(self.__class__.__name__)
-        self._amount_calculator = CopyAmountCalculator(config)
+        self._amount_calculator = amount_calculator
+        self._position_event_bus = position_event_bus
 
         # Cache de rate limiting para evitar procesar trades que violen límites de configuración
         # keys: trader_wallet -> TraderRateLimitData, token_address -> TokenRateLimitData, trader_wallet_token_address -> TraderTokenRateLimitData
@@ -128,7 +142,7 @@ class TradeProcessorCallback:
                 self.stats['trades_rejected'] += 1
 
         except Exception as e:
-            self._logger.error(f"Error en procesamiento inicial: {e}")
+            self._logger.error(f"Error en procesamiento inicial: {e}", exc_info=True)
             self.stats['trades_rejected'] += 1
 
     async def _processing_worker(self):
@@ -157,20 +171,14 @@ class TradeProcessorCallback:
         """Procesa un trade de manera asíncrona con todas las validaciones"""
         try:
             # Calcular montos de copia
-            copy_amount_sol = self._amount_calculator.calculate_copy_amount(
-                trade_data.trader_wallet, trade_data.amount_sol
-            )
-
-            copy_amount_tokens = self._amount_calculator.calculate_copy_amount(
-                trade_data.trader_wallet, trade_data.token_amount
-            )
+            copy_amount = self._amount_calculator.calculate_copy_amount(trade_data)
 
             # Validación avanzada (operación lenta)
             is_valid, validation_checks = await self.validation_engine.validate_trade(
                 trader_wallet=trade_data.trader_wallet,
                 token_address=trade_data.token_address,
-                amount_sol=copy_amount_sol,
-                amount_tokens=copy_amount_tokens,
+                amount_sol=copy_amount if trade_data.side == 'buy' else "",
+                amount_tokens=copy_amount if trade_data.side == 'sell' else "",
                 side=trade_data.side
             )
 
@@ -181,6 +189,14 @@ class TradeProcessorCallback:
 
                 await self._log_async("Trade no válido", f"{error_msg} | {trade_data.trader_wallet}")
                 self.stats['trades_rejected'] += 1
+                self._position_event_bus.emit_position_validation_failed(
+                    PositionValidationFailedEvent(
+                        position_id=trade_data.id,
+                        token_address=trade_data.token_address,
+                        trader_wallet=trade_data.trader_wallet,
+                        error_message=error_msg
+                    )
+                )
                 return
 
             # Trade válido - crear posición y encolar
@@ -188,7 +204,11 @@ class TradeProcessorCallback:
 
             await self._log_async("Trade válido", f"{trade_data.side} {trade_data.amount_sol} SOL")
 
-            position = PositionTraderTradeData(trade_data, copy_amount_sol, copy_amount_tokens)
+            position = PositionTraderTradeData(
+                trader_trade_data=trade_data,
+                copy_amount_sol=copy_amount if trade_data.side == 'buy' else "",
+                copy_amount_tokens=copy_amount if trade_data.side == 'sell' else ""
+            )
 
             # Encolar posición
             await self.pending_position_queue.add_position(position)
@@ -256,11 +276,10 @@ class TradeProcessorCallback:
             self._logger.debug("Trade rechazado - faltan campos obligatorios (trader_wallet o token_address)")
             return False
 
-        # Para operaciones sell, solo actualizar contadores sin validar límites
+        # Para operaciones sell, solo actualizar contadores y validar que no haya posiciones abiertas
         if trade_data.side == 'sell':
-            self._logger.debug("Operación de tipo 'sell', actualizando contadores y permitiendo trade.")
-            self._update_rate_limits_for_sell(trade_data)
-            return True
+            self._logger.debug("Operación de tipo 'sell', actualizando contadores y permitiendo trade si hay posiciones abiertas.")
+            return self._validate_and_update_rate_limits_for_sell(trade_data)
 
         # Para operaciones buy, validar límites e incrementar contadores
         trader_config_values = self._get_trader_rate_limit_config(trade_data.trader_wallet)
@@ -307,13 +326,14 @@ class TradeProcessorCallback:
         token_cache = self._rate_limit_cache[token_key]
         self._logger.debug(f"Traders actuales en token {token_key}: {current_traders_per_token}, máximo permitido: {max_traders_per_token}, ya está en token: {trader_already_in_token}")
         if isinstance(token_cache, TokenRateLimitData):
-            if (max_traders_per_token and token_cache.traders_per_token >= max_traders_per_token and not trader_already_in_token) or (
-                max_traders_per_token and current_traders_per_token >= max_traders_per_token and not trader_already_in_token):
+            trader_already_in_token_cache = trade_data.trader_wallet in token_cache.traders
+            if (max_traders_per_token and token_cache.traders_per_token >= max_traders_per_token and not (trader_already_in_token or trader_already_in_token_cache)) or (
+                max_traders_per_token and current_traders_per_token >= max_traders_per_token and not (trader_already_in_token or trader_already_in_token_cache)):
                 self._logger.info(f"Trade rechazado - máximo de traders por token alcanzado: {trade_data.token_address}")
                 return False
             else:
-                if not trader_already_in_token:
-                    token_cache.traders_per_token += 1
+                if not (trader_already_in_token or trader_already_in_token_cache):
+                    token_cache.traders.add(trade_data.trader_wallet)
                     self._logger.debug(f"Incrementando traders_per_token para token {token_key}: {token_cache.traders_per_token}")
                 self._rate_limit_cache[token_key] = token_cache
         else:
@@ -361,20 +381,28 @@ class TradeProcessorCallback:
         self._logger.debug(f"Contadores incrementados para buy: {trade_data.trader_wallet} - {trade_data.token_address}")
         return True
 
-    def _update_rate_limits_for_sell(self, trade_data: TraderTradeData) -> None:
+    def _validate_and_update_rate_limits_for_sell(self, trade_data: TraderTradeData) -> bool:
         """
         Actualiza los contadores de rate limiting para operaciones de venta (sell)
         
         Para operaciones sell, decrementa los contadores en los dataclasses
-        pero mantiene que nunca sean negativos.
+        pero mantiene que nunca sean negativos y que haya posiciones abiertas.
         
         Args:
             trade_data: Objeto TradeData con la información del trade
+            
+        Returns:
+            True si el trade es válido
         """
         # Claves para acceder al cache
         trader_key = f"{trade_data.trader_wallet}"
         token_key = f"{trade_data.token_address}"
         trader_token_key = f"{trade_data.trader_wallet}_{trade_data.token_address}"
+
+        # Validar si la posición abierta existe en la cola de posiciones abiertas
+        if not self._has_open_position_queue(trade_data):
+            self._logger.debug(f"Trade rechazado - no hay posiciones abiertas: {trade_data.trader_wallet} - {trade_data.token_address}")
+            return False
 
         # Actualizar contador de tokens abiertos por trader
         if trader_key in self._rate_limit_cache:
@@ -387,7 +415,12 @@ class TradeProcessorCallback:
         if token_key in self._rate_limit_cache:
             token_cache = self._rate_limit_cache[token_key]
             if isinstance(token_cache, TokenRateLimitData):
-                token_cache.traders_per_token = max(0, token_cache.traders_per_token - 1)
+                if self._get_open_position_queue_size(trade_data) <= 1:
+                    try:
+                        token_cache.traders.remove(trade_data.trader_wallet)
+                        self._logger.debug(f"Removiendo trader {trade_data.trader_wallet} del token {token_key}")
+                    except KeyError:
+                        self._logger.debug(f"Trader {trade_data.trader_wallet} no encontrado en el token {token_key}")
                 self._rate_limit_cache[token_key] = token_cache
 
         # Actualizar contador de posiciones abiertas por token por trader
@@ -398,6 +431,24 @@ class TradeProcessorCallback:
                 self._rate_limit_cache[trader_token_key] = trader_token_cache
 
         self._logger.debug(f"Contadores decrementados para sell: {trade_data.trader_wallet} - {trade_data.token_address}")
+        return True
+
+    def _has_open_position_queue(self, trade_data: TraderTradeData) -> bool:
+        """
+        Valida si hay posiciones abiertas para el trader y token especificados
+        """
+        if self.open_position_queue is None:
+            return False
+
+        return self._get_open_position_queue_size(trade_data) > 0
+
+    def _get_open_position_queue_size(self, trade_data: TraderTradeData) -> int:
+        """
+        Obtiene el tamaño de la cola de posiciones abiertas para el trader y token especificados
+        """
+        if self.open_position_queue is None:
+            return 0
+        return self.open_position_queue.get_queue_size(trade_data.trader_wallet, trade_data.token_address)
 
     def _get_trader_rate_limit_config(self, trader_wallet: str) -> Dict[str, Optional[int]]:
         """

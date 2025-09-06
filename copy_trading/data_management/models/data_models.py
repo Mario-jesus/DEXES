@@ -9,6 +9,20 @@ from decimal import Decimal, getcontext
 getcontext().prec = 26
 
 
+def _validate_volume_string(volume_sol: str) -> str:
+    """Valida y normaliza un string de volumen SOL"""
+    if not volume_sol or volume_sol.strip() == "":
+        return "0"
+    return volume_sol.strip()
+
+
+def _validate_timestamp(timestamp: Optional[str]) -> Optional[str]:
+    """Valida un timestamp opcional"""
+    if timestamp is None or timestamp.strip() == "":
+        return None
+    return timestamp.strip()
+
+
 @dataclass
 class TokenInfo:
     """Información de un token"""
@@ -18,12 +32,13 @@ class TokenInfo:
 
     def add_trader(self, trader_wallet: str) -> None:
         """Añade un trader a la lista de traders"""
-        self.traders.add(trader_wallet)
+        if trader_wallet and trader_wallet.strip():
+            self.traders.add(trader_wallet.strip())
 
     def remove_trader(self, trader_wallet: str) -> None:
         """Elimina un trader de la lista de traders"""
-        if trader_wallet in self.traders:
-            self.traders.remove(trader_wallet)
+        if trader_wallet and trader_wallet.strip() in self.traders:
+            self.traders.remove(trader_wallet.strip())
 
     @property
     def num_traders(self) -> int:
@@ -85,40 +100,57 @@ class TraderTokenStats:
     def register_open_position(self, volume_sol: str, timestamp: Optional[str] = None) -> None:
         """Registra una posición abierta para este trader en este token"""
         self.open_positions += 1
-        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(volume_sol), "f")
-        if timestamp:
-            self.last_trade_timestamp = timestamp
+        validated_volume = _validate_volume_string(volume_sol)
+        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(validated_volume), "f")
+        validated_timestamp = _validate_timestamp(timestamp)
+        if validated_timestamp:
+            self.last_trade_timestamp = validated_timestamp
 
     def register_closed_position(self, volume_sol: str, timestamp: Optional[str] = None) -> None:
         """Registra una posición cerrada para este trader en este token"""
         self.closed_positions += 1
-        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol), "f")
-        if timestamp:
-            self.last_trade_timestamp = timestamp
+        validated_volume = _validate_volume_string(volume_sol)
+        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(validated_volume), "f")
+        validated_timestamp = _validate_timestamp(timestamp)
+        if validated_timestamp:
+            self.last_trade_timestamp = validated_timestamp
 
     def update_open_position(self, previous_volume_sol: str, volume_sol: str, timestamp: Optional[str] = None) -> None:
         """Actualiza una posición abierta para este trader en este token"""
-        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
-        if timestamp:
-            self.last_trade_timestamp = timestamp
+        validated_volume = _validate_volume_string(volume_sol)
+        validated_previous_volume = _validate_volume_string(previous_volume_sol)
+        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(validated_volume) - Decimal(validated_previous_volume), "f")
+        validated_timestamp = _validate_timestamp(timestamp)
+        if validated_timestamp:
+            self.last_trade_timestamp = validated_timestamp
 
     def update_closed_position(self, previous_volume_sol: str, volume_sol: str, timestamp: Optional[str] = None) -> None:
         """Actualiza una posición cerrada para este trader en este token"""
-        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
-        if timestamp:
-            self.last_trade_timestamp = timestamp
+        validated_volume = _validate_volume_string(volume_sol)
+        validated_previous_volume = _validate_volume_string(previous_volume_sol)
+        amount_sol = Decimal(validated_volume)
+        previous_amount_sol = Decimal(validated_previous_volume)
+        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + amount_sol - previous_amount_sol, "f")
+        validated_timestamp = _validate_timestamp(timestamp)
+        if validated_timestamp:
+            self.last_trade_timestamp = validated_timestamp
 
     def register_failed_position(self, volume_sol: str, timestamp: Optional[str] = None) -> None:
         """Registra una posición fallida para este trader en este token"""
         self.open_positions = max(0, self.open_positions - 1)
-        self.total_volume_sol_open = format(max(0, Decimal(self.total_volume_sol_open) - Decimal(volume_sol)), "f")
-        if timestamp:
-            self.last_trade_timestamp = timestamp
+        validated_volume = _validate_volume_string(volume_sol)
+        amount_sol = Decimal(validated_volume)
+        self.total_volume_sol_open = format(max(0, Decimal(self.total_volume_sol_open) - amount_sol), "f")
+        validated_timestamp = _validate_timestamp(timestamp)
+        if validated_timestamp:
+            self.last_trade_timestamp = validated_timestamp
 
     def register_pnl(self, pnl_sol: str, pnl_sol_with_costs: str) -> None:
         """Registra P&L para este trader en este token"""
-        self.total_pnl_sol = format(Decimal(self.total_pnl_sol) + Decimal(pnl_sol), "f")
-        self.total_pnl_sol_with_costs = format(Decimal(self.total_pnl_sol_with_costs) + Decimal(pnl_sol_with_costs), "f")
+        validated_pnl = _validate_volume_string(pnl_sol)
+        validated_pnl_with_costs = _validate_volume_string(pnl_sol_with_costs)
+        self.total_pnl_sol = format(Decimal(self.total_pnl_sol) + Decimal(validated_pnl), "f")
+        self.total_pnl_sol_with_costs = format(Decimal(self.total_pnl_sol_with_costs) + Decimal(validated_pnl_with_costs), "f")
 
     def get_win_rate(self) -> str:
         """Calcula el porcentaje de trades ganadores basado en P&L"""
@@ -198,28 +230,37 @@ class TraderStats:
     # Registrar posicion abierta, volumen y total de trades
     def register_open_position(self, volume_sol: str) -> None:
         self.open_positions += 1
-        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(volume_sol), "f")
+        validated_volume = _validate_volume_string(volume_sol)
+        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(validated_volume), "f")
 
     # Registrar posicion cerrada, volumen y total de trades
     def register_closed_position(self, volume_sol: str) -> None:
         self.closed_positions += 1
-        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol), "f")
+        validated_volume = _validate_volume_string(volume_sol)
+        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(validated_volume), "f")
 
     def update_open_position(self, previous_volume_sol: str, volume_sol: str) -> None:
-        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
+        validated_volume = _validate_volume_string(volume_sol)
+        validated_previous_volume = _validate_volume_string(previous_volume_sol)
+        self.total_volume_sol_open = format(Decimal(self.total_volume_sol_open) + Decimal(validated_volume) - Decimal(validated_previous_volume), "f")
 
     def update_closed_position(self, previous_volume_sol: str, volume_sol: str) -> None:
-        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(volume_sol) - Decimal(previous_volume_sol), "f")
+        validated_volume = _validate_volume_string(volume_sol)
+        validated_previous_volume = _validate_volume_string(previous_volume_sol)
+        self.total_volume_sol_closed = format(Decimal(self.total_volume_sol_closed) + Decimal(validated_volume) - Decimal(validated_previous_volume), "f")
 
     # Registrar posicion fallida, volumen y total de trades
     def register_failed_position(self, volume_sol: str) -> None:
         self.open_positions = max(0, self.open_positions - 1)
-        self.total_volume_sol_open = format(max(0, Decimal(self.total_volume_sol_open) - Decimal(volume_sol)), "f")
+        validated_volume = _validate_volume_string(volume_sol)
+        self.total_volume_sol_open = format(max(0, Decimal(self.total_volume_sol_open) - Decimal(validated_volume)), "f")
 
     # Registrar P&Ls
     def register_pnl(self, pnl_sol: str, pnl_sol_with_costs: str) -> None:
-        self.total_pnl_sol = format(Decimal(self.total_pnl_sol) + Decimal(pnl_sol), "f")
-        self.total_pnl_sol_with_costs = format(Decimal(self.total_pnl_sol_with_costs) + Decimal(pnl_sol_with_costs), "f")
+        validated_pnl = _validate_volume_string(pnl_sol)
+        validated_pnl_with_costs = _validate_volume_string(pnl_sol_with_costs)
+        self.total_pnl_sol = format(Decimal(self.total_pnl_sol) + Decimal(validated_pnl), "f")
+        self.total_pnl_sol_with_costs = format(Decimal(self.total_pnl_sol_with_costs) + Decimal(validated_pnl_with_costs), "f")
 
     def to_dict(self) -> Dict[str, Any]:
         return {

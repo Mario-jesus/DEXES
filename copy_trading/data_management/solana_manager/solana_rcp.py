@@ -99,27 +99,24 @@ class SolanaTxAnalyzer:
                 encoding=encoding,
             )
 
-        balance_response = self._parse_token_balances(response)
-        balance_response["owner"] = owner_pubkey
+        balance_response = self._parse_token_balances(response, owner_pubkey)
 
         # Filtrar tokens con balance cero si se especifica
         if not include_zero_balances:
             filtered_tokens = [
-                token for token in balance_response["tokens"]
-                if float(token["ui_amount"]) > 0
+                token for token in balance_response.tokens
+                if Decimal(token.ui_amount_string) > 0
             ]
-            balance_response["tokens"] = filtered_tokens
-            balance_response["total_tokens"] = len(filtered_tokens)
+            balance_response.tokens = filtered_tokens
 
         if mints:
             filtered_tokens = [
-                token for token in balance_response["tokens"]
-                if token["mint"] in mints
+                token for token in balance_response.tokens
+                if token.mint in mints
             ]
-            balance_response["tokens"] = filtered_tokens
-            balance_response["total_tokens"] = len(filtered_tokens)
+            balance_response.tokens = filtered_tokens
 
-        self._logger.info(f"Found {balance_response['total_tokens']} tokens for owner: {owner_pubkey[:8]}...")
+        self._logger.info(f"Found {balance_response.total_tokens} tokens for owner: {owner_pubkey[:8]}...")
         return balance_response
 
     async def get_sol_balance(
@@ -468,7 +465,7 @@ class SolanaTxAnalyzer:
             self._logger.error(f"Unknown error performing RPC request for token accounts {owner_pubkey[:8]}...")
             raise RuntimeError("Unknown error performing RPC request")
 
-    def _parse_token_balances(self, response: Dict[str, Any]) -> BalanceResponse:
+    def _parse_token_balances(self, response: Dict[str, Any], owner_pubkey: str) -> BalanceResponse:
         """Parsea la respuesta de getTokenAccountsByOwner y extrae balances."""
         try:
             result = response.get("result", {})
@@ -496,15 +493,15 @@ class SolanaTxAnalyzer:
 
                     # Solo incluir tokens que tengan balance o información válida
                     if mint and pubkey:
-                        token_balance: TokenBalance = {
-                            "pubkey": pubkey,
-                            "mint": mint,
-                            "amount": amount,
-                            "decimals": decimals,
-                            "ui_amount": ui_amount,
-                            "ui_amount_string": ui_amount_string,
-                            "lamports": lamports,
-                        }
+                        token_balance: TokenBalance = TokenBalance(
+                            pubkey=pubkey,
+                            mint=mint,
+                            amount=amount,
+                            decimals=decimals,
+                            ui_amount=ui_amount,
+                            ui_amount_string=ui_amount_string,
+                            lamports=lamports,
+                        )
                         tokens.append(token_balance)
 
                 except Exception as e:
@@ -513,21 +510,15 @@ class SolanaTxAnalyzer:
                     continue
 
             # Asumimos que el owner es el primer parámetro de la consulta original
-            owner = ""
 
-            return {
-                "owner": owner,
-                "tokens": tokens,
-                "total_tokens": len(tokens),
-            }
+            return BalanceResponse(
+                owner=owner_pubkey,
+                tokens=tokens,
+            )
 
         except Exception as e:
             self._logger.error(f"Error parsing token balances response: {e}")
-            return {
-                "owner": "",
-                "tokens": [],
-                "total_tokens": 0,
-            }
+            return BalanceResponse(owner=owner_pubkey)
 
     async def _get_transaction(
         self,

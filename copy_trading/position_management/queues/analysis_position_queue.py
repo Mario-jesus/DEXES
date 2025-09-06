@@ -13,37 +13,33 @@ from logging_system import AppLogger
 from ...data_management.solana_manager import SolanaTxAnalyzer, SolanaWebsocketManager
 from ...data_management.models import SignatureNotification, TransactionAnalysis
 from ...data_management import TokenTraderManager
-from ...balance_management import BalanceManager
+from ...events import PositionEventBus, PositionAnalysisFinishedEvent, PositionQueuedEvent
 from ..models import Position, OpenPosition, ClosePosition, ProcessedAnalysisResult
 
 if TYPE_CHECKING:
     from ..processors import TradeAnalysisProcessor
-    from .open_position_queue import OpenPositionQueue
-    from .closed_position_queue import ClosedPositionQueue
+
 
 class AnalysisPositionQueue:
     """Cola FIFO de posiciones para análisis con persistencia y worker"""
 
     def __init__(self, 
-                    solana_analyzer: SolanaTxAnalyzer,
-                    solana_websocket: SolanaWebsocketManager,
-                    token_trader_manager: TokenTraderManager,
-                    balance_manager: BalanceManager,
-                    open_position_queue: Optional['OpenPositionQueue'] = None,
-                    closed_position_queue: Optional['ClosedPositionQueue'] = None,
-                    analysis_processor: Optional['TradeAnalysisProcessor'] = None,
-                    data_path: str = "copy_trading/data",
-                    max_size: Optional[int] = None):
+            solana_analyzer: SolanaTxAnalyzer,
+            solana_websocket: SolanaWebsocketManager,
+            token_trader_manager: TokenTraderManager,
+            position_event_bus: Optional[PositionEventBus] = None,
+            analysis_processor: Optional['TradeAnalysisProcessor'] = None,
+            data_path: str = "copy_trading/data",
+            max_size: Optional[int] = None
+        ):
         self.data_path = Path(data_path)
         self.max_size = max_size
         self._logger = AppLogger(self.__class__.__name__)
         self.solana_analyzer = solana_analyzer
         self.solana_websocket = solana_websocket
         self.token_trader_manager = token_trader_manager
-        self.balance_manager = balance_manager
+        self.position_event_bus = position_event_bus
         self.analysis_processor = analysis_processor
-        self.open_position_queue = open_position_queue
-        self.closed_position_queue = closed_position_queue
 
         # Cola de Posiciones a analizar
         self._analysis_queue: asyncio.Queue[Position] = asyncio.Queue(maxsize=max_size if max_size else 0)
@@ -56,6 +52,9 @@ class AnalysisPositionQueue:
 
         # Cola de posiciones pendientes a analizar
         self._pending_analysis_queue: deque[Position] = deque(maxlen=max_size)
+
+        # Señal de control para apagado
+        self._shutdown_event: asyncio.Event = asyncio.Event()
 
         # Tareas en segundo plano
         self.background_tasks: set[asyncio.Task] = set()
@@ -115,12 +114,6 @@ class AnalysisPositionQueue:
 
     def set_analysis_processor(self, analysis_processor: 'TradeAnalysisProcessor'):
         self.analysis_processor = analysis_processor
-
-    def set_open_position_queue(self, open_position_queue: 'OpenPositionQueue'):
-        self.open_position_queue = open_position_queue
-
-    def set_closed_position_queue(self, closed_position_queue: 'ClosedPositionQueue'):
-        self.closed_position_queue = closed_position_queue
 
     async def on_signature_confirmed(self, signature: str, data: SignatureNotification):
         """
@@ -191,15 +184,24 @@ class AnalysisPositionQueue:
         Notifica el resultado del análisis de una posición.
         """
         try:
-            if isinstance(position, OpenPosition) and self.open_position_queue:
-                await self.open_position_queue.on_analysis_finished(position, details)
-            elif isinstance(position, ClosePosition) and self.closed_position_queue:
-                await self.closed_position_queue.on_analysis_finished(position, details)
+            if isinstance(position, OpenPosition):
+                position_type = "open"
+            elif isinstance(position, ClosePosition):
+                position_type = "close"
             else:
-                self._logger.warning(f"Posición {position.id} no es OpenPosition ni ClosePosition, no se puede manejar")
+                self._logger.warning(f"Position {position.id} is not an OpenPosition nor a ClosePosition")
+                return
 
-            if self.balance_manager and position.token_address:
-                await self.balance_manager.on_analysis_finished(position.token_address)
+            if self.position_event_bus:
+                self.position_event_bus.emit_position_analysis_finished(PositionAnalysisFinishedEvent(
+                    position_id=position.id,
+                    token_address=position.token_address,
+                    trader_wallet=position.trader_wallet,
+                    success=details.success,
+                    position_type=position_type,
+                    error_kind=details.error_kind,
+                    error_message=details.error_message
+                ))
         except Exception as e:
             self._logger.error(f"Error notificando resultado del análisis de posición {position.id}: {e}", exc_info=True)
 
@@ -208,6 +210,10 @@ class AnalysisPositionQueue:
         Agrega una posición a la cola de análisis.
         """
         try:
+            if self._shutdown_event.is_set():
+                self._logger.warning(f"Shutdown en progreso: no se agregará posición {position.id} a análisis")
+                return False
+
             if not position.signature:
                 self._logger.warning(f"Posición {position.id} no tiene signature, no se puede agregar a cola de análisis")
                 return False
@@ -219,11 +225,13 @@ class AnalysisPositionQueue:
 
             added_to_pending = await self._add_pending_position(position)
 
-            if added_to_pending and self.balance_manager and position.token_address:
-                try:
-                    await self.balance_manager.on_analysis_enqueued(position.token_address)
-                except Exception as e:
-                    self._logger.error(f"Error al avisar al BalanceManager que se agregó una posición a cola de pendientes de análisis: {e}")
+            if added_to_pending and self.position_event_bus and position.token_address:
+                self.position_event_bus.emit_position_queued(PositionQueuedEvent(
+                    position_id=position.id,
+                    token_address=position.token_address,
+                    trader_wallet=position.trader_wallet,
+                    queue_name="analysis_position_queue"
+                ))
 
             return added_to_pending
         except Exception as e:
@@ -422,6 +430,10 @@ class AnalysisPositionQueue:
         Agrega una posición a la cola de pendientes de análisis.
         """
         try:
+            if self._shutdown_event.is_set():
+                self._logger.warning(f"Shutdown en progreso: no se agregará posición {position.id} a pendientes de análisis")
+                return False
+
             if self.max_size is not None and len(self._pending_analysis_queue) >= self.max_size:
                 self._logger.warning(f"Cola de pendientes llena. No se pudo añadir la posición {position.id}")
                 return False
@@ -463,6 +475,9 @@ class AnalysisPositionQueue:
 
     async def start_worker(self) -> None:
         try:
+            # Reiniciar señales de control por si hubo un shutdown previo
+            self._shutdown_event.clear()
+
             if self._analysis_task and not self._analysis_task.done():
                 self._logger.debug("Worker de análisis ya está ejecutándose")
                 return
@@ -480,51 +495,142 @@ class AnalysisPositionQueue:
             self._logger.error(f"Error iniciando worker de análisis: {e}")
 
     async def stop_worker(self) -> None:
-        """Detiene los workers de análisis de trades y signatures."""
+        """Solicita apagado y espera a que los workers drenen y finalicen."""
         try:
-            # Detener worker de análisis
-            if self._analysis_task and not self._analysis_task.done():
-                self._logger.debug("Deteniendo worker de análisis")
-                self._analysis_task.cancel()
-                try:
-                    await self._analysis_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    self._logger.error(f"Error cancelando worker de análisis: {e}")
-                finally:
-                    self._analysis_task = None
-                    self._logger.debug("Worker de análisis detenido")
-            else:
-                self._logger.debug("Worker de análisis no estaba ejecutándose")
+            self._logger.debug("Solicitando shutdown de colas (asyncio.Queue.shutdown)")
+            self._shutdown_event.set()
 
-            # Detener worker de signatures
-            if self._signatures_task and not self._signatures_task.done():
-                self._logger.debug("Deteniendo worker de signatures")
-                self._signatures_task.cancel()
-                try:
-                    await self._signatures_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    self._logger.error(f"Error cancelando worker de signatures: {e}")
-                finally:
-                    self._signatures_task = None
-                    self._logger.debug("Worker de signatures detenido")
-            else:
-                self._logger.debug("Worker de signatures no estaba ejecutándose")
+            # Esperar a que la cola de pendientes de análisis se vacíe antes de cerrar signatures (con timeout)
+            await self._wait_pending_analysis_empty()
 
+            # Si aún quedan pendientes, intentar drenarlos empujando sus firmas a la cola de signatures
+            try:
+                async with self._lock:
+                    pending_left = len(self._pending_analysis_queue)
+                if pending_left > 0:
+                    self._logger.warning(f"Quedan {pending_left} pendientes tras espera; empujando firmas a cola de signatures")
+                    await self._push_pending_signatures_to_queue()
+
+                # Espera breve adicional para que se procesen
+                for _ in range(5):
+                    async with self._lock:
+                        if len(self._pending_analysis_queue) == 0:
+                            break
+                    await asyncio.sleep(1)
+
+                # Si aún quedan, forzar marcado como error para no colgar shutdown
+                async with self._lock:
+                    pending_left = len(self._pending_analysis_queue)
+                if pending_left > 0:
+                    self._logger.error(f"Forzando finalización de {pending_left} pendientes restantes por shutdown")
+                    await self._force_finalize_pending_positions()
+            except Exception as e:
+                self._logger.error(f"Error durante drenado forzado de pendientes: {e}")
+
+            # Primero cerrar signatures para que no agregue más posiciones
+            try:
+                self._signatures_queue.shutdown()
+            except Exception as e:
+                self._logger.error(f"Error en shutdown() de signatures_queue: {e}")
+            try:
+                await self._signatures_queue.join()
+            except Exception:
+                pass
+
+            # Luego cerrar análisis y esperar a que drene
+            try:
+                self._analysis_queue.shutdown()
+            except Exception as e:
+                self._logger.error(f"Error en shutdown() de analysis_queue: {e}")
+            try:
+                await self._analysis_queue.join()
+            except Exception:
+                pass
+
+            # Esperar a que terminen los loops de los workers (deberían salir por QueueShutDown)
+            tasks_to_wait = []
+            if self._analysis_task:
+                tasks_to_wait.append(self._analysis_task)
+            if self._signatures_task:
+                tasks_to_wait.append(self._signatures_task)
+
+            if tasks_to_wait:
+                await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+
+            self._analysis_task = None
+            self._signatures_task = None
+            self._logger.debug("Workers finalizados correctamente")
         except Exception as e:
             self._logger.error(f"Error deteniendo workers: {e}")
+
+    async def _wait_pending_analysis_empty(self, check_interval_seconds: float = 1.0) -> None:
+        """Espera hasta que la cola de pendientes de análisis esté vacía.
+
+        Durante esta espera, el worker de signatures puede seguir agregando
+        posiciones a la cola de análisis y los callbacks del websocket seguirán
+        removiendo de pendientes, hasta que quede vacía.
+        """
+        try:
+            last_logged_count: Optional[int] = None
+            # Tiempo máximo de espera (seg.) para no colgar shutdown indefinidamente
+            max_wait_seconds = 30
+            waited = 0
+            while True:
+                async with self._lock:
+                    pending_count = len(self._pending_analysis_queue)
+
+                if pending_count == 0:
+                    self._logger.debug("Cola de pendientes de análisis vacía; continuando con shutdown")
+                    return
+
+                if last_logged_count != pending_count:
+                    self._logger.debug(f"Esperando drenado de pendientes de análisis: {pending_count} restantes")
+                    last_logged_count = pending_count
+
+                if waited >= max_wait_seconds:
+                    self._logger.warning("Timeout esperando drenado de pendientes; proceder con drenado forzado")
+                    return
+
+                await asyncio.sleep(check_interval_seconds)
+                waited += check_interval_seconds
+        except Exception as e:
+            self._logger.error(f"Error esperando drenado de pendientes de análisis: {e}")
+
+    async def _push_pending_signatures_to_queue(self) -> None:
+        """Empuja firmas de posiciones pendientes a la cola de signatures para su verificación."""
+        try:
+            async with self._lock:
+                signatures = [p.signature for p in self._pending_analysis_queue if getattr(p, 'signature', None)]
+            for sig in signatures:
+                if not isinstance(sig, str):
+                    continue
+                try:
+                    self._signatures_queue.put_nowait(sig)
+                except asyncio.QueueFull:
+                    await self._signatures_queue.put(sig)
+        except Exception as e:
+            self._logger.error(f"Error empujando firmas pendientes a cola: {e}")
+
+    async def _force_finalize_pending_positions(self) -> None:
+        """Marca las posiciones pendientes restantes como error por shutdown para evitar cuelgues."""
+        try:
+            async with self._lock:
+                positions_snapshot = list(self._pending_analysis_queue)
+            for position in positions_snapshot:
+                try:
+                    await self._handle_error_position(position=position, error_kind="unknown", error_message="Finalizado por shutdown")
+                except Exception as e:
+                    self._logger.error(f"Error forzando finalización de posición {getattr(position, 'id', '?')}: {e}")
+        except Exception as e:
+            self._logger.error(f"Error en _force_finalize_pending_positions: {e}")
 
     async def _analysis_worker(self) -> None:
         self._logger.debug("Worker de análisis iniciado")
         while True:
             try:
                 await self._process_analysis_queue()
-                # Procesar continuamente sin intervalos
-            except asyncio.CancelledError:
-                self._logger.debug("Worker de análisis cancelado")
+            except asyncio.QueueShutDown:
+                self._logger.debug("Worker de análisis detectó QueueShutDown y finaliza")
                 break
             except Exception as e:
                 self._logger.error(f"Error en worker de análisis: {e}")
@@ -535,12 +641,34 @@ class AnalysisPositionQueue:
         self._logger.debug("Worker de signatures iniciado")
         while True:
             try:
-                await self._process_signatures_queue()
-                # Procesar en intervalos
-                await asyncio.sleep(self._signatures_interval)
-            except asyncio.CancelledError:
-                self._logger.debug("Worker de signatures cancelado")
-                break
+                # Esperar al menos una firma o shutdown de la cola
+                try:
+                    first_signature = await self._signatures_queue.get()
+                except asyncio.QueueShutDown:
+                    self._logger.debug("Worker de signatures detectó QueueShutDown y finaliza")
+                    break
+
+                signatures: List[str] = [first_signature]
+
+                # Intentar formar un batch inmediato con lo disponible
+                while True:
+                    try:
+                        signatures.append(self._signatures_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+
+                # Procesar batch
+                await self._process_signatures_batch(signatures)
+
+                # task_done por cada firma procesada
+                for _ in signatures:
+                    self._signatures_queue.task_done()
+
+                # Ventana de batch por intervalo para acumular más sin bloquear demasiado
+                try:
+                    await asyncio.wait_for(self._signatures_queue.join(), timeout=self._signatures_interval)
+                except asyncio.TimeoutError:
+                    pass
             except Exception as e:
                 self._logger.error(f"Error en worker de signatures: {e}")
                 # Pequeña pausa solo en caso de error para evitar bucle infinito
@@ -631,6 +759,9 @@ class AnalysisPositionQueue:
                 # Siempre marcar la tarea como completada, sin importar el resultado
                 self._analysis_queue.task_done()
 
+        except asyncio.QueueShutDown:
+            # Propagar para que el worker termine sin ruido
+            raise
         except Exception as e:
             self._logger.error(f"Error procesando cola de análisis: {e}")
             # Asegurar que task_done() se llame incluso si hay excepción al obtener la posición
@@ -672,6 +803,39 @@ class AnalysisPositionQueue:
 
         except Exception as e:
             self._logger.error(f"Error procesando cola de signatures: {e}")
+        finally:
+            pass
+
+    async def _process_signatures_batch(self, signatures: List[str]) -> None:
+        try:
+            if not signatures:
+                return
+
+            signatures_with_statuses = await self.solana_analyzer.get_signatures_with_statuses(
+                signatures=signatures
+            )
+
+            positions_removed = await self.remove_pending_position_by_signature(signatures)
+
+            for position in positions_removed:
+                if not position.signature:
+                    continue
+
+                position_analysis_status = signatures_with_statuses.data.get(position.signature)
+                if position_analysis_status and (position_analysis_status.success or position_analysis_status.type_error == "unknown"):
+                    await self._add_analysis_queue(position, no_wait=True)
+                else:
+                    type_error = position_analysis_status.type_error if position_analysis_status else "transaction_not_found"
+                    await self._handle_error_position(
+                        position=position,
+                        error_kind=type_error or "unknown"
+                    )
+
+            self._logger.debug(f"Batch de signatures procesado con {len(positions_removed)} posiciones")
+            self._logger.debug(f"Todos fueron exitosos: {signatures_with_statuses.all_success}")
+            self._logger.debug(f"Todos existen: {signatures_with_statuses.all_exists}")
+        except Exception as e:
+            self._logger.error(f"Error procesando batch de signatures: {e}")
 
     async def _analyze_position(self, position: Position) -> Tuple[bool, Optional[TransactionAnalysis]]:
         """
@@ -776,7 +940,8 @@ class AnalysisPositionQueue:
                 'pending_analysis_queue_size': len(self._pending_analysis_queue),
                 'pending_analysis_max_size': self.max_size,
                 'pending_analysis_is_full': len(self._pending_analysis_queue) >= self.max_size if self.max_size else False,
-                'pending_analysis_is_empty': len(self._pending_analysis_queue) == 0
+                'pending_analysis_is_empty': len(self._pending_analysis_queue) == 0,
+                'is_shutting_down': self._shutdown_event.is_set()
             }
             self._logger.debug(f"Estadísticas de análisis: {stats}")
             return stats
@@ -792,9 +957,9 @@ class AnalysisPositionQueue:
             # Obtener todas las posiciones para verificar
             positions = await self.get_analysis_positions()
             for pos in positions:
-                if isinstance(pos, OpenPosition) and pos.token_address == token_address and not pos.is_analyzed:
+                if isinstance(pos, OpenPosition) and pos.token_address == token_address and not pos.get_is_analyzed():
                     return True
             return False
         except Exception as e:
             self._logger.error(f"Error verificando análisis pendientes para token {token_address}: {e}")
-            return True
+            return False

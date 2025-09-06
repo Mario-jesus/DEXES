@@ -29,6 +29,7 @@ from logging_system import AppLogger
 from copy_trading.data_management import SolanaTxAnalyzer
 
 from ..config import CopyTradingConfig, AmountMode
+from ..events import PositionEventBus, PositionAnalysisEvent, PositionAnalysisFinishedEvent, PositionQueuedEvent
 
 getcontext().prec = 26
 
@@ -46,12 +47,15 @@ class BalanceManager:
     Gestor de balances asíncrono, cacheado y consistente con eventos del sistema.
     """
 
-    def __init__(self, config: CopyTradingConfig, solana_analyzer: SolanaTxAnalyzer):
+    def __init__(self, config: CopyTradingConfig, solana_analyzer: SolanaTxAnalyzer, position_event_bus: PositionEventBus):
         self.config = config
         self._logger = AppLogger(self.__class__.__name__)
 
         # Cliente on-chain (inicializado asíncronamente)
         self._solana_analyzer: SolanaTxAnalyzer = solana_analyzer
+
+        # Event bus
+        self.position_event_bus = position_event_bus
 
         # Estado en memoria
         # Nota: clave del diccionario es el wallet del sistema (el follower), no los traders seguidos
@@ -64,6 +68,11 @@ class BalanceManager:
 
         # Locks
         self._lock = asyncio.Lock()
+
+        # Suscribirse a eventos
+        self.position_event_bus.on_position_queued(self._on_analysis_position_queued)
+        self.position_event_bus.on_position_analysis(self._on_position_analysis)
+        self.position_event_bus.on_position_analysis_finished(self._on_position_analysis_finished)
 
     async def start(self, system_wallet_address: str) -> None:
         """
@@ -132,51 +141,90 @@ class BalanceManager:
         is_enough = Decimal(trade_amount_sol) <= effective_budget
         return (format(effective_budget, "f"), is_enough)
 
-    # ==================== API PÚBLICA: MUTACIONES POR EVENTO ====================
+    # ==================== MUTACIONES POR EVENTO ====================
 
-    async def on_position_opened(self, signer_sol_delta: str) -> None:
-        """Ajusta balance local de SOL y marca dependencias por apertura de posición."""
+    async def _on_analysis_position_queued(self, event: PositionQueuedEvent) -> None:
+        """Marca que hay una posición en cola de análisis."""
+        if not event.queue_name == "analysis_position_queue":
+            return
+
+        async with self._lock:
+            old_count = self._pending_analysis_by_token.get(event.token_address, 0)
+            self._pending_analysis_by_token[event.token_address] = old_count + 1
+            self._logger.debug(f"Análisis pendiente agregado para token {event.token_address}: {old_count} -> {old_count + 1}")
+
+    async def _on_position_analysis(self, event: PositionAnalysisEvent) -> None:
+        """Maneja el resultado del análisis de posición."""
+        if not event.success:
+            return
+
+        if event.position_type == "open":
+            await self._on_position_opened(signer_sol_delta=event.signer_sol_delta or "0.0")
+            await self._on_token_received(
+                mint_address=event.mint_address or "",
+                token_ui_delta=event.token_ui_delta or "0.0"
+            )
+        elif event.position_type == "close":
+            await self._on_position_closed(signer_sol_delta=event.signer_sol_delta or "0.0")
+            await self._on_token_spent(
+                mint_address=event.mint_address or "",
+                token_ui_delta=event.token_ui_delta or "0.0"
+            )
+        else:
+            self._logger.warning(f"Posición {event.position_id} no es OpenPosition ni ClosePosition, no se puede manejar")
+
+    async def _on_position_opened(self, signer_sol_delta: str) -> None:
+        """Ajusta balance local de SOL por apertura de posición."""
         async with self._lock:
             wallet = self._require_system_wallet()
             tb = self._balances_by_trader.setdefault(wallet, TraderBalances())
             try:
+                old_balance = tb.sol
                 tb.sol = format(Decimal(tb.sol) + Decimal(signer_sol_delta), "f")
+                self._logger.debug(f"Balance SOL actualizado por apertura: {old_balance} -> {tb.sol} (delta: {signer_sol_delta})")
             except Exception:
                 # Si algo falla, forzar refresh on-chain en siguiente ciclo
                 pass
 
-    async def on_position_closed(self, signer_sol_delta: str) -> None:
-        """Ajusta balance local de SOL al cierre de posición (ingreso de SOL)."""
+    async def _on_position_closed(self, signer_sol_delta: str) -> None:
+        """Ajusta balance local de SOL por cierre de posición."""
         async with self._lock:
             wallet = self._require_system_wallet()
             tb = self._balances_by_trader.setdefault(wallet, TraderBalances())
             try:
+                old_balance = tb.sol
                 tb.sol = format(Decimal(tb.sol) + Decimal(signer_sol_delta), "f")
+                self._logger.debug(f"Balance SOL actualizado por cierre: {old_balance} -> {tb.sol} (delta: {signer_sol_delta})")
             except Exception:
                 pass
 
-    async def on_token_received(self, mint_address: str, token_ui_delta: str) -> None:
+    async def _on_token_received(self, mint_address: str, token_ui_delta: str) -> None:
+        """Ajusta balance local de tokens por recepción de tokens."""
         async with self._lock:
             wallet = self._require_system_wallet()
             tb = self._balances_by_trader.setdefault(wallet, TraderBalances())
             current = Decimal(tb.tokens.get(mint_address, "0.0"))
-            tb.tokens[mint_address] = format(current + Decimal(token_ui_delta), "f")
+            new_balance = format(current + Decimal(token_ui_delta), "f")
+            tb.tokens[mint_address] = new_balance
+            self._logger.debug(f"Balance token {mint_address} actualizado por recepción: {current} -> {new_balance} (delta: {token_ui_delta})")
 
-    async def on_token_spent(self, mint_address: str, token_ui_delta: str) -> None:
+    async def _on_token_spent(self, mint_address: str, token_ui_delta: str) -> None:
+        """Ajusta balance local de tokens por gasto de tokens."""
         async with self._lock:
             wallet = self._require_system_wallet()
             tb = self._balances_by_trader.setdefault(wallet, TraderBalances())
             current = Decimal(tb.tokens.get(mint_address, "0.0"))
-            tb.tokens[mint_address] = format(max(Decimal("0"), current + Decimal(token_ui_delta)), "f")
+            new_balance = format(max(Decimal("0"), current + Decimal(token_ui_delta)), "f")
+            tb.tokens[mint_address] = new_balance
+            self._logger.debug(f"Balance token {mint_address} actualizado por gasto: {current} -> {new_balance} (delta: {token_ui_delta})")
 
-    async def on_analysis_enqueued(self, token_address: str) -> None:
+    async def _on_position_analysis_finished(self, event: PositionAnalysisFinishedEvent) -> None:
+        """Maneja el resultado del análisis de posición."""
         async with self._lock:
-            self._pending_analysis_by_token[token_address] = self._pending_analysis_by_token.get(token_address, 0) + 1
-
-    async def on_analysis_finished(self, token_address: str) -> None:
-        async with self._lock:
-            current = self._pending_analysis_by_token.get(token_address, 0)
-            self._pending_analysis_by_token[token_address] = max(0, current - 1)
+            current = self._pending_analysis_by_token.get(event.token_address, 0)
+            new_count = max(0, current - 1)
+            self._pending_analysis_by_token[event.token_address] = new_count
+            self._logger.debug(f"Análisis completado para token {event.token_address}: {current} -> {new_count}")
 
     # ==================== SYNC / REFRESH ====================
 
@@ -188,7 +236,9 @@ class BalanceManager:
             onchain_sol = await self._get_onchain_sol_balance(wallet)
             async with self._lock:
                 tb = self._balances_by_trader.setdefault(wallet, TraderBalances())
+                old_sol = tb.sol
                 tb.sol = onchain_sol
+                self._logger.debug(f"Balance SOL sincronizado desde on-chain: {old_sol} -> {onchain_sol}")
         except Exception as e:
             self._logger.error(f"Error refrescando balance SOL: {e}")
 
@@ -197,7 +247,9 @@ class BalanceManager:
                 onchain_tokens = await self._get_onchain_token_balance(wallet)
                 async with self._lock:
                     tb = self._balances_by_trader.setdefault(wallet, TraderBalances())
+                    old_tokens = tb.tokens.copy()
                     tb.tokens = onchain_tokens
+                    self._logger.debug(f"Balances de tokens sincronizados desde on-chain: {len(old_tokens)} -> {len(onchain_tokens)} tokens")
             except Exception as e:
                 self._logger.error(f"Error refrescando balance de tokens: {e}")
 
@@ -220,6 +272,6 @@ class BalanceManager:
 
     async def _get_onchain_token_balance(self, wallet_address: str, mint_addresses: Optional[List[str]] = None) -> Dict[str, str]:
         balance_response = await self._solana_analyzer.get_token_balances(wallet_address, mints=mint_addresses)
-        if balance_response["total_tokens"] == 0:
+        if balance_response.total_tokens == 0:
             return {}
-        return {token["mint"]: token["ui_amount_string"] for token in balance_response["tokens"]}
+        return {token.mint: token.ui_amount_string for token in balance_response.tokens}

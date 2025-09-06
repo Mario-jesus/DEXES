@@ -2,8 +2,8 @@
 """
 Models for the analyzer.
 """
-from typing import TypedDict, Optional, List, Any, Literal, Dict, NamedTuple, cast
-from dataclasses import dataclass, asdict
+from typing import Optional, List, Any, Literal, Dict, NamedTuple, cast
+from dataclasses import dataclass, asdict, field
 
 from logging_system import AppLogger
 
@@ -19,7 +19,7 @@ class SolanaRPCError(RuntimeError):
         self.data = data
 
 
-class TokenBalance(TypedDict):
+class TokenBalance(NamedTuple):
     """
     Token balance information.
     """
@@ -32,13 +32,17 @@ class TokenBalance(TypedDict):
     lamports: int
 
 
-class BalanceResponse(TypedDict):
+@dataclass(slots=True)
+class BalanceResponse:
     """
     Response from token balance query.
     """
-    owner: str
-    tokens: List[TokenBalance]
-    total_tokens: int
+    owner: str = ""
+    tokens: List[TokenBalance] = field(default_factory=list)
+
+    @property
+    def total_tokens(self) -> int:
+        return len(self.tokens)
 
 
 @dataclass(slots=True)

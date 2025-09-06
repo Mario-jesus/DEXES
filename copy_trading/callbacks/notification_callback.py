@@ -298,7 +298,7 @@ class PositionNotificationCallback:
             position.add_metadata('pnl_usd_with_costs', pnl_usd_with_costs)
 
             if self.token_trader_manager:
-                self._logger.debug(f"Registrando P&L en token_trader_manager para wallet: {position.trader_wallet[:8]}... y token: {position.token_address[:8]}...")
+                self._logger.debug(f"Registrando P&L en token_trader_manager para wallet: {position.trader_wallet[:8]}... y token: {position.token_address[:8]}... | pnl_sol={pnl_sol}, pnl_sol_with_costs={pnl_sol_with_costs}")
                 # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
                 await self.token_trader_manager.register_trader_token_pnl(
                     position.trader_wallet, 
@@ -310,7 +310,7 @@ class PositionNotificationCallback:
         if self.token_trader_manager:
             # Obtener estadísticas específicas del trader para este token
             trader_token_stats = await self.token_trader_manager.get_trader_token_stats(position.trader_wallet, position.token_address)
-            self._logger.debug(f"Trader token stats obtenidas para {position.token_address[:8]}...")
+            self._logger.debug(f"Trader token stats obtenidas para {position.token_address[:8]}... | pnl_sol={pnl_sol_acc_token}, pnl_sol_with_costs={pnl_sol_with_costs_acc_token}")
 
             # Calcular P&L acumulado específico por token
             pnl_sol_acc_token = trader_token_stats.total_pnl_sol
@@ -318,7 +318,7 @@ class PositionNotificationCallback:
             pnl_sol_with_costs_acc_token = trader_token_stats.total_pnl_sol_with_costs
             pnl_usd_with_costs_acc_token = format(Decimal(pnl_sol_with_costs_acc_token) * Decimal(sol_price_usd) if sol_price_usd else "0.0", "f")
 
-            self._logger.debug(f"P&L acumulado por token: pnl_sol_acc_token={pnl_sol_acc_token}, pnl_usd_acc={pnl_usd_acc_token}")
+            self._logger.debug(f"P&L acumulado por token: pnl_sol_acc_token={pnl_sol_acc_token}, pnl_usd_acc={pnl_usd_acc_token}, pnl_sol_with_costs_acc_token={pnl_sol_with_costs_acc_token}, pnl_usd_with_costs_acc_token={pnl_usd_with_costs_acc_token}")
 
             # Agregar metadatos específicos por token
             position.add_metadata('pnl_sol_acc_token', pnl_sol_acc_token)
@@ -363,9 +363,8 @@ class PositionNotificationCallback:
             trader_wallet = position.trader_wallet
             amount_sol = position.amount_sol_executed
             amount_tokens = position.amount_tokens_executed
-            entry_price = position.entry_price
 
-            self._logger.debug(f"amount_sol: {amount_sol}, amount_tokens: {amount_tokens}, entry_price: {entry_price}, total_cost_sol: {position.total_cost_sol}, fee_sol: {position.fee_sol}")
+            self._logger.debug(f"amount_sol: {amount_sol}, amount_tokens: {amount_tokens}, total_cost_sol: {position.total_cost_sol}, fee_sol: {position.fee_sol}")
 
             message = (
                 f"🟢 <b>Position Opened</b>\n\n"
@@ -381,12 +380,12 @@ class PositionNotificationCallback:
 
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
+                f"🔑 <b>ID:</b> {position.id[:8]}...\n"
                 f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
-                f"🧾 <b>Fee:</b> {self._format_amount(position.total_cost_sol)} SOL\n"
-                f"📈 <b>Entry Price:</b> {self._format_amount(entry_price)} SOL\n\n"
+                f"🧾 <b>Fee:</b> {self._format_amount(position.total_cost_sol)} SOL\n\n"
 
-                f"⏰ <b>Time:</b> {position.executed_at.strftime('%H:%M:%S') if position.executed_at else 'N/A'}"
+                f"⏰ <b>Time:</b> {position.executed_at.strftime('%Y-%m-%d %H:%M:%S') if position.executed_at else 'N/A'}"
             )
 
             if position.execution_signature:
@@ -418,7 +417,7 @@ class PositionNotificationCallback:
             #sol_price_usd = await self._get_sol_price_usd()
 
             # Calcular métricas usando el servicio de cálculo de posición
-            total_closed_sol, _ = self.position_calculation_service.calculate_total_closed_amounts(position)
+            total_closed_sol, total_closed_tokens = self.position_calculation_service.calculate_total_closed_amounts(position)
 
             # Calcular P&L total usando las claves correctas con manejo de errores
             total_pnl_sol = Decimal('0')
@@ -448,15 +447,16 @@ class PositionNotificationCallback:
 
             # Obtener wallet del trader
             trader_wallet = position.trader_wallet
-            original_amount = position.amount_sol
+            original_amount = position.amount_sol_executed
+            original_amount_tokens = position.amount_tokens_executed
 
             # Preparar indicadores de P&L
-            pnl_indicator = '🟢' if total_pnl_sol >= 0 else '🔴'
-            pnl_with_costs_indicator = '🟢' if total_pnl_sol_with_costs >= 0 else '🔴'
-            pnl_acc_token_indicator = '🟢' if total_pnl_sol_acc_token >= 0 else '🔴'
-            pnl_with_costs_acc_token_indicator = '🟢' if total_pnl_sol_with_costs_acc_token >= 0 else '🔴'
-            pnl_acc_total_indicator = '🟢' if total_pnl_sol_acc_total >= 0 else '🔴'
-            pnl_with_costs_acc_total_indicator = '🟢' if total_pnl_sol_with_costs_acc_total >= 0 else '🔴'
+            pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
+            pnl_with_costs_indicator = '🟢' if total_pnl_sol_with_costs > 0 else '🔴'
+            pnl_acc_token_indicator = '🟢' if total_pnl_sol_acc_token > 0 else '🔴'
+            pnl_with_costs_acc_token_indicator = '🟢' if total_pnl_sol_with_costs_acc_token > 0 else '🔴'
+            pnl_acc_total_indicator = '🟢' if total_pnl_sol_acc_total > 0 else '🔴'
+            pnl_with_costs_acc_total_indicator = '🟢' if total_pnl_sol_with_costs_acc_total > 0 else '🔴'
 
             message = (
                 f"🔴 <b>Position Closed</b>\n\n"
@@ -470,10 +470,13 @@ class PositionNotificationCallback:
                 f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
                 f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
 
-                f"💰 <b>Amount Details</b>\n"
+                f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
-                f"📥 <b>Original:</b> {self._format_amount(original_amount)} SOL\n"
-                f"📤 <b>Received:</b> {self._format_amount(total_closed_sol)} SOL\n\n"
+                f"🔑 <b>ID:</b> {position.id[:8]}...\n"
+                f"📥 <b>Original SOL:</b> {self._format_amount(original_amount)} SOL\n"
+                f"📤 <b>Received SOL:</b> {self._format_amount(total_closed_sol)} SOL\n"
+                f"🪙 <b>Original Tokens:</b> {self._format_amount(original_amount_tokens)} Tokens\n"
+                f"🪙 <b>Received Tokens:</b> {self._format_amount(total_closed_tokens)} Tokens\n\n"
 
                 f"📈 <b>P&L Without Costs</b>\n"
                 f"{'─'*12}\n"
@@ -495,7 +498,7 @@ class PositionNotificationCallback:
                 f"{pnl_acc_total_indicator} <b>Without Costs:</b> {self._format_amount(total_pnl_sol_acc_total)} SOL ({self._format_amount(total_pnl_usd_acc_total)} USD)\n"
                 f"{pnl_with_costs_acc_total_indicator} <b>With Costs:</b> {self._format_amount(total_pnl_sol_with_costs_acc_total)} SOL ({self._format_amount(total_pnl_usd_with_costs_acc_total)} USD)\n\n"
 
-                f"⏰ <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}"
+                f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
             # Añadir información de cierres múltiples si aplica
@@ -516,7 +519,8 @@ class PositionNotificationCallback:
             self._logger.debug(f"Enviando notificación de posición fallida: {position.id}")
 
             trader_wallet = position.trader_wallet
-            amount_sol = position.amount_sol
+            amount_sol = position.amount_sol_executed
+            amount_tokens = position.amount_tokens_executed
             error_message = position.message_error
 
             message = (
@@ -533,10 +537,12 @@ class PositionNotificationCallback:
 
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
+                f"🔑 <b>ID:</b> {position.id[:8]}...\n"
                 f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
+                f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
 
-                f"⏰ <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}"
+                f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
             if position.execution_signature:
@@ -563,6 +569,12 @@ class PositionNotificationCallback:
             executed_at = close_position.created_at
             signature = close_position.signature
 
+            if not close_position.is_liquidation:
+                trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
+                trader_info_message += f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+            else:
+                trader_info_message = "⚡ Automatic liquidation by the system\n\n"
+
             message = (
                 f"🟡 <b>Partial Close Success</b>\n\n"
                 f"📊 <b>Trade Summary</b>\n"
@@ -572,15 +584,15 @@ class PositionNotificationCallback:
 
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
-                f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
-                f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+                + trader_info_message +
 
                 f"💰 <b>Close Details</b>\n"
                 f"{'─'*12}\n"
+                f"🔑 <b>ID:</b> {position_id[:8]}...\n"
                 f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n\n"
 
-                f"⏰ <b>Time:</b> {executed_at.strftime('%H:%M:%S') if executed_at else 'N/A'}"
+                f"⏰ <b>Time:</b> {executed_at.strftime('%Y-%m-%d %H:%M:%S') if executed_at else 'N/A'}"
             )
 
             if signature:
@@ -603,9 +615,16 @@ class PositionNotificationCallback:
             # Extraer información de la posición
             trader_wallet = close_position.trader_wallet
             amount_sol = close_position.amount_sol_executed
+            amount_tokens = close_position.amount_tokens_executed
             error_message = close_position.message_error
             executed_at = close_position.created_at
             signature = close_position.signature
+
+            if not close_position.is_liquidation:
+                trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
+                trader_info_message += f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+            else:
+                trader_info_message = "⚡ Automatic liquidation by the system\n\n"
 
             message = (
                 f"❌ <b>Partial Close Failed</b>\n\n"
@@ -616,15 +635,16 @@ class PositionNotificationCallback:
 
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
-                f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
-                f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+                + trader_info_message +
 
                 f"💰 <b>Close Details</b>\n"
                 f"{'─'*12}\n"
+                f"🔑 <b>ID:</b> {position_id[:8]}...\n"
                 f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
+                f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
 
-                f"⏰ <b>Time:</b> {executed_at.strftime('%H:%M:%S') if executed_at else 'N/A'}"
+                f"⏰ <b>Time:</b> {executed_at.strftime('%Y-%m-%d %H:%M:%S') if executed_at else 'N/A'}"
             )
 
             if signature:

@@ -25,6 +25,10 @@ class PendingPositionQueue:
 
         self._lock = asyncio.Lock()
 
+        # Señales de control
+        self._shutdown_event: asyncio.Event = asyncio.Event()
+        self._drained_event: asyncio.Event = asyncio.Event()
+
         self.data_path.mkdir(parents=True, exist_ok=True)
 
         self.pending_file = self.data_path / "pending_positions.json"
@@ -42,19 +46,48 @@ class PendingPositionQueue:
     async def start(self):
         """Carga el estado inicial de la cola."""
         self._logger.debug("Iniciando PendingPositionQueue")
+        self._shutdown_event.clear()
         await self.load_from_disk()
+        # Estado inicial del evento de drenado
+        if self.pending_queue.empty():
+            self._drained_event.set()
+        else:
+            self._drained_event.clear()
         self._logger.debug("PendingPositionQueue iniciada correctamente")
 
     async def stop(self):
-        """Guarda el estado de la cola."""
+        """Solicita apagado y espera a que la cola se drene ordenadamente."""
         self._logger.info("Deteniendo PendingPositionQueue")
-        await self.save_state()
-        self._logger.debug("Estado de la cola de posiciones pendientes guardado.")
+        try:
+            # Señalizar que no se aceptarán nuevos elementos
+            self._shutdown_event.set()
+
+            # Cerrar la cola y esperar a que termine el trabajo pendiente
+            try:
+                self.pending_queue.shutdown()
+            except Exception as e:
+                self._logger.error(f"Error en shutdown() de pending_queue: {e}")
+
+            try:
+                await self.pending_queue.join()
+            except Exception:
+                pass
+
+            # Guardar estado final
+            await self.save_state()
+            self._logger.debug("PendingPositionQueue detenida correctamente")
+        except Exception as e:
+            self._logger.error(f"Error deteniendo PendingPositionQueue: {e}")
 
     async def add_position(self, position: PositionTraderTradeData) -> bool:
         try:
+            if self._shutdown_event.is_set():
+                self._logger.warning("Shutdown en progreso: no se agregará nueva posición a pendientes")
+                return False
             # asyncio.Queue.put_nowait() lanza QueueFull si está llena
             self.pending_queue.put_nowait(position)
+            # Marcar que ya no está drenada
+            self._drained_event.clear()
             await self._save_pending()
             return True
         except asyncio.QueueFull:
@@ -66,8 +99,13 @@ class PendingPositionQueue:
             # asyncio.Queue.get_nowait() lanza QueueEmpty si está vacía
             pending_position = self.pending_queue.get_nowait()
             self.pending_queue.task_done()
+            if self.pending_queue.empty():
+                self._drained_event.set()
             await self.save_state()
             return pending_position
+        except asyncio.QueueShutDown:
+            # Cola cerrada; no hay más elementos por consumir
+            return None
         except asyncio.QueueEmpty:
             return None
 
@@ -76,8 +114,13 @@ class PendingPositionQueue:
         try:
             pending_position = await asyncio.wait_for(self.pending_queue.get(), timeout=timeout)
             self.pending_queue.task_done()
+            if self.pending_queue.empty():
+                self._drained_event.set()
             await self.save_state()
             return pending_position
+        except asyncio.QueueShutDown:
+            # Cola cerrada; finalizar con None
+            return None
         except asyncio.TimeoutError:
             return None
 
@@ -137,6 +180,10 @@ class PendingPositionQueue:
                                     break
 
                             self._logger.debug(f"Cargadas {self.pending_queue.qsize()} posiciones pendientes desde disco")
+                            if self.pending_queue.empty():
+                                self._drained_event.set()
+                            else:
+                                self._drained_event.clear()
                 except (json.JSONDecodeError, Exception) as e:
                     self._logger.warning(f"Error cargando pending_positions.json: {e}")
 
@@ -174,3 +221,7 @@ class PendingPositionQueue:
     async def wait_for_completion(self):
         """Espera a que todas las tareas en la cola se completen"""
         await self.pending_queue.join()
+
+    async def wait_drained(self):
+        """Espera a que la cola quede vacía (señal por evento)."""
+        await self._drained_event.wait()

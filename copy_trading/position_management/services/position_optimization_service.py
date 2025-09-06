@@ -48,7 +48,6 @@ class PositionOptimizationService:
             len(position.token_address) +
             len(position.amount_sol) +
             len(position.amount_tokens) +
-            len(position.entry_price) +
             len(position.fee_sol) +
             len(position.total_cost_sol) +
             (len(position.execution_signature) if position.execution_signature else 0) +
@@ -61,7 +60,7 @@ class PositionOptimizationService:
             close_data = cls._get_close_position_data(close_item)
             close_history_size += (
                 len(close_data.id) + len(close_data.amount_sol) + len(close_data.amount_tokens) +
-                len(close_data.entry_price) + len(close_data.fee_sol) + len(close_data.total_cost_sol) +
+                len(close_data.fee_sol) + len(close_data.total_cost_sol) +
                 (len(close_data.execution_signature) if close_data.execution_signature else 0) +
                 len(close_data.execution_price)
             )
@@ -76,7 +75,7 @@ class PositionOptimizationService:
         trader_data_size = 0
         if position.trader_trade_data:
             trader_data_size = sum(
-                len(str(value)) for value in position.trader_trade_data
+                len(str(value)) for value in position.trader_trade_data.to_dict().values()
             )
 
         return base_size + close_history_size + metadata_size + trader_data_size

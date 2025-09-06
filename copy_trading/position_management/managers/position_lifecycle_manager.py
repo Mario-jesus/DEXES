@@ -37,15 +37,13 @@ class PositionLifecycleManager:
 
     async def process_executed_position(self, 
                                         position_trade_data: PositionTraderTradeData, 
-                                        signature: str, 
-                                        entry_price: str) -> bool:
+                                        signature: str) -> bool:
         """
         Procesa una posición ejecutada coordinando su flujo a través del sistema.
         
         Args:
             position_trade_data: Datos del trade del trader
             signature: Firma de la transacción ejecutada
-            entry_price: Precio de entrada
             
         Returns:
             True si el procesamiento fue exitoso, False en caso contrario
@@ -56,7 +54,7 @@ class PositionLifecycleManager:
 
             # 1. Crear la posición usando el factory
             position = self.position_factory.create_position_from_trade_data(
-                position_trade_data, signature, entry_price
+                position_trade_data, signature
             )
 
             if not position:

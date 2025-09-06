@@ -5,16 +5,17 @@ Modelos base para posiciones de trading.
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Any, Optional, Literal, NamedTuple
-from decimal import Decimal, InvalidOperation, DivisionByZero, getcontext
+from typing import Dict, Any, Optional, Literal
+from decimal import Decimal, InvalidOperation, DivisionByZero, getcontext, ROUND_DOWN
 
 from ...data_management.models import TokenInfo
 from .serialization import serialize_for_json
 
 getcontext().prec = 26
 
-class TraderTradeData(NamedTuple):
-    """Tupla con los datos de los trades de compra y venta del trader"""
+@dataclass(slots=True, frozen=True)
+class TraderTradeData:
+    """Clase con los datos de los trades de compra y venta del trader"""
     # Información básica del trade
     trader_wallet: str
     side: Literal['buy', 'sell']  # 'buy' o 'sell'
@@ -36,15 +37,60 @@ class TraderTradeData(NamedTuple):
     # Metadatos
     timestamp: datetime
 
+    # Id de la operación
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "trader_wallet": self.trader_wallet,
+            "side": self.side,
+            "token_address": self.token_address,
+            "amount_sol": self.amount_sol,
+            "signature": self.signature,
+            "token_amount": self.token_amount,
+            "new_token_balance": self.new_token_balance,
+            "pool": self.pool,
+            "bonding_curve_key": self.bonding_curve_key,
+            "v_tokens_in_bonding_curve": self.v_tokens_in_bonding_curve,
+            "v_sol_in_bonding_curve": self.v_sol_in_bonding_curve,
+            "market_cap_sol": self.market_cap_sol,
+            "timestamp": self.timestamp.isoformat(),
+            "id": self.id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TraderTradeData":
+        return cls(
+            trader_wallet=data["trader_wallet"],
+            side=data["side"],
+            token_address=data["token_address"],
+            amount_sol=data["amount_sol"],
+            signature=data["signature"],
+            token_amount=data["token_amount"],
+            new_token_balance=data["new_token_balance"],
+            pool=data["pool"],
+            bonding_curve_key=data["bonding_curve_key"],
+            v_tokens_in_bonding_curve=data["v_tokens_in_bonding_curve"],
+            v_sol_in_bonding_curve=data["v_sol_in_bonding_curve"],
+            market_cap_sol=data["market_cap_sol"],
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            id=data["id"],
+        )
+
 
 class PositionTraderTradeData:
     """Clase que envuelve TraderTradeData con funcionalidad de copy trading"""
 
-    def __init__(self, trader_trade_data: TraderTradeData, copy_amount_sol: str, copy_amount_tokens: str):
+    def __init__(self, trader_trade_data: TraderTradeData, copy_amount_sol: str="", copy_amount_tokens: str="", is_liquidation: bool=False):
         self._trader_trade_data = trader_trade_data
         self._copy_amount_sol = copy_amount_sol
         self._copy_amount_tokens = copy_amount_tokens
         self._created_at = datetime.now()
+        self._is_liquidation = is_liquidation
+
+    @property
+    def id(self) -> str:
+        return self._trader_trade_data.id
 
     @property
     def copy_amount_sol(self) -> str:
@@ -55,6 +101,10 @@ class PositionTraderTradeData:
     def copy_amount_tokens(self) -> str:
         """Calcula el monto de tokens a copiar basado en la configuración"""
         return self._copy_amount_tokens
+
+    @property
+    def is_liquidation(self) -> bool:
+        return self._is_liquidation
 
     @property
     def trader_wallet(self) -> str:
@@ -114,7 +164,7 @@ class PositionTraderTradeData:
 
     def to_dict(self) -> Dict[str, Any]:
         # Convertir el NamedTuple a dict y manejar la serialización de datetime
-        trader_data_dict = self._trader_trade_data._asdict()
+        trader_data_dict = self._trader_trade_data.to_dict()
         # Convertir datetime a string ISO
         if 'timestamp' in trader_data_dict and isinstance(trader_data_dict['timestamp'], datetime):
             trader_data_dict['timestamp'] = trader_data_dict['timestamp'].isoformat()
@@ -134,7 +184,7 @@ class PositionTraderTradeData:
             trader_data_dict['timestamp'] = datetime.fromisoformat(trader_data_dict['timestamp'])
 
         return cls(
-            trader_trade_data=TraderTradeData(**trader_data_dict),
+            trader_trade_data=TraderTradeData.from_dict(trader_data_dict),
             copy_amount_sol=data['copy_amount_sol'],
             copy_amount_tokens=data['copy_amount_tokens']
         )
@@ -144,14 +194,13 @@ class PositionTraderTradeData:
 class Position:
     """Clase base para posiciones con atributos comunes"""
     # ID de la posición
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
 
     # Datos básicos de la posición
     amount_sol: str = ""
     amount_sol_executed: str = ""
     amount_tokens: str = ""
     amount_tokens_executed: str = ""
-    entry_price: str = ""
     fee_sol: str = ""
     total_cost_sol: str = ""
 
@@ -162,6 +211,8 @@ class Position:
     # Estado
     is_analyzed: bool = False
     message_error: str = ""
+    # Si es una liquidación
+    is_liquidation: bool = False
 
     # Timestamps
     created_at: datetime = field(default_factory=datetime.now)
@@ -188,6 +239,23 @@ class Position:
     @property
     def signature(self) -> Optional[str]:
         return self.execution_signature
+
+    @property
+    def trader_execution_price(self) -> str:
+        try:
+            if not self.trader_trade_data:
+                return "0"
+
+            amount_sol_dec = Decimal(self.trader_trade_data.amount_sol)
+            token_amount_dec = Decimal(self.trader_trade_data.token_amount)
+
+            if token_amount_dec > 0:
+                price = amount_sol_dec / token_amount_dec
+                return format(price.quantize(Decimal("0.000000001"), rounding=ROUND_DOWN).normalize(), "f")
+            else:
+                return "0"
+        except (InvalidOperation, ValueError, DivisionByZero):
+            return "0"
 
     def add_metadata(self, key: str, value: Any, max_metadata_size: int = 1000) -> None:
         """
@@ -217,45 +285,28 @@ class Position:
         # Procesar metadata usando la función de serialización
         metadata_dict = serialize_for_json(self.metadata)
 
-        # Procesar trader_trade_data para manejar datetime
-        trader_data_dict = None
-        if self.trader_trade_data:
-            trader_data_dict = self.trader_trade_data._asdict()
-            # Convertir datetime a string ISO
-            if 'timestamp' in trader_data_dict and isinstance(trader_data_dict['timestamp'], datetime):
-                trader_data_dict['timestamp'] = trader_data_dict['timestamp'].isoformat()
-
         return {
             'id': self.id,
             'amount_sol': self.amount_sol,
             'amount_sol_executed': self.amount_sol_executed,
             'amount_tokens': self.amount_tokens,
             'amount_tokens_executed': self.amount_tokens_executed,
-            'entry_price': self.entry_price,
             'fee_sol': self.fee_sol,
             'total_cost_sol': self.total_cost_sol,
             'execution_signature': self.execution_signature,
             'execution_price': self.execution_price,
             'is_analyzed': self.is_analyzed,
             'message_error': self.message_error,
+            'is_liquidation': self.is_liquidation,
             'created_at': self.created_at.isoformat(),
             'executed_at': self.executed_at.isoformat() if self.executed_at else None,
-            'trader_trade_data': trader_data_dict,
+            'trader_trade_data': self.trader_trade_data.to_dict() if self.trader_trade_data else None,
             'metadata': metadata_dict
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Position':
         """Crea desde diccionario"""
-        trader_data = data.get('trader_trade_data')
-
-        # Procesar trader_data para manejar datetime
-        if trader_data and isinstance(trader_data, dict):
-            # Convertir string ISO de vuelta a datetime
-            if 'timestamp' in trader_data and isinstance(trader_data['timestamp'], str):
-                trader_data['timestamp'] = datetime.fromisoformat(trader_data['timestamp'])
-            trader_data = TraderTradeData(**trader_data)
-
         # Procesar metadata para manejar objetos TokenInfo
         metadata = {}
         for key, value in data.get('metadata', {}).items():
@@ -265,20 +316,20 @@ class Position:
                 metadata[key] = value
 
         return cls(
-            id=data.get('id', str(uuid.uuid4())),
+            id=data['id'],
             amount_sol=data.get('amount_sol', ''),
             amount_sol_executed=data.get('amount_sol_executed', ''),
             amount_tokens=data.get('amount_tokens', ''),
             amount_tokens_executed=data.get('amount_tokens_executed', ''),
-            entry_price=data.get('entry_price', ''),
             fee_sol=data.get('fee_sol', ''),
             total_cost_sol=data.get('total_cost_sol', ''),
             execution_signature=data.get('execution_signature'),
             execution_price=data.get('execution_price', ''),
             is_analyzed=data.get('is_analyzed', False),
             message_error=data.get('message_error', ''),
+            is_liquidation=data.get('is_liquidation', False),
             created_at=datetime.fromisoformat(data['created_at']) if data.get('created_at') else datetime.now(),
             executed_at=datetime.fromisoformat(data['executed_at']) if data.get('executed_at') else None,
-            trader_trade_data=trader_data,
-            metadata=metadata
+            trader_trade_data=TraderTradeData.from_dict(data.get('trader_trade_data', {})),
+            metadata=metadata,
         )

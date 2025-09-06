@@ -3,10 +3,10 @@
 Servicio especializado para cálculos utilitarios de posiciones de trading.
 Separa la lógica de cálculos básicos de otros análisis.
 """
-from typing import Dict, Any, Tuple
-from decimal import Decimal, getcontext
+from typing import Dict, Any, Tuple, Union
+from decimal import Decimal, getcontext, ROUND_DOWN
 
-from ..models import OpenPosition, ClosePosition, SubClosePosition
+from ..models import OpenPosition, ClosePosition, SubClosePosition, PositionStatus
 
 # Configurar precisión de Decimal para operaciones financieras
 getcontext().prec = 26
@@ -19,7 +19,7 @@ class PositionCalculationService:
     """
 
     @classmethod
-    def _get_close_position_data(cls, close_item: SubClosePosition | ClosePosition) -> ClosePosition:
+    def _get_close_position_data(cls, close_item: Union['SubClosePosition', 'ClosePosition']) -> 'ClosePosition':
         """
         Obtiene los datos de ClosePosition de un item del historial.
         
@@ -29,12 +29,12 @@ class PositionCalculationService:
         Returns:
             ClosePosition con los datos del cierre
         """
-        if isinstance(close_item, SubClosePosition):
+        if isinstance(close_item, 'SubClosePosition'):
             return close_item.close_position
         return close_item
 
     @classmethod
-    def _is_close_position_partial(cls, close_item: SubClosePosition | ClosePosition) -> bool:
+    def _is_close_position_partial(cls, close_item: Union['SubClosePosition', 'ClosePosition']) -> bool:
         """
         Verifica si un item del historial es ClosePositionPartial.
         
@@ -44,10 +44,10 @@ class PositionCalculationService:
         Returns:
             True si es ClosePositionPartial, False si es ClosePosition
         """
-        return isinstance(close_item, SubClosePosition)
+        return isinstance(close_item, 'SubClosePosition')
 
     @classmethod
-    def _get_close_amounts(cls, close_item: SubClosePosition | ClosePosition) -> Tuple[str, str]:
+    def _get_close_amounts(cls, close_item: Union['SubClosePosition', 'ClosePosition']) -> Tuple[str, str]:
         """
         Obtiene los montos de SOL y tokens de un item del historial.
         
@@ -60,7 +60,7 @@ class PositionCalculationService:
         return close_item.amount_sol_executed, close_item.amount_tokens_executed
 
     @classmethod
-    def get_last_close_data(cls, position: OpenPosition) -> Dict[str, Any]:
+    def get_last_close_data(cls, position: 'OpenPosition') -> Dict[str, Any]:
         """
         Obtiene los datos del último cierre de una posición.
         
@@ -91,7 +91,7 @@ class PositionCalculationService:
         }
 
     @classmethod
-    def calculate_total_closed_amounts(cls, position: OpenPosition) -> Tuple[str, str]:
+    def calculate_total_closed_amounts(cls, position: 'OpenPosition') -> Tuple[str, str]:
         """
         Calcula los totales acumulados de cierres.
         
@@ -107,14 +107,14 @@ class PositionCalculationService:
         for close_item in position.close_history:
             amount_sol_executed, amount_tokens_executed = cls._get_close_amounts(close_item)
             if amount_sol_executed:
-                total_sol += Decimal(amount_sol_executed)
+                total_sol += Decimal(amount_sol_executed if amount_sol_executed else "0.0")
             if amount_tokens_executed:
-                total_tokens += Decimal(amount_tokens_executed)
+                total_tokens += Decimal(amount_tokens_executed if amount_tokens_executed else "0.0")
 
         return format(total_sol, "f"), format(total_tokens, "f")
 
     @classmethod
-    def calculate_remaining_tokens(cls, position: OpenPosition) -> str:
+    def calculate_remaining_tokens(cls, position: 'OpenPosition', exact: bool = False) -> str:
         """
         Calcula la cantidad de tokens restantes.
         
@@ -125,12 +125,14 @@ class PositionCalculationService:
             Cantidad de tokens restantes como string
         """
         _, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
+        total_original = Decimal(position.amount_tokens_executed if position.amount_tokens_executed else "0.0")
         remaining = max(Decimal('0'), total_original - Decimal(total_closed_tokens))
-        return format(remaining, "f")
+        if exact:
+            return format(remaining, "f")
+        return format(remaining.quantize(Decimal("0.0001"), rounding=ROUND_DOWN).normalize(), "f")
 
     @classmethod
-    def calculate_remaining_amounts(cls, position: OpenPosition) -> Tuple[str, str]:
+    def calculate_remaining_amounts(cls, position: 'OpenPosition', exact: bool = False) -> Tuple[str, str]:
         """
         Calcula la cantidad de tokens y SOL restantes.
         
@@ -141,14 +143,37 @@ class PositionCalculationService:
             Tuple de (remaining_sol, remaining_tokens) como strings
         """
         total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original_tokens = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
-        total_original_sol = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
+        total_original_tokens = Decimal(position.amount_tokens_executed if position.amount_tokens_executed else "0.0")
+        total_original_sol = Decimal(position.amount_sol_executed if position.amount_sol_executed else "0.0")
         remaining_sol = max(Decimal('0'), total_original_sol - Decimal(total_closed_sol))
         remaining_tokens = max(Decimal('0'), total_original_tokens - Decimal(total_closed_tokens))
-        return format(remaining_sol, "f"), format(remaining_tokens, "f")
+        if exact:
+            return (
+                format(remaining_sol, "f"), 
+                format(remaining_tokens, "f")
+            )
+        return (
+            format(remaining_sol.quantize(Decimal("0.0000001"), rounding=ROUND_DOWN).normalize(), "f"), 
+            format(remaining_tokens.quantize(Decimal("0.0001"), rounding=ROUND_DOWN).normalize(), "f")
+        )
 
     @classmethod
-    def get_calculated_data(cls, position: OpenPosition) -> Dict[str, Any]:
+    def update_position_status_after_close(cls, position: 'OpenPosition') -> None:
+        """
+        Actualiza el estado de una posición después de agregar un cierre.
+        
+        Args:
+            position: Objeto OpenPosition
+        """
+        remaining_tokens, remaining_sol = cls.calculate_remaining_amounts(position)
+
+        if remaining_tokens == '0' or remaining_sol == '0':
+            position.status = PositionStatus.CLOSED
+        else:
+            position.status = PositionStatus.PARTIALLY_CLOSED
+
+    @classmethod
+    def get_calculated_data(cls, position: 'OpenPosition') -> Dict[str, Any]:
         """
         Obtiene datos calculados para compatibilidad con código existente.
         
@@ -169,7 +194,6 @@ class PositionCalculationService:
         return {
             'close_amount_sol': last_close_data['amount_sol'],
             'close_amount_tokens': last_close_data['amount_tokens'],
-            'close_entry_price': position.entry_price,
             'close_execution_price': last_close_data['execution_price'],
             'close_fee_sol': position.fee_sol,
             'close_total_cost_sol': total_closed_sol,
@@ -186,7 +210,7 @@ class PositionCalculationService:
         }
 
     @classmethod
-    def calculate_position_metrics(cls, position: OpenPosition) -> Dict[str, Any]:
+    def calculate_position_metrics(cls, position: 'OpenPosition') -> Dict[str, Any]:
         """
         Calcula métricas básicas de una posición.
         
@@ -213,14 +237,13 @@ class PositionCalculationService:
             'last_close_amount_sol': last_close_data['amount_sol'],
             'last_close_amount_tokens': last_close_data['amount_tokens'],
             'last_close_execution_price': last_close_data['execution_price'],
-            'entry_price': position.entry_price,
             'execution_price': position.execution_price,
             'fee_sol': position.fee_sol,
             'total_cost_sol': position.total_cost_sol
         }
 
     @classmethod
-    def calculate_position_performance(cls, position: OpenPosition, sol_price_usd: str) -> Dict[str, Any]:
+    def calculate_position_performance(cls, position: 'OpenPosition', sol_price_usd: str) -> Dict[str, Any]:
         """
         Calcula métricas de rendimiento de una posición.
         

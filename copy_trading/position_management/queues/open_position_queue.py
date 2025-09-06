@@ -12,8 +12,9 @@ from typing import Dict, List, Optional, Any, Tuple
 from decimal import getcontext
 
 from logging_system import AppLogger
+from ...events import PositionEventBus, PositionAnalysisFinishedEvent
 from ...data_management import TokenTraderManager
-from ..models import OpenPosition, PositionStatus, ProcessedAnalysisResult
+from ..models import OpenPosition, PositionStatus
 from .notification_queue import PositionNotificationQueue
 
 getcontext().prec = 26
@@ -22,9 +23,10 @@ getcontext().prec = 26
 class OpenPositionQueue:
     """Gestión de posiciones abiertas con persistencia, agrupadas por trader y luego por token."""
 
-    def __init__(self, data_path: str = "copy_trading/data", max_size: Optional[int] = None, token_trader_manager: Optional[TokenTraderManager] = None, position_notification_queue: Optional[PositionNotificationQueue] = None):
+    def __init__(self, data_path: str = "copy_trading/data", max_size: Optional[int] = None, position_event_bus: Optional[PositionEventBus] = None, token_trader_manager: Optional[TokenTraderManager] = None, position_notification_queue: Optional[PositionNotificationQueue] = None):
         self.data_path = Path(data_path)
         self.max_size = max_size
+        self.position_event_bus = position_event_bus
         self.token_trader_manager = token_trader_manager
         self._logger = AppLogger(self.__class__.__name__)
         self.position_notification_queue = position_notification_queue
@@ -33,6 +35,9 @@ class OpenPositionQueue:
         self.open_positions_queue: Dict[str, Dict[str, deque[OpenPosition]]] = defaultdict(lambda: defaultdict(lambda: deque(maxlen=self.max_size)))
 
         self._lock = asyncio.Lock()
+        # Señales de control para apagado ordenado
+        self._shutdown_event: asyncio.Event = asyncio.Event()
+        self._drained_event: asyncio.Event = asyncio.Event()
 
         self.data_path.mkdir(parents=True, exist_ok=True)
         self.open_file = self.data_path / "open_positions.json"
@@ -41,8 +46,11 @@ class OpenPositionQueue:
         self._logger.debug(f"OpenPositionQueue inicializado - Data path: {self.data_path}, Max size: {self.max_size}")
 
     async def __aenter__(self):
-        self._logger.debug("Iniciando carga de datos desde disco")
-        await self.load_from_disk()
+        try:
+            await self.start()
+        except Exception as e:
+            self._logger.error(f"Error iniciando OpenPositionQueue: {e}")
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -56,6 +64,10 @@ class OpenPositionQueue:
         try:
             self._logger.info(f"Agregando posición abierta: {position.id}")
 
+            if self._shutdown_event.is_set():
+                self._logger.warning("Shutdown en progreso: no se aceptan nuevas posiciones abiertas")
+                return False
+
             async with self._lock:
                 trader_token_queue = self.open_positions_queue[position.trader_wallet][position.token_address]
 
@@ -65,6 +77,8 @@ class OpenPositionQueue:
 
                 position.status = PositionStatus.OPEN
                 trader_token_queue.append(position)
+                # Al encolar, marcar que no está drenado
+                self._drained_event.clear()
 
             # Registrar datos del token, trader y posiciones de apertura o cierre
             await self._register_token_trader_data(position, trader_token_queue, True)
@@ -93,32 +107,58 @@ class OpenPositionQueue:
             La primera posición de la cola o None si está vacía
         """
         try:
+            self._logger.debug(f"open_positions_queue snapshot disponible: {bool(self.open_positions_queue)}")
             async with self._lock:
                 if trader_address and token_address:
                     # Obtener primera posición de un trader y token específicos
                     queue = self.open_positions_queue.get(trader_address, {}).get(token_address, deque())
-                    return queue[0] if queue else None
+                    self._logger.debug(f"Buscando primera posición para trader {trader_address} y token {token_address}. Tamaño de la cola: {len(queue) if queue else 0}")
+                    head = next(iter(queue), None)
+                    return head
 
                 elif trader_address:
                     # Obtener primera posición de un trader (de cualquier token)
                     trader_tokens = self.open_positions_queue.get(trader_address, {})
-                    for token_queue in trader_tokens.values():
+                    self._logger.debug(f"Buscando primera posición para trader {trader_address} en cualquier token. Tokens encontrados: {list(trader_tokens.keys())}")
+                    for token, token_queue in trader_tokens.items():
                         if token_queue:
-                            return token_queue[0]
+                            head = next(iter(token_queue), None)
+                            if head is not None:
+                                self._logger.debug(f"Primera posición encontrada para trader {trader_address} en token {token}: {head.id}")
+                                return head
+                    self._logger.debug(f"No se encontró ninguna posición para trader {trader_address}")
+                    return None
+
+                elif token_address:
+                    # Obtener primera posición para un token (de cualquier trader)
+                    self._logger.debug(f"Buscando primera posición para token {token_address} en cualquier trader.")
+                    for trader, trader_tokens in self.open_positions_queue.items():
+                        queue = trader_tokens.get(token_address)
+                        if queue:
+                            head = next(iter(queue), None)
+                            if head is not None:
+                                self._logger.debug(f"Primera posición encontrada para token {token_address} en trader {trader}: {head.id}")
+                                return head
+                    self._logger.debug(f"No se encontró ninguna posición para token {token_address}")
                     return None
 
                 else:
                     # Obtener primera posición de cualquier trader y token
-                    for trader_tokens in self.open_positions_queue.values():
-                        for token_queue in trader_tokens.values():
+                    self._logger.debug("Buscando primera posición en cualquier trader y token.")
+                    for trader, trader_tokens in self.open_positions_queue.items():
+                        for token, token_queue in trader_tokens.items():
                             if token_queue:
-                                return token_queue[0]
+                                head = next(iter(token_queue), None)
+                                if head is not None:
+                                    self._logger.debug(f"Primera posición encontrada para trader {trader} en token {token}: {head.id}")
+                                    return head
+                    self._logger.debug("No se encontró ninguna posición en la cola global.")
                     return None
         except Exception as e:
             self._logger.error(f"Error obteniendo primera posición: {e}")
             return None
 
-    async def remove_position(self, position: OpenPosition) -> bool:
+    async def remove_position(self, position: OpenPosition, register_data: bool = True) -> bool:
         try:
             was_removed = False
             trader_token_queue = None
@@ -131,12 +171,25 @@ class OpenPositionQueue:
 
             if was_removed and trader_token_queue is not None:
                 # Registrar datos del token, trader y posiciones de apertura o cierre (fuera del lock para evitar deadlock)
-                await self._register_token_trader_data(position, trader_token_queue, False)
+                if register_data:
+                    await self._register_token_trader_data(position, trader_token_queue, False)
 
                 # Notificar cierre completo
                 await self._notify_position(position)
 
                 await self._save_open()
+
+                # Actualizar estado drenado si ya no quedan posiciones abiertas
+                try:
+                    total = 0
+                    async with self._lock:
+                        for trader_tokens in self.open_positions_queue.values():
+                            for queue in trader_tokens.values():
+                                total += len(queue)
+                    if total == 0:
+                        self._drained_event.set()
+                except Exception:
+                    pass
 
             return was_removed
         except Exception as e:
@@ -271,36 +324,34 @@ class OpenPositionQueue:
             self._logger.error(f"Error buscando posición {position_id} en cola: {e}")
             return None, None, None
 
-    async def get_open_positions(self, trader_address: Optional[str] = None, token_address: Optional[str] = None, _lock_acquired: bool = False) -> List[OpenPosition]:
-        try:
-            # Solo adquirir el lock si no lo tenemos ya
-            if not _lock_acquired:
-                async with self._lock:
-                    return await self._get_open_positions_internal(trader_address, token_address)
-            else:
-                return await self._get_open_positions_internal(trader_address, token_address)
+    def get_open_positions(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> List[OpenPosition]:
+        return self._get_open_positions_internal(trader_address, token_address)
 
-        except Exception as e:
-            self._logger.error(f"Error en get_open_positions: {e}")
-            raise
-
-    async def _get_open_positions_internal(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> List[OpenPosition]:
+    def _get_open_positions_internal(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> List[OpenPosition]:
         """Método interno que asume que el lock ya está adquirido."""
         try:
             if trader_address and token_address:
                 return list(self.open_positions_queue.get(trader_address, {}).get(token_address, deque()))
 
             if trader_address:
-                trader_positions = []
+                trader_positions: List[OpenPosition] = []
                 trader_tokens = self.open_positions_queue.get(trader_address, {})
-                for token_addr, queue in trader_tokens.items():
+                for _, queue in trader_tokens.items():
                     trader_positions.extend(queue)
                 return trader_positions
 
+            if token_address:
+                token_positions: List[OpenPosition] = []
+                for _, tokens in self.open_positions_queue.items():
+                    for token_address, queue in tokens.items():
+                        if token_address == token_address:
+                            token_positions.extend(queue)
+                return token_positions
+
             # Caso 3: todas las posiciones
-            all_positions = []
-            for trader_wallet, tokens in self.open_positions_queue.items():
-                for token_addr, queue in tokens.items():
+            all_positions: List[OpenPosition] = []
+            for _, tokens in self.open_positions_queue.items():
+                for _, queue in tokens.items():
                     all_positions.extend(queue)
 
             return all_positions
@@ -308,10 +359,10 @@ class OpenPositionQueue:
             self._logger.error(f"Error en _get_open_positions_internal: {e}")
             return []
 
-    async def handle_failed_position(self, position: OpenPosition, details: ProcessedAnalysisResult) -> None:
+    async def handle_failed_position(self, position: OpenPosition, event: PositionAnalysisFinishedEvent) -> None:
         try:
-            if not details.success:
-                error_kind = details.error_kind
+            if not event.success:
+                error_kind = event.error_kind
                 if error_kind == "slippage":
                     position.message_error = "Transaction failed due to slippage. The price moved unfavorably before the transaction could be completed."
                 elif error_kind == "insufficient_tokens":
@@ -323,9 +374,9 @@ class OpenPositionQueue:
                 elif error_kind == "insufficient_funds_for_rent":
                     position.message_error = "insufficient SOL to cover the account rent requirement."
                 else:
-                    position.message_error = details.error_message or "Unknown error occurred during transaction analysis."
+                    position.message_error = event.error_message or "Unknown error occurred during transaction analysis."
 
-                if await self.remove_position(position):
+                if await self.remove_position(position, register_data=False):
                     self._logger.info(f"Position {position.id} removed from open positions queue")
                 else:
                     self._logger.warning(f"Position {position.id} not removed from open positions queue")
@@ -333,9 +384,9 @@ class OpenPositionQueue:
                 await self._notify_position(position)
 
         except Exception as e:
-            self._logger.error(f"Error updating position {position.id}: {e}")
+            self._logger.error(f"Error updating position {event.position_id}: {e}")
 
-    async def get_queue_size(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> int:
+    def get_queue_size(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> int:
         """
         Obtiene el tamaño de la cola de un token, el total de posiciones abiertas de un trader o el total general de posiciones abiertas.
         
@@ -347,49 +398,74 @@ class OpenPositionQueue:
             Número de posiciones en la cola
         """
         try:
-            async with self._lock:
-                if trader_address and token_address:
-                    return len(self.open_positions_queue.get(trader_address, {}).get(token_address, deque()))
+            if trader_address and token_address:
+                return len(self.open_positions_queue.get(trader_address, {}).get(token_address, deque()))
 
-                elif trader_address:
-                    total_size = 0
-                    for queue in self.open_positions_queue.get(trader_address, {}).values():
+            elif trader_address:
+                total_size = 0
+                for queue in self.open_positions_queue.get(trader_address, {}).values():
+                    total_size += len(queue)
+                return total_size
+
+            else:
+                total_size = 0
+                for tokens in self.open_positions_queue.values():
+                    for queue in tokens.values():
                         total_size += len(queue)
-                    return total_size
-
-                else:
-                    total_size = 0
-                    for tokens in self.open_positions_queue.values():
-                        for queue in tokens.values():
-                            total_size += len(queue)
-                    return total_size
+                return total_size
         except Exception as e:
             self._logger.error(f"Error obteniendo tamaño de cola: {e}")
             return 0
 
-    async def on_analysis_finished(self, position: OpenPosition, details: ProcessedAnalysisResult) -> None:
+    async def _on_analysis_finished(self, event: PositionAnalysisFinishedEvent) -> None:
         try:
-            if isinstance(position, OpenPosition):
-                position.status = PositionStatus.OPEN if details.success else PositionStatus.FAILED
-            else:
-                raise ValueError(f"Position {position.id} is not an OpenPosition")
+            if event.position_type != "open":
+                return
 
-            if not details.success:
+            positions = self.get_open_positions(
+                trader_address=event.trader_wallet,
+                token_address=event.token_address
+            )
+
+            position_list = [position for position in positions if position.id == event.position_id]
+            if not position_list:
+                self._logger.warning(f"Position {event.position_id} not found in open positions queue")
+                return
+            position = position_list[0]
+
+            position.status = PositionStatus.OPEN if event.success else PositionStatus.FAILED
+
+            if not event.success:
                 await self._update_token_trader_data(position, is_failed=True)
-                await self.handle_failed_position(position, details)
+                await self.handle_failed_position(position, event)
             else:
                 await self._update_token_trader_data(position, is_failed=False)
-                position.is_analyzed = True
 
+            position.is_analyzed = True
             self._logger.info(f"Position {position.id} analysis finished with status {position.status}")
 
         except Exception as e:
-            self._logger.error(f"Error updating position {position.id}: {e}")
+            self._logger.error(f"Error updating position {event.position_id}: {e}")
+
+    async def is_head_open_analysis_analyzed_for_token(self, token_address: str) -> bool:
+        """Indica si la cabeza de la cola de análisis para el token dado ya fue analizada."""
+        try:
+            self._logger.debug(f"Verificando si la cabeza de la cola de análisis para el token {token_address} ya fue analizada.")
+            position = await self.get_first_position(token_address=token_address)
+            if position:
+                analyzed = position.get_is_analyzed()
+                self._logger.debug(f"Posición encontrada para token {token_address}: {position.id}, is_analyzed={analyzed}")
+                return analyzed
+            self._logger.debug(f"No se encontró posición para token {token_address}, se considera analizada.")
+            return True
+        except Exception as e:
+            self._logger.error(f"Error en is_head_open_analysis_analyzed_for_token({token_address}): {e}")
+            return True
 
     async def get_stats(self) -> Dict[str, Any]:
         try:
             async with self._lock:
-                all_positions = await self.get_open_positions(_lock_acquired=True)
+                all_positions = self.get_open_positions()
                 open_positions = [p for p in all_positions if p.status != PositionStatus.CLOSED]
 
                 total_open_value = sum(float(p.amount_sol) for p in open_positions)
@@ -425,6 +501,19 @@ class OpenPositionQueue:
                                 for pos_data in positions_data:
                                     trader_token_deque.append(OpenPosition.from_dict(pos_data))
                                 self.open_positions_queue[trader_wallet][token_address] = trader_token_deque
+            # Actualizar estado drenado tras carga
+            try:
+                total = 0
+                async with self._lock:
+                    for trader_tokens in self.open_positions_queue.values():
+                        for queue in trader_tokens.values():
+                            total += len(queue)
+                if total == 0:
+                    self._drained_event.set()
+                else:
+                    self._drained_event.clear()
+            except Exception:
+                self._drained_event.clear()
         except (json.JSONDecodeError, Exception) as e:
             self._logger.warning(f"Error cargando open_positions.json: {e}")
 
@@ -472,9 +561,41 @@ class OpenPositionQueue:
             position_id = position.id
             self._logger.error(f"Error enviando posición {position_id} a notificaciones: {e}", exc_info=True)
 
+    async def start(self) -> None:
+        """Inicia el worker de seguimiento y carga el estado."""
+        try:
+            self._logger.debug("Iniciando carga de datos desde disco")
+            await self.load_from_disk()
+
+            # Limpiar señal de shutdown
+            self._shutdown_event.clear()
+
+            # Actualizar estado drenado después de cargar
+            try:
+                total = 0
+                for trader_tokens in self.open_positions_queue.values():
+                    for queue in trader_tokens.values():
+                        total += len(queue)
+                if total == 0:
+                    self._drained_event.set()
+                else:
+                    self._drained_event.clear()
+            except Exception:
+                self._drained_event.clear()
+
+            # Suscribirse a eventos
+            if self.position_event_bus:
+                self.position_event_bus.on_position_analysis_finished(self._on_analysis_finished)
+        except Exception as e:
+            self._logger.error(f"Error iniciando OpenPositionQueue: {e}")
+            raise
+
     async def stop(self) -> None:
         """Detiene el worker de seguimiento y guarda el estado."""
         try:
+            # Shutdown ordenado: no aceptar nuevas posiciones y esperar drenado
+            await self.shutdown()
+            await self.join()
             # Guardar estado final
             await self.save_state()
 
@@ -492,3 +613,27 @@ class OpenPositionQueue:
         except Exception as e:
             self._logger.error(f"Error obteniendo ruta de archivo para estado {status}: {e}")
             raise
+
+    # ===================== Shutdown/Join helpers =====================
+    async def shutdown(self) -> None:
+        """Señaliza que no se aceptarán más posiciones abiertas."""
+        try:
+            self._shutdown_event.set()
+        except Exception as e:
+            self._logger.error(f"Error en shutdown(): {e}")
+
+    async def join(self) -> None:
+        """Bloquea hasta que no queden posiciones abiertas."""
+        try:
+            # Si ya está drenado, retorna inmediatamente
+            total = 0
+            async with self._lock:
+                for trader_tokens in self.open_positions_queue.values():
+                    for queue in trader_tokens.values():
+                        total += len(queue)
+            if total == 0:
+                self._drained_event.set()
+                return
+            await self._drained_event.wait()
+        except Exception as e:
+            self._logger.error(f"Error en join(): {e}")

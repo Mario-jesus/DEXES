@@ -13,6 +13,7 @@ from ...callbacks.notification_callback import PositionNotificationCallback
 from ...data_management import TradingDataFetcher, TokenTraderManager, SolanaTxAnalyzer, SolanaWebsocketManager
 from ...notifications import NotificationManager
 from ...balance_management import BalanceManager
+from ...events import PositionEventBus
 from ..queues import (
     PendingPositionQueue,
     AnalysisPositionQueue,
@@ -47,6 +48,7 @@ class QueueInitializationManager:
                     trading_data_fetcher: TradingDataFetcher,
                     token_trader_manager: TokenTraderManager,
                     balance_manager: BalanceManager,
+                    position_event_bus: Optional[PositionEventBus] = None,
                     notification_manager: Optional[NotificationManager] = None):
         self._logger = AppLogger(self.__class__.__name__)
         self.solana_analyzer = solana_analyzer
@@ -54,6 +56,7 @@ class QueueInitializationManager:
         self.trading_data_fetcher = trading_data_fetcher
         self.token_trader_manager = token_trader_manager
         self.balance_manager = balance_manager
+        self.position_event_bus = position_event_bus
         self.notification_manager = notification_manager
 
         # Parámetros de configuración
@@ -168,6 +171,7 @@ class QueueInitializationManager:
             self._logger.debug("Inicializando cola de notificaciones")
             self.notification_queue = PositionNotificationQueue(
                 notification_callback=self.notification_callback,
+                position_event_bus=self.position_event_bus,
                 max_size=self.max_size,
                 process_interval=1.0
             )
@@ -201,17 +205,11 @@ class QueueInitializationManager:
                 solana_analyzer=self.solana_analyzer,
                 solana_websocket=self.solana_websocket,
                 token_trader_manager=self.token_trader_manager,
-                balance_manager=self.balance_manager,
+                position_event_bus=self.position_event_bus,
                 analysis_processor=self.analysis_processor,
                 data_path=self.data_path,
                 max_size=self.max_size
             )
-
-            if self.open_queue:
-                self.analysis_queue.set_open_position_queue(self.open_queue)
-
-            if self.closed_queue:
-                self.analysis_queue.set_closed_position_queue(self.closed_queue)
 
             await self.analysis_queue.__aenter__()
             self._logger.debug("Cola de análisis inicializada")
@@ -227,13 +225,11 @@ class QueueInitializationManager:
             self.open_queue = OpenPositionQueue(
                 data_path=self.data_path,
                 max_size=self.max_size,
+                position_event_bus=self.position_event_bus,
                 token_trader_manager=self.token_trader_manager,
                 position_notification_queue=self.notification_queue
             )
             await self.open_queue.__aenter__()
-
-            if self.analysis_queue:
-                self.analysis_queue.set_open_position_queue(self.open_queue)
 
             self._logger.debug("Cola de posiciones abiertas inicializada")
             return True
@@ -251,14 +247,13 @@ class QueueInitializationManager:
 
             self.closed_queue = ClosedPositionQueue(
                 analysis_queue=self.analysis_queue,
+                position_event_bus=self.position_event_bus,
+                open_position_queue=self.open_queue,
                 position_notification_queue=self.notification_queue,
                 token_trader_manager=self.token_trader_manager,
                 max_size=self.max_size
             )
             await self.closed_queue.__aenter__()
-
-            if self.analysis_queue:
-                self.analysis_queue.set_closed_position_queue(self.closed_queue)
 
             self._logger.debug("Cola de posiciones cerradas inicializada")
             return True
@@ -279,14 +274,14 @@ class QueueInitializationManager:
             # Inicializar procesador de cierre
             self.closure_processor = PositionClosureProcessor(
                 open_position_queue=self.open_queue,
-                closed_position_queue=self.closed_queue,
-                notification_queue=self.notification_queue
+                notification_queue=self.notification_queue,
+                position_event_bus=self.position_event_bus
             )
 
             self.analysis_processor = TradeAnalysisProcessor(
                 solana_analyzer=self.solana_analyzer,
                 token_trader_manager=self.token_trader_manager,
-                balance_manager=self.balance_manager
+                position_event_bus=self.position_event_bus
             )
 
             # Inyectar closure_processor a closed_queue ahora que existe

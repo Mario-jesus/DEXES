@@ -22,15 +22,13 @@ class PositionFactory:
 
     def create_position_from_trade_data(self, 
                                         position_trade_data: PositionTraderTradeData, 
-                                        signature: str, 
-                                        entry_price: str) -> Optional[OpenPosition | ClosePosition]:
+                                        signature: str) -> Optional[OpenPosition | ClosePosition]:
         """
         Crea una posición (OpenPosition o ClosePosition) basada en los datos del trade.
         
         Args:
             position_trade_data: Datos del trade del trader
             signature: Firma de la transacción ejecutada
-            entry_price: Precio de entrada
             
         Returns:
             OpenPosition o ClosePosition según el side del trade, None si hay error
@@ -44,11 +42,11 @@ class PositionFactory:
             self._logger.debug(f"Side: {position_trade_data.side}, Amount SOL: {position_trade_data.copy_amount_sol}")
 
             if position_trade_data.side == "buy":
-                position = self.create_open_position(position_trade_data, signature, entry_price)
+                position = self.create_open_position(position_trade_data, signature)
                 self._logger.info(f"OpenPosition creada: {position.id}")
                 return position
             elif position_trade_data.side == "sell":
-                position = self.create_close_position(position_trade_data, signature, entry_price)
+                position = self.create_close_position(position_trade_data, signature)
                 self._logger.info(f"ClosePosition creada: {position.id}")
                 return position
             else:
@@ -61,15 +59,13 @@ class PositionFactory:
 
     def create_open_position(self, 
                             position_trade_data: PositionTraderTradeData, 
-                            signature: str, 
-                            entry_price: str) -> OpenPosition:
+                            signature: str) -> OpenPosition:
         """
         Crea un objeto OpenPosition desde los datos del trade.
         
         Args:
             position_trade_data: Datos del trade del trader
             signature: Firma de la transacción ejecutada
-            entry_price: Precio de entrada
             
         Returns:
             OpenPosition creado
@@ -78,11 +74,12 @@ class PositionFactory:
             self._logger.debug(f"Creando OpenPosition para signature: {signature[:8]}...")
 
             position = OpenPosition(
+                id=position_trade_data.id,
                 amount_sol=position_trade_data.copy_amount_sol,
                 amount_tokens=position_trade_data.copy_amount_tokens,
-                entry_price=entry_price,
                 execution_signature=signature,
                 execution_price=position_trade_data.get_sol_per_token_price(),
+                is_liquidation=position_trade_data.is_liquidation,
                 created_at=position_trade_data.created_at,
                 executed_at=datetime.now(),
                 trader_trade_data=position_trade_data.trader_trade_data,
@@ -97,15 +94,13 @@ class PositionFactory:
 
     def create_close_position(self, 
                             position_trade_data: PositionTraderTradeData, 
-                            signature: str, 
-                            entry_price: str) -> ClosePosition:
+                            signature: str) -> ClosePosition:
         """
         Crea un objeto ClosePosition desde los datos del trade.
         
         Args:
             position_trade_data: Datos del trade del trader
             signature: Firma de la transacción ejecutada
-            entry_price: Precio de entrada
             
         Returns:
             ClosePosition creado
@@ -114,11 +109,12 @@ class PositionFactory:
             self._logger.debug(f"Creando ClosePosition para signature: {signature[:8]}...")
 
             position = ClosePosition(
+                id=position_trade_data.id,
                 amount_sol=position_trade_data.copy_amount_sol,
                 amount_tokens=position_trade_data.copy_amount_tokens,
-                entry_price=entry_price,
                 execution_signature=signature,
                 execution_price=position_trade_data.get_sol_per_token_price(),
+                is_liquidation=position_trade_data.is_liquidation,
                 created_at=position_trade_data.created_at,
                 executed_at=datetime.now(),
                 trader_trade_data=position_trade_data.trader_trade_data,

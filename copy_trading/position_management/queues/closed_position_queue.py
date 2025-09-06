@@ -10,13 +10,15 @@ from collections import defaultdict, deque
 from typing import Dict, Optional, Any, List, TYPE_CHECKING
 
 from logging_system import AppLogger
+from ...events import PositionEventBus, PositionAnalysisFinishedEvent
 from ...data_management import TokenTraderManager
-from ..models import ClosePosition, ClosePositionStatus, ProcessedAnalysisResult, Position
+from ..models import ClosePosition, ClosePositionStatus
 from .notification_queue import PositionNotificationQueue
 
 if TYPE_CHECKING:
-    from .analysis_position_queue import AnalysisPositionQueue
     from ..processors import PositionClosureProcessor
+    from .analysis_position_queue import AnalysisPositionQueue
+    from .open_position_queue import OpenPositionQueue
 
 
 class ClosedPositionQueue:
@@ -24,22 +26,25 @@ class ClosedPositionQueue:
 
     def __init__(self,
             analysis_queue: 'AnalysisPositionQueue',
+            position_event_bus: Optional[PositionEventBus] = None,
+            open_position_queue: Optional['OpenPositionQueue'] = None,
             position_notification_queue: Optional[PositionNotificationQueue] = None,
             closure_processor: Optional['PositionClosureProcessor'] = None,
             token_trader_manager: Optional[TokenTraderManager] = None,
             max_size: Optional[int] = None,
-            process_interval: float = 5.0,
-            max_retries: int = 3,):
+            max_retries: int = 3
+        ):
         self._logger = AppLogger(self.__class__.__name__)
+        self.position_event_bus = position_event_bus
         self.analysis_queue = analysis_queue
+        self.open_position_queue = open_position_queue
         self.position_notification_queue = position_notification_queue
         self.closure_processor = closure_processor
         self.token_trader_manager = token_trader_manager
-        self.process_interval = process_interval
         self.max_size = max_size
         self.max_retries = max_retries
 
-        # Posiciones de cierre esperando liberación por token
+        # Posiciones de cierre esperando liberación por token (token -> deque[ClosePosition])
         self._pending_by_token: Dict[str, deque[ClosePosition]] = defaultdict(lambda: deque(maxlen=self.max_size))
 
         # Métricas
@@ -55,6 +60,11 @@ class ClosedPositionQueue:
         self._running = False
         self._process_task: Optional[asyncio.Task] = None
 
+        # Señales de control para cierre ordenado
+        self._shutdown_event: asyncio.Event = asyncio.Event()
+        self._drained_event: asyncio.Event = asyncio.Event()
+        self._wakeup_event: asyncio.Event = asyncio.Event()
+
         self._logger.debug("ClosedPositionQueue inicializada (modo coordinador, sin persistencia)")
 
     async def __aenter__(self):
@@ -68,6 +78,21 @@ class ClosedPositionQueue:
         try:
             if self._running:
                 return
+
+            # Estado inicial
+            self._shutdown_event.clear()
+
+            # Drained si no hay posiciones pendientes
+            if sum(len(q) for q in self._pending_by_token.values()) == 0:
+                self._drained_event.set()
+            else:
+                self._drained_event.clear()
+
+            # Suscribirse a eventos
+            if self.position_event_bus:
+                self.position_event_bus.on_position_analysis_finished(self._on_analysis_finished)
+
+            # Iniciar worker
             self._running = True
             self._process_task = asyncio.create_task(self._process_loop())
             self._logger.debug("ClosedPositionQueue worker iniciado")
@@ -75,22 +100,55 @@ class ClosedPositionQueue:
             self._logger.error(f"Error iniciando ClosedPositionQueue: {e}")
 
     async def stop(self) -> None:
+        """Cierre ordenado: no aceptar más posiciones y drenar pendientes."""
         try:
-            if not self._running:
+            if not self._running and not self._process_task:
                 return
-            self._logger.info("Deteniendo ClosedPositionQueue")
+            self._logger.info("Deteniendo ClosedPositionQueue (shutdown ordenado)")
+
+            await self.shutdown()
+
+            await self.join()
+
+            # Señalar al loop que ya puede terminar
             self._running = False
-            if self._process_task and not self._process_task.done():
-                self._process_task.cancel()
+            self._wakeup_event.set()
+
+            if self._process_task:
                 try:
                     await self._process_task
-                except asyncio.CancelledError:
-                    pass
                 finally:
                     self._process_task = None
             self._logger.debug("ClosedPositionQueue detenida exitosamente")
         except Exception as e:
             self._logger.error(f"Error durante la detención de ClosedPositionQueue: {e}")
+
+    async def _force_drain_pending(self) -> None:
+        """Remueve todas las posiciones pendientes marcándolas como fallidas por shutdown y notificando."""
+        try:
+            positions_to_fail: list[ClosePosition] = []
+            async with self._lock:
+                for token, queue in self._pending_by_token.items():
+                    while len(queue) > 0:
+                        pos = queue.popleft()
+                        positions_to_fail.append(pos)
+
+            for pos in positions_to_fail:
+                try:
+                    pos.status = ClosePositionStatus.FAILED
+                    pos.message_error = "Finalizado por shutdown"
+                    await self._update_token_trader_data(pos, is_failed=True)
+                    await self._notify_position(pos)
+                except Exception as e:
+                    self._logger.error(f"Error finalizando por shutdown posición {getattr(pos, 'id', '?')}: {e}")
+
+            # Actualizar drenado
+            try:
+                self._drained_event.set()
+            except Exception:
+                pass
+        except Exception as e:
+            self._logger.error(f"Error en _force_drain_pending: {e}")
 
     def set_closure_processor(self, closure_processor: 'PositionClosureProcessor') -> None:
         self.closure_processor = closure_processor
@@ -102,6 +160,9 @@ class ClosedPositionQueue:
         - la propia ClosePosition esté analizada.
         """
         try:
+            if self._shutdown_event.is_set():
+                self._logger.warning("Shutdown en progreso: no se aceptan nuevas posiciones cerradas")
+                return False
             async with self._lock:
                 token = position.token_address if hasattr(position, 'token_address') else (position.trader_trade_data.token_address if position.trader_trade_data else None)
                 if not token:
@@ -116,7 +177,11 @@ class ClosedPositionQueue:
 
                 queue.append(position)
                 self._stats['added_count'] += 1
+                # Al encolar, dejar en estado no drenado
+                self._drained_event.clear()
                 self._logger.info(f"ClosePosition {position.id} encolada para token {token}. En espera de condiciones de ejecución")
+            # Despertar el loop para que procese más rápido
+            self._wakeup_event.set()
             return True
         except Exception as e:
             self._logger.error(f"Error en add_closed_position({position.id}): {e}")
@@ -167,15 +232,22 @@ class ClosedPositionQueue:
         except Exception as e:
             self._logger.error(f"Error registrando datos de token/trader para posición {position.id}: {e}", exc_info=True)
 
-    async def on_analysis_finished(self, position: ClosePosition, details: ProcessedAnalysisResult) -> None:
+    async def _on_analysis_finished(self, event: PositionAnalysisFinishedEvent) -> None:
         try:
-            if isinstance(position, ClosePosition):
-                position.status = ClosePositionStatus.SUCCESS if details.success else ClosePositionStatus.FAILED
-            else:
-                raise ValueError(f"Position {position.id} is not a ClosePosition")
+            if event.position_type != "close":
+                return
 
-            if not details.success:
-                error_kind = details.error_kind
+            queue = self._pending_by_token[event.token_address]
+            position_list = [position for position in queue if position.id == event.position_id]
+            if not position_list:
+                self._logger.warning(f"Position {event.position_id} not found in closed positions queue")
+                return
+            position = position_list[0]
+
+            position.status = ClosePositionStatus.SUCCESS if event.success else ClosePositionStatus.FAILED
+
+            if not event.success:
+                error_kind = event.error_kind
                 if error_kind == "slippage":
                     position.message_error = "Transaction failed due to slippage. The price moved unfavorably before the transaction could be completed."
                 elif error_kind == "insufficient_tokens":
@@ -187,7 +259,7 @@ class ClosedPositionQueue:
                 elif error_kind == "insufficient_funds_for_rent":
                     position.message_error = "insufficient SOL to cover the account rent requirement."
                 else:
-                    position.message_error = details.error_message or "Unknown error occurred during transaction analysis."
+                    position.message_error = event.error_message or "Unknown error occurred during transaction analysis."
 
                 if await self._remove_position_from_queue(position.id, position.token_address):
                     self._logger.info(f"Position {position.id} removed from closed positions queue")
@@ -199,24 +271,42 @@ class ClosedPositionQueue:
                 await self._notify_position(position)
             else:
                 await self._update_token_trader_data(position, is_failed=False)
-                position.is_analyzed = True
 
+            position.is_analyzed = True
             self._logger.info(f"Position {position.id} analysis finished with status {position.status}")
+
+            # Despertar el loop de cierres por si ahora se puede liberar
+            try:
+                await self.wake()
+            except Exception:
+                pass
 
         except Exception as e:
             self._logger.error(f"Error en on_analysis_finished({position.id}): {e}")
 
     async def _process_loop(self) -> None:
         self._logger.debug("ClosedPositionQueue loop iniciado")
-        while self._running:
+        while self._running or self._shutdown_event.is_set():
             try:
-                await self._process_pending()
-                await asyncio.sleep(self.process_interval)
+                did_process = await self._process_pending()
+                # Esperar cuando no haya trabajo o cuando hay trabajo pero está bloqueado por análisis
+                total_pending = sum(len(q) for q in self._pending_by_token.values())
+                if total_pending == 0 or not did_process:
+                    # Esperar a wakeup
+                    await self._wakeup_event.wait()
+                    self._wakeup_event.clear()
+                else:
+                    await asyncio.sleep(1)
+
+                # Si estamos en shutdown y ya no quedan pendientes, terminar
+                if self._shutdown_event.is_set() and sum(len(q) for q in self._pending_by_token.values()) == 0:
+                    self._drained_event.set()
+                    break
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self._logger.error(f"Error en loop de ClosedPositionQueue: {e}")
-                await asyncio.sleep(self.process_interval)
+                await asyncio.sleep(1)
 
     async def _remove_position_from_queue(self, position_id: str, token: str) -> bool:
         """
@@ -247,24 +337,37 @@ class ClosedPositionQueue:
             self._logger.error(f"Error removiendo posición {position_id} de token {token}: {e}")
             return False
 
-    async def _process_pending(self) -> None:
+        finally:
+            # Actualizar estado drenado
+            try:
+                total = sum(len(q) for q in self._pending_by_token.values())
+                if total == 0:
+                    self._drained_event.set()
+                else:
+                    self._drained_event.clear()
+            except Exception:
+                pass
+
+    async def _process_pending(self) -> bool:
+        processed_any = False
+        self._logger.debug(f"Procesando cola de posiciones cerradas")
         # Revisar por token si aún hay análisis de OPENs; si no, liberar todas las posiciones de ese token
         tokens_snapshot: List[str] = []
         async with self._lock:
             tokens_snapshot = [t for t, q in self._pending_by_token.items() if len(q) > 0]
 
         if not tokens_snapshot:
-            return
+            return False
 
         for token in tokens_snapshot:
             try:
-                has_open_analysis = await self._has_pending_open_analysis_for_token(token)
+                head_is_analyzed = await self._is_head_open_analysis_analyzed_for_token(token)
             except Exception as e:
                 self._logger.error(f"Error consultando análisis pendientes para token {token}: {e}")
-                has_open_analysis = True
+                head_is_analyzed = False
 
-            if has_open_analysis:
-                # Aún no liberar este token
+            if not head_is_analyzed:
+                # Aún no liberar este token (cabeza no analizada)
                 self._logger.debug(f"Aún no liberar este token {token}")
                 continue
 
@@ -309,24 +412,30 @@ class ClosedPositionQueue:
 
             await self._remove_position_from_queue(pos.id, token)
             self._stats['finalized_count'] += 1
+            # Despertar para continuar procesando
+            self._wakeup_event.set()
+            processed_any = True
+        return processed_any
 
-    async def _has_pending_open_analysis_for_token(self, token_address: str) -> bool:
-        """Consulta directa al AnalysisPositionQueue con fallback estándar."""
+    async def wake(self) -> None:
+        """Despierta el loop para intentar procesar posiciones pendientes."""
+        try:
+            self._wakeup_event.set()
+        except Exception:
+            pass
+
+    async def _is_head_open_analysis_analyzed_for_token(self, token_address: str) -> bool:
+        """Consulta directa al OpenPositionQueue."""
         try:
             # Método preferido
-            return await self.analysis_queue.has_pending_open_analysis_for_token(token_address)
-        except AttributeError:
-            # Fallback: inspeccionar la cola de análisis
-            positions: List[Position] = await self.analysis_queue.get_analysis_positions()
-            for pos in positions:
-                try:
-                    if pos.token_address == token_address and not pos.is_analyzed:
-                        return True
-                except Exception:
-                    continue
-            return False
+            if not self.open_position_queue:
+                self._logger.error("OpenPositionQueue no configurado en ClosedPositionQueue")
+                return True
+            is_analyzed = await self.open_position_queue.is_head_open_analysis_analyzed_for_token(token_address)
+            self._logger.debug(f"_is_head_open_analysis_analyzed_for_token({token_address}): is_analyzed: {is_analyzed}")
+            return is_analyzed
         except Exception as e:
-            self._logger.error(f"Error en _has_pending_open_analysis_for_token({token_address}): {e}")
+            self._logger.error(f"Error en _is_head_open_analysis_analyzed_for_token({token_address}): {e}")
             return True
 
     async def _notify_position(self, position: ClosePosition) -> None:
@@ -379,3 +488,24 @@ class ClosedPositionQueue:
     async def save_state(self):
         # Sin persistencia; método mantenido por compatibilidad
         return
+
+    # ===================== Shutdown/Join helpers =====================
+    async def shutdown(self) -> None:
+        """Señaliza que no se aceptarán más posiciones y comienza drenado."""
+        try:
+            self._shutdown_event.set()
+            self._wakeup_event.set()
+        except Exception as e:
+            self._logger.error(f"Error en shutdown(): {e}")
+
+    async def join(self) -> None:
+        """Bloquea hasta que no queden posiciones pendientes por token."""
+        try:
+            # Si ya está drenado, retorna inmediatamente
+            total = sum(len(q) for q in self._pending_by_token.values())
+            if total == 0:
+                self._drained_event.set()
+                return
+            await self._drained_event.wait()
+        except Exception as e:
+            self._logger.error(f"Error en join(): {e}")

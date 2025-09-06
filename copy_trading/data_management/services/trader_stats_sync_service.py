@@ -103,7 +103,7 @@ class TraderStatsSyncService:
 
             # Actualizar TraderTokenStats
             updated_trader_token_stats.update_closed_position(previous_volume_sol, volume_sol_closed, timestamp)
-            
+
             # Actualizar TraderStats
             updated_trader_stats.update_closed_position(previous_volume_sol, volume_sol_closed)
 

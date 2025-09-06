@@ -68,7 +68,7 @@ class PositionValidationService:
         if not position.amount_sol_executed or Decimal(position.amount_sol_executed) == 0:
             issues.append("amount_sol is zero or empty")
 
-        if not position.amount_tokens or Decimal(position.amount_tokens) == 0:
+        if not position.amount_tokens_executed or Decimal(position.amount_tokens_executed) == 0:
             issues.append("amount_tokens is zero or empty")
 
         if not position.total_cost_sol and not position.amount_sol_executed:
@@ -174,12 +174,6 @@ class PositionValidationService:
         """
         issues = []
         warnings = []
-
-        # Validar precio de entrada
-        if not position.entry_price:
-            issues.append("no entry_price available")
-        elif Decimal(position.entry_price) <= 0:
-            issues.append("entry_price is zero or negative")
 
         # Validar precio de ejecución
         if not position.execution_price:

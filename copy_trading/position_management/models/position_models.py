@@ -8,10 +8,10 @@ from datetime import datetime
 from typing import Dict, Any, List, Union, Tuple, Optional
 from decimal import Decimal
 
+from ...data_management.models.data_models import TokenInfo
 from .base_models import Position, TraderTradeData
 from .enums import PositionStatus, ClosePositionStatus
 from .serialization import serialize_for_json
-from ...data_management.models.data_models import TokenInfo
 
 
 @dataclass(slots=True)
@@ -30,15 +30,6 @@ class ClosePosition(Position):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ClosePosition':
         """Crea desde diccionario"""
-        trader_data = data.get('trader_trade_data')
-
-        # Procesar trader_data para manejar datetime
-        if trader_data and isinstance(trader_data, dict):
-            # Convertir string ISO de vuelta a datetime
-            if 'timestamp' in trader_data and isinstance(trader_data['timestamp'], str):
-                trader_data['timestamp'] = datetime.fromisoformat(trader_data['timestamp'])
-            trader_data = TraderTradeData(**trader_data)
-
         # Procesar metadata para manejar objetos TokenInfo
         metadata = {}
         for key, value in data.get('metadata', {}).items():
@@ -48,12 +39,11 @@ class ClosePosition(Position):
                 metadata[key] = value
 
         return cls(
-            id=data.get('id', str(uuid.uuid4())),
+            id=data['id'],
             amount_sol=data.get('amount_sol', ''),
             amount_sol_executed=data.get('amount_sol_executed', ''),
             amount_tokens=data.get('amount_tokens', ''),
             amount_tokens_executed=data.get('amount_tokens_executed', ''),
-            entry_price=data.get('entry_price', ''),
             fee_sol=data.get('fee_sol', ''),
             total_cost_sol=data.get('total_cost_sol', ''),
             execution_signature=data.get('execution_signature'),
@@ -61,9 +51,10 @@ class ClosePosition(Position):
             status=ClosePositionStatus(data.get('status', ClosePositionStatus.PENDING.value)),
             is_analyzed=data.get('is_analyzed', False),
             message_error=data.get('message_error', ''),
+            is_liquidation=data.get('is_liquidation', False),
             created_at=datetime.fromisoformat(data['created_at']) if data.get('created_at') else datetime.now(),
             executed_at=datetime.fromisoformat(data['executed_at']) if data.get('executed_at') else None,
-            trader_trade_data=trader_data,
+            trader_trade_data=TraderTradeData.from_dict(data.get('trader_trade_data', {})),
             metadata=metadata
         )
 
@@ -100,6 +91,10 @@ class SubClosePosition:
     @property
     def metadata(self) -> Dict[str, Any]:
         return self.close_position.metadata
+
+    @property
+    def is_liquidation(self) -> bool:
+        return self.close_position.is_liquidation
 
     def calculate_proportional_total_cost(self) -> str:
         """
@@ -179,100 +174,11 @@ class OpenPosition(Position):
                 return False
         return self.is_analyzed
 
-    @classmethod
-    def _get_close_amounts(cls, close_item: Union[ClosePosition, SubClosePosition]) -> Tuple[str, str]:
-        """
-        Obtiene los montos de SOL y tokens de un item del historial
-        
-        Args:
-            close_item: Item del historial
-            
-        Returns:
-            Tuple de (amount_sol, amount_tokens)
-        """
-        return close_item.amount_sol_executed, close_item.amount_tokens_executed
-
-    @classmethod
-    def calculate_remaining_amounts(cls, position: 'OpenPosition') -> Tuple[str, str]:
-        """
-        Calcula la cantidad de tokens y SOL restantes
-        
-        Args:
-            position: Objeto OpenPosition
-            
-        Returns:
-            Tuple de (remaining_sol, remaining_tokens) como strings
-        """
-        total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original_tokens = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
-        total_original_sol = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
-        remaining_sol = max(Decimal('0'), total_original_sol - Decimal(total_closed_sol))
-        remaining_tokens = max(Decimal('0'), total_original_tokens - Decimal(total_closed_tokens))
-        return format(remaining_sol, "f"), format(remaining_tokens, "f")
-
-    @classmethod
-    def calculate_total_closed_amounts(cls, position: 'OpenPosition') -> Tuple[str, str]:
-        """
-        Calcula los totales acumulados de cierres
-        
-        Args:
-            position: Objeto OpenPosition
-            
-        Returns:
-            Tuple de (total_sol, total_tokens) como strings
-        """
-        total_sol = Decimal('0')
-        total_tokens = Decimal('0')
-
-        for close_item in position.close_history:
-            amount_sol_executed, amount_tokens_executed = cls._get_close_amounts(close_item)
-            if amount_sol_executed:
-                total_sol += Decimal(amount_sol_executed)
-            if amount_tokens_executed:
-                total_tokens += Decimal(amount_tokens_executed)
-
-        return format(total_sol, "f"), format(total_tokens, "f")
-
-    @classmethod
-    def calculate_remaining_tokens(cls, position: 'OpenPosition') -> str:
-        """
-        Calcula la cantidad de tokens restantes
-        
-        Args:
-            position: Objeto OpenPosition
-            
-        Returns:
-            Cantidad de tokens restantes como string
-        """
-        _, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        total_original = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
-        remaining = max(Decimal('0'), total_original - Decimal(total_closed_tokens))
-        return format(remaining, "f")
-
-    @classmethod
-    def calculate_remaining_sol(cls, position: 'OpenPosition') -> str:
-        """
-        Calcula la cantidad de SOL restantes
-        """
-        total_closed_sol, _ = cls.calculate_total_closed_amounts(position)
-        total_original = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
-        remaining = max(Decimal('0'), total_original - Decimal(total_closed_sol))
-        return format(remaining, "f")
-
     def add_close(self, close_data: Union[ClosePosition, SubClosePosition]) -> None:
         """
         Agrega un cierre al historial y actualiza el estado
         """
         self.close_history.append(close_data)
-
-        # Determinar si es cierre completo o parcial
-        remaining_tokens = self.calculate_remaining_tokens(self)
-        remaining_sol = self.calculate_remaining_sol(self)
-
-        if remaining_tokens == '0' or remaining_sol == '0':
-            self.status = PositionStatus.CLOSED
-        else:
-            self.status = PositionStatus.PARTIALLY_CLOSED
 
     def is_fully_closed(self) -> bool:
         """
@@ -296,15 +202,6 @@ class OpenPosition(Position):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'OpenPosition':
         """Crea desde diccionario"""
-        trader_data = data.get('trader_trade_data')
-
-        # Procesar trader_data para manejar datetime
-        if trader_data and isinstance(trader_data, dict):
-            # Convertir string ISO de vuelta a datetime
-            if 'timestamp' in trader_data and isinstance(trader_data['timestamp'], str):
-                trader_data['timestamp'] = datetime.fromisoformat(trader_data['timestamp'])
-            trader_data = TraderTradeData(**trader_data)
-
         # Procesar close_history para manejar tanto ClosePosition como ClosePositionPartial
         close_history = []
         for ch_data in data.get('close_history', []):
@@ -328,12 +225,11 @@ class OpenPosition(Position):
                 metadata[key] = value
 
         return cls(
-            id=data.get('id', str(uuid.uuid4())),
+            id=data['id'],
             amount_sol=data.get('amount_sol', ''),
             amount_sol_executed=data.get('amount_sol_executed', ''),
             amount_tokens=data.get('amount_tokens', ''),
             amount_tokens_executed=data.get('amount_tokens_executed', ''),
-            entry_price=data.get('entry_price', ''),
             fee_sol=data.get('fee_sol', ''),
             total_cost_sol=data.get('total_cost_sol', ''),
             execution_signature=data.get('execution_signature'),
@@ -341,9 +237,10 @@ class OpenPosition(Position):
             status=PositionStatus(data.get('status', PositionStatus.PENDING.value)),
             is_analyzed=data.get('is_analyzed', False),
             message_error=data.get('message_error', ''),
+            is_liquidation=data.get('is_liquidation', False),
             created_at=datetime.fromisoformat(data['created_at']) if data.get('created_at') else datetime.now(),
             executed_at=datetime.fromisoformat(data['executed_at']) if data.get('executed_at') else None,
-            trader_trade_data=trader_data,
+            trader_trade_data=TraderTradeData.from_dict(data.get('trader_trade_data', {})),
             metadata=metadata,
             close_history=close_history
         )

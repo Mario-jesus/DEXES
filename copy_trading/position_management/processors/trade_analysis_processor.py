@@ -8,9 +8,9 @@ from decimal import Decimal
 from typing import Union, cast, Tuple, Optional
 
 from logging_system import AppLogger
-from ...balance_management import BalanceManager
 from ...data_management import TokenTraderManager, SolanaTxAnalyzer
 from ...data_management.models import TransactionAnalysis
+from ...events import PositionEventBus, PositionAnalysisEvent
 from ..models import Position, OpenPosition, ClosePosition
 
 
@@ -23,12 +23,12 @@ class TradeAnalysisProcessor:
     def __init__(self, 
                     solana_analyzer: SolanaTxAnalyzer,
                     token_trader_manager: TokenTraderManager,
-                    balance_manager: BalanceManager):
+                    position_event_bus: Optional[PositionEventBus] = None):
         self._logger = AppLogger(self.__class__.__name__)
         self._lock = asyncio.Lock()
         self.solana_analyzer = solana_analyzer
         self.token_trader_manager = token_trader_manager
-        self.balance_manager = balance_manager
+        self.position_event_bus = position_event_bus
         self._logger.debug("TradeAnalysisProcessor inicializado")
 
     async def analyze_position(self, position: Position) -> Tuple[bool, Optional[TransactionAnalysis]]:
@@ -112,6 +112,8 @@ class TradeAnalysisProcessor:
                 position.total_cost_sol = analysis_result.total_cost_sol or "0.0"
                 position.execution_price = analysis_result.price_sol_per_token or "0.0"
 
+                self._logger.debug(f"Posición actualizada: amount_tokens_executed={position.amount_tokens_executed}, amount_sol_executed={position.amount_sol_executed}, fee_sol={position.fee_sol}, total_cost_sol={position.total_cost_sol}, execution_price={position.execution_price}, price_sol_per_token={analysis_result.price_sol_per_token}")
+
                 # Agregar resultado del análisis a la posición
                 position.add_metadata("analysis_result", analysis_result)
 
@@ -142,16 +144,26 @@ class TradeAnalysisProcessor:
             else:
                 self._logger.debug(f"No se pudo obtener token_info para {position.token_address}")
 
-            # Actualizar balances locales por apertura o cierre de posición
-            try:
-                if self.balance_manager and isinstance(position, OpenPosition) and analysis_result.success:
-                    await self.balance_manager.on_position_opened(analysis_result.signer_sol_delta or "0.0")
-                    await self.balance_manager.on_token_received(position.token_address, analysis_result.token_ui_delta or "0.0")
-                elif self.balance_manager and isinstance(position, ClosePosition) and analysis_result.success:
-                    await self.balance_manager.on_position_closed(analysis_result.signer_sol_delta or "0.0")
-                    await self.balance_manager.on_token_spent(position.token_address, analysis_result.token_ui_delta or "0.0")
-            except Exception as e:
-                self._logger.error(f"Error actualizando balances locales: {e}")
+            # Emitir evento de análisis
+            if isinstance(position, OpenPosition):
+                position_type = "open"
+            elif isinstance(position, ClosePosition):
+                position_type = "close"
+            else:
+                self._logger.warning(f"Posición {position.id} no es OpenPosition ni ClosePosition, no se puede manejar")
+                return
+
+            if self.position_event_bus:
+                self.position_event_bus.emit_position_analysis(PositionAnalysisEvent(
+                    position_id=position.id,
+                    token_address=position.token_address,
+                    trader_wallet=position.trader_wallet,
+                    success=analysis_result.success,
+                    position_type=position_type,
+                    mint_address=position.token_address,
+                    signer_sol_delta=analysis_result.signer_sol_delta,
+                    token_ui_delta=analysis_result.token_ui_delta,
+                ))
 
         except Exception as e:
             self._logger.error(f"Error aplicando análisis a posición {position.id}: {e}")

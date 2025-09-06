@@ -214,21 +214,23 @@ class ValidationEngine:
     ) -> Dict[str, asyncio.Task[ValidationCheck]]:
         """Crea las tareas de validación para ejecutar concurrentemente."""
         tasks = {
-            'sol_balance': tg.create_task(self.check_sol_balance(amount_sol)),
-            'position_size': tg.create_task(self.check_position_size(amount_sol, trader_wallet)),
-            'trade_timing': tg.create_task(self.check_trade_timing(trader_wallet, token_address)),
-            'max_traders': tg.create_task(self.check_max_traders_per_token(trader_wallet, token_address)),
-            'max_amount': tg.create_task(self.check_max_amount_to_invest_per_trader(trader_wallet, amount_sol, side)),
-            'max_tokens': tg.create_task(self.check_max_open_tokens_per_trader(trader_wallet, token_address, side)),
-            'max_positions': tg.create_task(self.check_max_open_positions_per_token_per_trader(trader_wallet, token_address, side)),
-            'max_daily_volume': tg.create_task(self.check_max_daily_volume_sol_open(trader_wallet, amount_sol, side)),
-            'budget_availability': tg.create_task(self.check_budget_availability(amount_sol))
+            'trade_timing': tg.create_task(self.check_trade_timing(trader_wallet, token_address))
         }
 
         # Agregar validación de token balance solo para ventas
-        if side == "sell":
+        if side == "buy":
+            tasks['sol_balance'] = tg.create_task(self.check_sol_balance(amount_sol))
+            tasks['position_size'] = tg.create_task(self.check_position_size(amount_sol, trader_wallet))
+            tasks['max_amount'] = tg.create_task(self.check_max_amount_to_invest_per_trader(trader_wallet, amount_sol, side))
+            tasks['max_daily_volume'] = tg.create_task(self.check_max_daily_volume_sol_open(trader_wallet, amount_sol, side))
+            tasks['budget_availability'] = tg.create_task(self.check_budget_availability(amount_sol))
+            tasks['max_traders'] = tg.create_task(self.check_max_traders_per_token(trader_wallet, token_address))
+            tasks['max_tokens'] = tg.create_task(self.check_max_open_tokens_per_trader(trader_wallet, token_address, side))
+            tasks['max_positions'] = tg.create_task(self.check_max_open_positions_per_token_per_trader(trader_wallet, token_address, side))
+            tasks['amount'] = tg.create_task(self.check_amount(amount_sol))
+        elif side == "sell":
             tasks['token_balance'] = tg.create_task(self.check_token_balance(token_address, amount_tokens))
-
+            tasks['amount'] = tg.create_task(self.check_amount(amount_tokens))
         return tasks
 
     async def _monitor_validation_tasks(
@@ -369,6 +371,21 @@ class ValidationEngine:
             self.validation_stats['total_validation_time'] / 
             self.validation_stats['concurrent_validations']
         )
+
+    #checar que el monto sea mayor a 0
+    async def check_amount(self, amount: str) -> ValidationCheck:
+        """Verifica que el monto sea mayor a 0."""
+        try:
+            check = ValidationCheck(name="AmountCheck")
+            if Decimal(amount) > 0:
+                check.passthrough(f"Monto válido: {amount}")
+            else:
+                check.fail(f"Monto inválido: {amount}")
+            return check
+        except Exception as e:
+            self._logger.error(f"Error verificando monto: {e}")
+            check.fail("Error al verificar monto", {'error': str(e)})
+            return check
 
     async def check_sol_balance(self, amount_sol: str) -> ValidationCheck:
         """Verifica que el balance de SOL sea suficiente."""
@@ -1033,6 +1050,7 @@ class ValidationEngine:
             True si el fallo es crítico
         """
         critical_validations = {
+            'AmountCheck',
             'SolBalanceCheck',           # Sin SOL no se puede hacer nada
             'TokenBalanceCheck',         # Sin tokens no se puede vender
             'PositionSizeCheck'          # Tamaño de posición inválido es crítico
@@ -1050,6 +1068,7 @@ class ValidationEngine:
             True si la validación es crítica
         """
         critical_validations = {
+            'AmountCheck',
             'SolBalanceCheck',
             'TokenBalanceCheck', 
             'PositionSizeCheck'

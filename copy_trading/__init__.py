@@ -16,6 +16,21 @@ from .position_management.queues import (
 from .position_management.managers import PositionQueueManager
 from .callbacks import TradeProcessorCallback, PositionNotificationCallback
 from .notifications import NotificationManager, ConsoleStrategy, TelegramStrategy
+from .events import (
+    PositionEventBus,
+    BasePositionEvent,
+    PositionCreatedEvent,
+    PositionQueuedEvent,
+    PositionExecutionStartedEvent,
+    PositionExecutedEvent,
+    PositionExecutionFailedEvent,
+    PositionAnalysisEvent,
+    PositionAnalysisFinishedEvent,
+    PositionOpenedEvent,
+    PositionUpdatedEvent,
+    PositionCloseRequestedEvent,
+    PositionClosedEvent,
+)
 
 __version__ = "1.0.0"
 
@@ -52,6 +67,21 @@ __all__ = [
     "NotificationManager",
     "ConsoleStrategy",
     "TelegramStrategy",
+
+    # Eventos
+    "PositionEventBus",
+    "BasePositionEvent",
+    "PositionCreatedEvent",
+    "PositionQueuedEvent",
+    "PositionExecutionStartedEvent",
+    "PositionExecutedEvent",
+    "PositionExecutionFailedEvent",
+    "PositionAnalysisEvent",
+    "PositionAnalysisFinishedEvent",
+    "PositionOpenedEvent",
+    "PositionUpdatedEvent",
+    "PositionCloseRequestedEvent",
+    "PositionClosedEvent",
 ]
 
 # Mensaje de bienvenida
@@ -66,3 +96,4 @@ print("   ✅ Sistema de notificaciones mejorado")
 print("   ✅ Herramientas de diagnóstico")
 print("   ✅ Diagnóstico de I/O de archivos")
 print("   ✅ TokenTraderManager optimizado")
+print("   ✅ Sistema de eventos desacoplado para posiciones")

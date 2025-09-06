@@ -11,10 +11,11 @@ from logging_system import AppLogger
 from ...config import CopyTradingConfig
 from ...data_management import TradingDataFetcher, TokenTraderManager, SolanaTxAnalyzer, SolanaWebsocketManager
 from ...notifications import NotificationManager
+from ...balance_management import BalanceManager
+from ...events import PositionEventBus
 from ..models import PositionTraderTradeData, Position, OpenPosition, ClosePosition, PositionStatus
 from ..processors import PositionClosureProcessor, TradeAnalysisProcessor
 from ..factories import PositionFactory
-from ...balance_management import BalanceManager
 from .position_lifecycle_manager import PositionLifecycleManager
 from .queue_initialization_manager import QueueInitializationManager
 
@@ -34,6 +35,7 @@ class PositionQueueManager:
                 trading_data_fetcher: TradingDataFetcher,
                 token_trader_manager: TokenTraderManager,
                 balance_manager: BalanceManager,
+                position_event_bus: PositionEventBus,
                 notification_manager: Optional[NotificationManager] = None):
         # Logger
         self._logger = AppLogger(self.__class__.__name__)
@@ -46,6 +48,7 @@ class PositionQueueManager:
             trading_data_fetcher=trading_data_fetcher,
             token_trader_manager=token_trader_manager,
             balance_manager=balance_manager,
+            position_event_bus=position_event_bus,
             notification_manager=notification_manager
         )
 
@@ -181,7 +184,7 @@ class PositionQueueManager:
             self._logger.error(f"Error obteniendo posición: {e}")
             return None
 
-    async def process_executed_position(self, position_trade_data: PositionTraderTradeData, signature: str, entry_price: str) -> bool:
+    async def process_executed_position(self, position_trade_data: PositionTraderTradeData, signature: str) -> bool:
         """
         Procesa una posición ejecutada delegando al PositionLifecycleManager.
         """
@@ -193,13 +196,13 @@ class PositionQueueManager:
                 return False
 
             self._logger.debug(f"Procesando posición ejecutada: {signature[:8]}...")
-            success = await self.lifecycle_manager.process_executed_position(position_trade_data, signature, entry_price)
+            success = await self.lifecycle_manager.process_executed_position(position_trade_data, signature)
 
             if success:
                 self._logger.debug(f"Posición {signature[:8]}... procesada exitosamente")
             else:
                 self._logger.warning(f"No se pudo procesar posición {signature[:8]}...")
-                
+
             return success
 
         except Exception as e:
@@ -346,29 +349,71 @@ class PositionQueueManager:
         """Detiene todas las colas concurrentemente."""
         try:
             self._logger.info("Deteniendo PositionQueueManager")
-            stop_tasks = []
+
+            if self.pending_queue:
+                try:
+                    async with asyncio.timeout(60):
+                        self._logger.debug("Deteniendo pending_queue")
+                        await self.pending_queue.stop()
+                except asyncio.TimeoutError:
+                    self._logger.error("Timeout deteniendo pending_queue")
+                except asyncio.CancelledError:
+                    self._logger.error("Cancelado deteniendo pending_queue")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo pending_queue: {e}")
 
             if self.analysis_queue:
-                stop_tasks.append(self.analysis_queue.stop())
-            if self.pending_queue:
-                stop_tasks.append(self.pending_queue.stop())
-            if self.open_queue:
-                stop_tasks.append(self.open_queue.stop())
-            if self.closed_queue:
-                stop_tasks.append(self.closed_queue.stop())
-            if self.notification_queue:
-                stop_tasks.append(self.notification_queue.stop())
+                try:
+                    async with asyncio.timeout(1200): # 20 minutes
+                        self._logger.debug("Deteniendo analysis_queue")
+                        await self.analysis_queue.stop()
+                except asyncio.TimeoutError:
+                    self._logger.error("Timeout deteniendo analysis_queue")
+                except asyncio.CancelledError:
+                    self._logger.error("Cancelado deteniendo analysis_queue")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo analysis_queue: {e}")
 
-            # Ejecutar todas las tareas de detención en paralelo
-            if stop_tasks:
-                self._logger.debug(f"Deteniendo {len(stop_tasks)} colas concurrentemente")
-                await asyncio.gather(*stop_tasks, return_exceptions=True)
-                self._logger.debug("Todas las colas detenidas")
+            if self.closed_queue:
+                try:
+                    async with asyncio.timeout(300): # 5 minutes
+                        self._logger.debug("Deteniendo closed_queue")
+                        await self.closed_queue.stop()
+                except asyncio.TimeoutError:
+                    self._logger.error("Timeout deteniendo closed_queue")
+                except asyncio.CancelledError:
+                    self._logger.error("Cancelado deteniendo closed_queue")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo closed_queue: {e}")
+
+            if self.open_queue:
+                try:
+                    async with asyncio.timeout(60):
+                        self._logger.debug("Deteniendo open_queue")
+                        await self.open_queue.stop()
+                except asyncio.TimeoutError:
+                    self._logger.error("Timeout deteniendo open_queue")
+                except asyncio.CancelledError:
+                    self._logger.error("Cancelado deteniendo open_queue")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo open_queue: {e}")
+
+            if self.notification_queue:
+                try:
+                    async with asyncio.timeout(300): # 5 minutes
+                        self._logger.debug("Deteniendo notification_queue")
+                        await self.notification_queue.stop()
+                except asyncio.TimeoutError:
+                    self._logger.error("Timeout deteniendo notification_queue")
+                except asyncio.CancelledError:
+                    self._logger.error("Cancelado deteniendo notification_queue")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo notification_queue: {e}")
 
             self._logger.debug("PositionQueueManager detenido correctamente")
 
         except Exception as e:
-            self._logger.error(f"Error deteniendo PositionQueueManager: {e}")
+            self._logger.error(f"Error deteniendo PositionQueueManager: {e}", exc_info=True)
 
     async def save_state(self) -> None:
         """Guarda el estado de todas las colas concurrentemente"""
@@ -401,4 +446,4 @@ class PositionQueueManager:
             self._logger.debug("Estado de PositionQueueManager guardado")
 
         except Exception as e:
-            self._logger.error(f"Error guardando estado: {e}")
+            self._logger.error(f"Error guardando estado: {e}", exc_info=True)

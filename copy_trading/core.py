@@ -18,6 +18,7 @@ from .balance_management import BalanceManager
 from .callbacks import TradeProcessorCallback
 from .position_management import PositionQueueManager
 from .position_management.models import PositionTraderTradeData
+from .events import PositionEventBus, PositionExecutionFailedEvent
 from .data_management import (
     TokenTraderManager, 
     TradingDataFetcher, 
@@ -30,7 +31,7 @@ from .notifications import (
     TelegramStrategy,
     ConsoleStrategy
 )
-from .transactions_management import TransactionExecutor
+from .transactions_management import TransactionExecutor, CopyAmountCalculator, Liquidations
 
 
 class CopyTrading:
@@ -45,10 +46,15 @@ class CopyTrading:
         """
         self.config = config
 
-        # Inicializar componentes
+        # Inicializar logger
         self._logger = AppLogger(self.__class__.__name__)
         self._logger.info("Inicializando sistema Copy Trading")
 
+        # Inicializar PositionEventBus
+        self.position_event_bus = PositionEventBus()
+        self._logger.debug("PositionEventBus inicializado")
+
+        # Inicializar TradingDataFetcher
         self.trading_data_fetcher = TradingDataFetcher(rpc_url=config.rpc_url)
         self._logger.debug("TradingDataFetcher inicializado")
 
@@ -76,7 +82,11 @@ class CopyTrading:
         self.solana_websocket = SolanaWebsocketManager(ws_url=config.websocket_url)
 
         # Balance manager centralizado (antes de crear colas/managers para inyectarlo)
-        self.balance_manager = BalanceManager(config=config, solana_analyzer=self.solana_analyzer)
+        self.balance_manager = BalanceManager(
+            config=config,
+            solana_analyzer=self.solana_analyzer,
+            position_event_bus=self.position_event_bus
+        )
 
         self.queue_manager = PositionQueueManager(
             config=config,
@@ -85,6 +95,7 @@ class CopyTrading:
             trading_data_fetcher=self.trading_data_fetcher,
             token_trader_manager=self.token_trader_manager,
             balance_manager=self.balance_manager,
+            position_event_bus=self.position_event_bus,
             notification_manager=self.notification_manager
         )
         self._logger.debug("PositionQueueManager inicializado")
@@ -95,6 +106,12 @@ class CopyTrading:
             balance_manager=self.balance_manager
         )
         self._logger.debug("ValidationEngine inicializado")
+
+        self.amount_calculator = CopyAmountCalculator(
+            config=config,
+            position_event_bus=self.position_event_bus
+        )
+        self._logger.debug("CopyAmountCalculator inicializado")
 
         # Cliente API centralizado (se configurará en start())
         self.client: Optional[PumpFunApiClient] = None
@@ -107,6 +124,9 @@ class CopyTrading:
 
         # Transaction executor (se inicializará en start())
         self.transaction_executor: Optional[TransactionExecutor] = None
+
+        # Liquidations
+        self.liquidations: Optional[Liquidations] = None
 
         # Callback (se inicializará después de que las colas estén listas)
         self.trade_processor_callback: Optional[TradeProcessorCallback] = None
@@ -127,16 +147,11 @@ class CopyTrading:
 
         self._pending_task = None
 
-        # Flag para indicar si el QueueManager ya fue detenido
-        self._queue_manager_stopped: bool = False
-
         self._logger.debug("Sistema Copy Trading inicializado correctamente")
 
     async def __aenter__(self):
         """Context manager entry"""
         self._logger.debug("Entrando en context manager")
-        # Inicializar QueueManager con context manager
-        await self.queue_manager.start()
         await self.start()
         return self
 
@@ -149,13 +164,6 @@ class CopyTrading:
             self._logger.warning("Timeout en self.stop(), continuando...")
         except Exception as e:
             self._logger.error(f"Error en self.stop(): {e}")
-        finally:
-            # Detener QueueManager solo si no se detuvo antes en stop()
-            if not self._queue_manager_stopped:
-                try:
-                    await self.queue_manager.stop()
-                except Exception as e:
-                    self._logger.error(f"Error en queue_manager.stop() en __aexit__: {e}")
 
     def _setup_notifications(self) -> Optional[NotificationManager]:
         """Configura el sistema de notificaciones"""
@@ -200,6 +208,12 @@ class CopyTrading:
             self._logger.debug(f"Traders a seguir: {len(self.config.traders)}")
             self._logger.debug(f"Tipo de transacción: {self.config.transaction_type.value}")
 
+            # Inicializar QueueManager con context manager
+            await self.queue_manager.start()
+
+            # Inyectar open_position_queue a amount_calculator
+            self.amount_calculator.set_open_position_queue(self.queue_manager.open_queue)
+
             # Cargar datos completos de la wallet usando WalletManager
             try:
                 self._logger.debug(f"Cargando wallet desde: {self.config.wallet_file}")
@@ -243,10 +257,18 @@ class CopyTrading:
             self.transaction_executor = TransactionExecutor(
                 config=self.config,
                 transactions_manager=self.transactions_manager,
-                wallet_data=self.wallet_data,
-                trading_data_fetcher=self.trading_data_fetcher
+                wallet_data=self.wallet_data
             )
             self._logger.debug("TransactionExecutor inicializado")
+
+            # Inicializar Liquidations
+            self.liquidations = Liquidations(
+                system_wallet_address=self.wallet_data.wallet_public_key,
+                solana_analyzer=self.solana_analyzer,
+                transaction_executor=self.transaction_executor,
+                position_queue_manager=self.queue_manager
+            )
+            self._logger.debug("Liquidations inicializado")
 
             # Inicializar subscriptions con el cliente centralizado
             self.subscriptions = PumpFunSubscriptions(api_client=self.client)
@@ -268,7 +290,10 @@ class CopyTrading:
                 config=self.config,
                 pending_position_queue=self.queue_manager.pending_queue,
                 validation_engine=self.validation_engine,
-                token_trader_manager=self.token_trader_manager
+                token_trader_manager=self.token_trader_manager,
+                amount_calculator=self.amount_calculator,
+                position_event_bus=self.position_event_bus,
+                open_position_queue=self.queue_manager.open_queue
             )
             self._logger.debug("TradeProcessorCallback inicializado")
 
@@ -316,12 +341,16 @@ class CopyTrading:
         """Detiene el sistema"""
         try:
             self._logger.info("Deteniendo sistema Copy Trading")
-            self.is_running = False
-
             # Cerrar callback
             if self.trade_processor_callback:
                 await self.trade_processor_callback.shutdown()
                 self._logger.debug("TradeProcessorCallback cerrado")
+
+            if self.liquidations:
+                await self.liquidations.run()
+                self._logger.debug("Liquidaciones detenidas")
+
+            self.is_running = False
 
             # Procesar posiciones pendientes
             pending_count = await self.queue_manager.pending_queue.get_pending_count() if self.queue_manager.pending_queue else 0
@@ -329,14 +358,12 @@ class CopyTrading:
                 self._logger.info(f"Procesando {pending_count} posiciones pendientes...")
 
             # Detener QueueManager primero para que todas las tareas se cancelen
-            if not self._queue_manager_stopped:
-                try:
-                    self._logger.debug("Deteniendo QueueManager...")
-                    await self.queue_manager.stop()
-                    self._queue_manager_stopped = True
-                    self._logger.debug("QueueManager detenido")
-                except Exception as e:
-                    self._logger.error(f"Error deteniendo QueueManager: {e}")
+            try:
+                self._logger.debug("Deteniendo QueueManager...")
+                await self.queue_manager.stop()
+                self._logger.debug("QueueManager detenido")
+            except Exception as e:
+                self._logger.error(f"Error deteniendo QueueManager: {e}")
 
             # Liberar recursos
             if self.solana_analyzer:
@@ -526,21 +553,38 @@ class CopyTrading:
 
         try:
             # Ejecutar trade usando el TransactionExecutor (incluye obtención de precio de entrada)
-            success, signature, entry_price, error_message = await self.transaction_executor.execute_trade(trade_data)
+            success, signature, error_message = await self.transaction_executor.execute_trade(trade_data)
 
             if success and signature:
                 # Incrementar métricas de ejecución
                 self.metrics['trades_executed'] += 1
-                self.metrics['total_volume_sol'] += float(trade_data.copy_amount_sol)
+                if trade_data.side == "buy":
+                    self.metrics['total_volume_sol'] += float(trade_data.copy_amount_sol)
                 self._logger.debug(f"Métricas actualizadas: trades_executed={self.metrics['trades_executed']}, total_volume={self.metrics['total_volume_sol']}")
 
                 # Procesar posición ejecutada
-                await self.queue_manager.process_executed_position(trade_data, signature, entry_price or "")
+                await self.queue_manager.process_executed_position(trade_data, signature)
             else:
-                self._logger.error(f"Error ejecutando trade: {error_message}")
+                self._logger.error(f"Error ejecutando trade: {error_message or 'Error desconocido'}")
+                self.position_event_bus.emit_position_execution_failed(
+                    PositionExecutionFailedEvent(
+                        position_id=trade_data.id,
+                        token_address=trade_data.token_address,
+                        trader_wallet=trade_data.trader_wallet,
+                        error_message=error_message or "Error desconocido"
+                    )
+                )
 
         except Exception as e:
             self._logger.error(f"Error inesperado ejecutando trade: {e}", exc_info=True)
+            self.position_event_bus.emit_position_execution_failed(
+                PositionExecutionFailedEvent(
+                    position_id=trade_data.id,
+                    token_address=trade_data.token_address,
+                    trader_wallet=trade_data.trader_wallet,
+                    error_message=str(e)
+                )
+            )
 
     async def _pending_positions_loop(self):
         """
@@ -561,17 +605,6 @@ class CopyTrading:
                 self._logger.error(f"Error en el loop de ejecución de trades: {e}", exc_info=True)
                 # Esperar antes de reintentar para no sobrecargar en caso de error continuo
                 await asyncio.sleep(1)
-
-    async def _process_pending_positions(self):
-        """Procesa posiciones pendientes en la cola"""
-        try:
-            # Este método ya no es necesario ya que el procesamiento 
-            # se maneja automáticamente en el loop de _pending_positions_loop
-            self._logger.debug("_process_pending_positions llamado (método obsoleto)")
-            pass
-
-        except Exception as e:
-            self._logger.error(f"Error procesando posiciones pendientes: {str(e)}")
 
     def _log_final_stats(self, stats: Dict[str, Any]):
         """Log de estadísticas finales"""

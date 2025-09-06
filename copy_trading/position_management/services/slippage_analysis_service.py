@@ -44,10 +44,10 @@ class SlippageAnalysisService:
         Returns:
             Slippage como porcentaje en string
         """
-        if not position.entry_price or not position.execution_price:
+        if not position.execution_price:
             return "0.0"
 
-        expected = Decimal(position.entry_price)
+        expected = Decimal(position.trader_execution_price)
         actual = Decimal(position.execution_price)
 
         if expected == 0:
@@ -81,7 +81,7 @@ class SlippageAnalysisService:
         return format(slippage_percentage, "f")
 
     @classmethod
-    def _calculate_close_slippage_vs_entry(cls, position: OpenPosition, close_data: ClosePosition) -> str:
+    def _calculate_close_slippage_vs_trader_execution_price(cls, position: OpenPosition, close_data: ClosePosition) -> str:
         """
         Calcula slippage del cierre vs precio de entrada original.
         
@@ -92,9 +92,9 @@ class SlippageAnalysisService:
         Returns:
             Slippage como porcentaje en string
         """
-        if not position.entry_price:
+        if not position.trader_execution_price:
             return "0.0"
-        return cls._calculate_close_slippage(close_data, position.entry_price)
+        return cls._calculate_close_slippage(close_data, position.trader_execution_price)
 
     @classmethod
     def _calculate_close_slippage_vs_trader(cls, close_data: ClosePosition, trader_close_price: str) -> str:
@@ -146,7 +146,7 @@ class SlippageAnalysisService:
         }
 
         # Slippage de ejecución
-        if position.entry_price and position.execution_price:
+        if position.trader_execution_price and position.execution_price:
             exec_slippage_pct = cls.calculate_execution_slippage(position)
             results['execution_slippage_percentage'] = exec_slippage_pct
 
@@ -167,7 +167,7 @@ class SlippageAnalysisService:
                 close_data = cls._get_close_position_data(close_item)
                 if close_data.execution_price and close_data.amount_sol_executed:
                     # Calcular slippage vs precio de entrada
-                    close_slippage_pct = cls._calculate_close_slippage_vs_entry(position, close_data)
+                    close_slippage_pct = cls._calculate_close_slippage_vs_trader_execution_price(position, close_data)
                     if close_slippage_pct != "0.0":
                         total_slippage_pct += Decimal(close_slippage_pct)
                         close_count += 1
@@ -202,10 +202,10 @@ class SlippageAnalysisService:
             Diccionario con diferentes tipos de slippage
         """
         analysis = {
-            'vs_entry_price': cls._calculate_close_slippage_vs_entry(position, close_data),
+            'vs_trader_execution_price': cls._calculate_close_slippage_vs_trader_execution_price(position, close_data),
             'vs_trader_price': '0.0',
             'vs_market_price': '0.0',
-            'entry_price': position.entry_price or '0.0',
+            'trader_execution_price': position.trader_execution_price or '0.0',
             'execution_price': close_data.execution_price or '0.0',
             'trader_price': trader_price or '0.0',
             'market_price': market_price or '0.0'
@@ -253,7 +253,7 @@ class SlippageAnalysisService:
                 'close_type': close_data.status.value,
                 'close_amount_sol': close_data.amount_sol_executed,
                 'close_amount_tokens': close_data.amount_tokens_executed,
-                'close_entry_price': close_data.entry_price,
+                'close_trader_execution_price': close_data.trader_execution_price,
                 'close_execution_price': close_data.execution_price,
                 'slippage_analysis': slippage_analysis
             }

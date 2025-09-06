@@ -6,10 +6,13 @@ Separa la lógica de cálculos financieros de otros análisis.
 from typing import Dict, Any, Tuple, List
 from decimal import Decimal, getcontext
 
+from logging_system import AppLogger
 from ..models import OpenPosition, ClosePosition, PositionStatus, SubClosePosition
 
 # Configurar precisión de Decimal para operaciones financieras
 getcontext().prec = 26
+
+_logger = AppLogger("PnLCalculationService")
 
 
 class PnLCalculationService:
@@ -34,6 +37,16 @@ class PnLCalculationService:
         return close_item
 
     @classmethod
+    def _normalize_cost(cls, cost: Decimal, context: str) -> Decimal:
+        """Normaliza costos para que siempre sean positivos.
+        Si se detecta un costo negativo (por datos mal signados), se vuelve positivo y se loggea.
+        """
+        if cost < 0:
+            _logger.warning(f"Se detectó costo negativo {cost} en {context}. Normalizando a valor absoluto.")
+            return -cost
+        return cost
+
+    @classmethod
     def _calculate_pnl_from_amounts(cls, amount: Decimal, cost_basis: Decimal, sol_price_usd: Decimal) -> Tuple[Decimal, Decimal]:
         """
         Calcula P&L a partir de un monto y costo base.
@@ -48,6 +61,9 @@ class PnLCalculationService:
         """
         pnl_sol = amount - cost_basis
         pnl_usd = pnl_sol * sol_price_usd
+
+        _logger.debug(f"Cálculo P&L básico: amount={amount}, cost_basis={cost_basis}, pnl_sol={pnl_sol}, pnl_usd={pnl_usd}")
+
         return pnl_sol, pnl_usd
 
     @classmethod
@@ -72,6 +88,9 @@ class PnLCalculationService:
 
             current_value = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
             cost_basis = Decimal(position.total_cost_sol) if position.total_cost_sol and include_transaction_costs else Decimal('0')
+            if include_transaction_costs and cost_basis < 0:
+                _logger.warning(f"Costo negativo detectado en posición abierta {position.id}: {cost_basis}. Normalizando.")
+                cost_basis = -cost_basis
             pnl_sol, pnl_usd = cls._calculate_pnl_from_amounts(current_value, cost_basis, Decimal(sol_price_usd))
 
             return format(pnl_sol, "f"), format(pnl_usd, "f")
@@ -96,30 +115,54 @@ class PnLCalculationService:
         Returns:
             Tuple de (pnl_sol, pnl_usd) como strings
         """
+        _logger.debug(f"Calculando P&L realizado para posición {position.id}, incluir_costos={include_transaction_costs}")
+
         if not position.close_history:
+            _logger.debug(f"Posición {position.id} no tiene historial de cierres, retornando 0.0")
             return "0.0", "0.0"
 
         # Valor de entrada (cuánto valían los tokens cuando se compraron)
         entry_value = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
+        _logger.debug(f"Valor de entrada: {entry_value} SOL")
 
         # Valor total de salida (cuánto se recibió por los tokens)
         total_exit_value = Decimal('0')
         total_exit_costs = Decimal(position.total_cost_sol) if position.total_cost_sol else Decimal('0')
+        if total_exit_costs < 0:
+            _logger.warning(f"Costo inicial de entrada negativo en posición {position.id}: {total_exit_costs}. Normalizando.")
+            total_exit_costs = -total_exit_costs
+        _logger.debug(f"Costos iniciales de entrada: {total_exit_costs} SOL")
 
-        for close_item in position.close_history:
+        _logger.debug(f"Procesando {len(position.close_history)} cierres en el historial")
+
+        for i, close_item in enumerate(position.close_history):
             # Calcular valor de salida para este cierre
-            total_exit_value += Decimal(close_item.amount_sol_executed) if close_item.amount_sol_executed else Decimal('0')
-            total_exit_costs += Decimal(close_item.total_cost_sol) if close_item.total_cost_sol else Decimal('0')
+            close_amount = Decimal(close_item.amount_sol_executed) if close_item.amount_sol_executed else Decimal('0')
+            close_cost = Decimal(close_item.total_cost_sol) if close_item.total_cost_sol else Decimal('0')
+            if close_cost < 0:
+                _logger.warning(f"Costo de cierre negativo en posición {position.id} (cierre {i+1}): {close_cost}. Normalizando.")
+                close_cost = -close_cost
+
+            total_exit_value += close_amount
+            total_exit_costs += close_cost
+
+            _logger.debug(f"Cierre {i+1}: amount={close_amount}, cost={close_cost}, total_exit={total_exit_value}, total_costs={total_exit_costs}")
 
         # Calcular P&L base (sin costos)
-        pnl_sol = total_exit_value - entry_value
+        pnl_sol_base = total_exit_value - entry_value
+        _logger.debug(f"P&L base (sin costos): {pnl_sol_base} SOL")
 
         # Si se incluyen costos de transacción, restar fees
         if include_transaction_costs:
-            pnl_sol -= total_exit_costs
+            pnl_sol = pnl_sol_base - total_exit_costs
+            _logger.debug(f"P&L con costos: {pnl_sol} SOL (restados {total_exit_costs} SOL de costos)")
+        else:
+            pnl_sol = pnl_sol_base
+            _logger.debug(f"P&L sin costos: {pnl_sol} SOL")
 
         # Convertir a USD
         pnl_usd = pnl_sol * Decimal(sol_price_usd)
+        _logger.debug(f"P&L final: {pnl_sol} SOL = {pnl_usd} USD (precio SOL: {sol_price_usd})")
 
         return format(pnl_sol, "f"), format(pnl_usd, "f")
 
@@ -135,11 +178,17 @@ class PnLCalculationService:
         Returns:
             Tuple de (pnl_sol_without_costs, pnl_usd_without_costs, pnl_sol_with_costs, pnl_usd_with_costs) como strings
         """
+        _logger.info(f"Iniciando cálculo de P&L con desglose de costos para posición {position.id}")
+
         # Calcular P&L sin costos de transacción
+        _logger.debug("Calculando P&L sin costos de transacción")
         pnl_sol_without_costs, pnl_usd_without_costs = cls.calculate_realized_pnl(position, sol_price_usd, include_transaction_costs=False)
 
         # Calcular P&L con costos de transacción
+        _logger.debug("Calculando P&L con costos de transacción")
         pnl_sol_with_costs, pnl_usd_with_costs = cls.calculate_realized_pnl(position, sol_price_usd, include_transaction_costs=True)
+
+        _logger.info(f"P&L calculado para posición {position.id}: sin_costos={pnl_sol_without_costs} SOL, con_costos={pnl_sol_with_costs} SOL")
 
         return pnl_sol_without_costs, pnl_usd_without_costs, pnl_sol_with_costs, pnl_usd_with_costs
 
@@ -157,34 +206,54 @@ class PnLCalculationService:
         Returns:
             Tuple de (pnl_sol, pnl_usd) como strings
         """
+        close_id = getattr(close_item, 'id', 'unknown')
+        if isinstance(close_item, SubClosePosition):
+            close_id = getattr(close_item.close_position, 'id', 'unknown')
+
+        _logger.debug(f"Calculando P&L individual para cierre {close_id} de posición {position.id}, incluir_costos={include_transaction_costs}")
         # Obtener los datos reales del cierre
         if isinstance(close_item, SubClosePosition):
             # Para SubClosePosition, usar los datos del subcierre
             close_amount_sol = Decimal(close_item.amount_sol_executed) if close_item.amount_sol_executed else Decimal('0')
             close_amount_tokens = Decimal(close_item.amount_tokens_executed) if close_item.amount_tokens_executed else Decimal('0')
+            _logger.debug(f"SubClosePosition: amount_sol={close_amount_sol}, amount_tokens={close_amount_tokens}")
         else:
             # Para ClosePosition, usar los datos del cierre
             close_amount_sol = Decimal(close_item.amount_sol_executed) if close_item.amount_sol_executed else Decimal('0')
             close_amount_tokens = Decimal(close_item.amount_tokens_executed) if close_item.amount_tokens_executed else Decimal('0')
+            _logger.debug(f"ClosePosition: amount_sol={close_amount_sol}, amount_tokens={close_amount_tokens}")
 
         if close_amount_sol == 0:
+            _logger.debug(f"Cierre {close_id} tiene amount_sol=0, retornando P&L=0")
             return "0.0", "0.0"
 
         # Calcular el costo proporcional basado en los tokens cerrados
         total_original_tokens = Decimal(position.amount_tokens_executed) if position.amount_tokens_executed else Decimal('0')
         if total_original_tokens == 0:
+            _logger.debug(f"Posición {position.id} tiene total_original_tokens=0, retornando P&L=0")
             return "0.0", "0.0"
 
         # Calcular la proporción de tokens cerrados
         open_position_total_cost = Decimal(position.total_cost_sol) if position.total_cost_sol else Decimal('0')
         close_position_total_cost = Decimal(close_item.total_cost_sol) if close_item.total_cost_sol else Decimal('0')
+        if open_position_total_cost < 0:
+            _logger.warning(f"Costo de apertura negativo en posición {position.id}: {open_position_total_cost}. Normalizando.")
+            open_position_total_cost = -open_position_total_cost
+        if close_position_total_cost < 0:
+            _logger.warning(f"Costo de cierre negativo en posición {position.id} (cierre {close_id}): {close_position_total_cost}. Normalizando.")
+            close_position_total_cost = -close_position_total_cost
         total_cost = open_position_total_cost + close_position_total_cost
 
         proportion = close_amount_tokens / total_original_tokens
         proportional_cost = total_cost * proportion if include_transaction_costs else Decimal('0')
 
+        _logger.debug(f"Proporción de tokens: {proportion} ({close_amount_tokens}/{total_original_tokens})")
+        _logger.debug(f"Costos: open={open_position_total_cost}, close={close_position_total_cost}, total={total_cost}, proporcional={proportional_cost}")
+
         # Calcular P&L del cierre individual
         pnl_sol, pnl_usd = cls._calculate_pnl_from_amounts(close_amount_sol, proportional_cost, Decimal(sol_price_usd))
+
+        _logger.debug(f"P&L individual calculado para cierre {close_id}: {pnl_sol} SOL = {pnl_usd} USD")
 
         return format(pnl_sol, "f"), format(pnl_usd, "f")
 
@@ -202,7 +271,10 @@ class PnLCalculationService:
         Returns:
             Tuple de (pnl_sol, pnl_usd) como strings
         """
+        _logger.debug(f"Calculando P&L acumulado para posición {position.id} hasta índice {up_to_close_index}, incluir_costos={include_transaction_costs}")
+
         if not position.close_history:
+            _logger.debug(f"Posición {position.id} no tiene historial de cierres, retornando 0.0")
             return "0.0", "0.0"
 
         # Normalizar el índice
@@ -212,15 +284,25 @@ class PnLCalculationService:
         if up_to_close_index >= len(position.close_history):
             up_to_close_index = len(position.close_history) - 1
 
+        _logger.debug(f"Índice normalizado: {up_to_close_index} (total cierres: {len(position.close_history)})")
+
         # Calcular P&L acumulado hasta ese cierre
         total_pnl_sol = Decimal('0')
 
         for i in range(up_to_close_index + 1):
             close_item = position.close_history[i]
+            close_id = getattr(close_item, 'id', f'close_{i}')
+            if isinstance(close_item, SubClosePosition):
+                close_id = getattr(close_item.close_position, 'id', f'subclose_{i}')
+
             individual_pnl_sol, _ = cls.calculate_individual_close_pnl(position, close_item, sol_price_usd, include_transaction_costs)
             total_pnl_sol += Decimal(individual_pnl_sol)
 
+            _logger.debug(f"Acumulando cierre {i+1}/{up_to_close_index+1} ({close_id}): individual={individual_pnl_sol}, total={total_pnl_sol}")
+
         total_pnl_usd = total_pnl_sol * Decimal(sol_price_usd)
+
+        _logger.debug(f"P&L acumulado final para posición {position.id}: {total_pnl_sol} SOL = {total_pnl_usd} USD")
 
         return format(total_pnl_sol, "f"), format(total_pnl_usd, "f")
 
