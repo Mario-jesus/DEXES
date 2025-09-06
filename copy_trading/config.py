@@ -192,6 +192,7 @@ class CopyTradingConfig:
     adjust_position_size: bool = True                              # Si se ajusta el tamaño de la posicion automaticamente si esta activado en base a max_position_size y min_position_size
     max_daily_volume_sol_open: Optional[str] = None                # Maximo de SOL que puede tener un trader en un dia en posiciones abiertas
     min_open_trade_interval_seconds_per_trader: Optional[int] = None    # Minimo de segundos que debe esperar un trader para hacer un trade de apertura de posicion
+    min_global_available_balance_threshold_percent: Optional[str] = "1.0"    # Porcentaje (0-100) del presupuesto global por debajo del cual se bloquean BUY
 
     # Configuración de Transacciones
     transaction_type: TransactionType = TransactionType.LIGHTNING_TRADE
@@ -270,6 +271,22 @@ class CopyTradingConfig:
                     raise ValueError(error_msg)
 
         _logger.debug(f"Configuración inicializada con {len(self.traders)} traders")
+
+        # Validar rango del porcentaje de umbral mínimo global (0 a 100)
+        if self.min_global_available_balance_threshold_percent is None:
+            return
+        try:
+            pct = Decimal(self.min_global_available_balance_threshold_percent)
+            if pct < 0 or pct > 100:
+                error_msg = (
+                    f"min_global_available_balance_threshold_percent ({self.min_global_available_balance_threshold_percent}) "
+                    f"debe estar entre 0 y 100"
+                )
+                _logger.error(error_msg)
+                raise ValueError(error_msg)
+        except Exception as e:
+            _logger.error(f"Valor inválido para min_global_available_balance_threshold_percent: {e}")
+            raise
 
     def is_lightning_trade(self) -> bool:
         """Verifica si está configurado para usar Lightning Trade"""
@@ -367,6 +384,7 @@ class CopyTradingConfig:
             'adjust_position_size': self.adjust_position_size,
             'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
             'min_open_trade_interval_seconds_per_trader': self.min_open_trade_interval_seconds_per_trader,
+            'min_global_available_balance_threshold_percent': self.min_global_available_balance_threshold_percent,
             'transaction_type': self.transaction_type.value,
             'pool_type': self.pool_type,
             'skip_preflight': self.skip_preflight,
@@ -450,6 +468,7 @@ class CopyTradingConfig:
             adjust_position_size=data.get('adjust_position_size', True),
             max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
             min_open_trade_interval_seconds_per_trader=data.get('min_open_trade_interval_seconds_per_trader'),
+            min_global_available_balance_threshold_percent=data.get('min_global_available_balance_threshold_percent'),
 
             # Configuración de Transacciones
             transaction_type=TransactionType(data.get('transaction_type', TransactionType.LIGHTNING_TRADE.value)),

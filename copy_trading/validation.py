@@ -224,6 +224,7 @@ class ValidationEngine:
             tasks['max_amount'] = tg.create_task(self.check_max_amount_to_invest_per_trader(trader_wallet, amount_sol, side))
             tasks['max_daily_volume'] = tg.create_task(self.check_max_daily_volume_sol_open(trader_wallet, amount_sol, side))
             tasks['budget_availability'] = tg.create_task(self.check_budget_availability(amount_sol))
+            tasks['min_global_threshold'] = tg.create_task(self.check_min_available_global_budget_threshold())
             tasks['max_traders'] = tg.create_task(self.check_max_traders_per_token(trader_wallet, token_address))
             tasks['max_tokens'] = tg.create_task(self.check_max_open_tokens_per_trader(trader_wallet, token_address, side))
             tasks['max_positions'] = tg.create_task(self.check_max_open_positions_per_token_per_trader(trader_wallet, token_address, side))
@@ -293,6 +294,64 @@ class ValidationEngine:
         except Exception as e:
             self._logger.error(f"Error verificando presupuesto efectivo: {e}")
             check.fail("Error verificando presupuesto efectivo", {'error': str(e)})
+
+        return check
+
+    async def check_min_available_global_budget_threshold(self) -> ValidationCheck:
+        """Bloquea BUY si el balance SOL está en o por debajo del % configurado del presupuesto global."""
+        check = ValidationCheck(name="MinAvailableGlobalBudgetThresholdCheck")
+
+        # Verificar si la validación está configurada
+        if self._should_skip_validation_global('min_global_available_balance_threshold_percent'):
+            check.passthrough("Validación de umbral mínimo global no configurada")
+            return check
+
+        # Requiere BalanceManager
+        if not self.balance_manager:
+            check.passthrough("BalanceManager no disponible; sin verificación de umbral mínimo")
+            return check
+
+        try:
+            global_budget_str = getattr(self.config, 'general_available_balance_to_invest', "0.0") or "0.0"
+            global_budget = Decimal(global_budget_str)
+
+            pct = Decimal(getattr(self.config, 'min_global_available_balance_threshold_percent', "1.0"))
+
+            # Si no hay presupuesto global (>0), no aplica el umbral
+            if global_budget <= 0:
+                check.passthrough(f"Umbral {format(pct, 'f')}% no aplicable: general_available_balance_to_invest <= 0")
+                return check
+
+            # Leer balance
+            balance_sol_str = await self.balance_manager.get_sol_balance()
+            balance_sol = Decimal(balance_sol_str)
+            # clamp defensivo por si la config fue alterada en runtime
+            if pct < 0:
+                pct = Decimal("0")
+            if pct > 100:
+                pct = Decimal("100")
+            threshold = (global_budget * pct) / Decimal("100")
+
+            if balance_sol <= threshold:
+                details = {
+                    'onchain_available': format(balance_sol, "f"),
+                    'threshold_pct_of_config': format(threshold, "f"),
+                    'threshold_percent': format(pct, "f"),
+                    'global_config': format(global_budget, "f")
+                }
+                check.fail("Balance en o por debajo del 1% del presupuesto global; no se permite abrir posiciones BUY", details)
+            else:
+                details = {
+                    'onchain_available': format(balance_sol, "f"),
+                    'threshold_pct_of_config': format(threshold, "f"),
+                    'threshold_percent': format(pct, "f"),
+                    'global_config': format(global_budget, "f")
+                }
+                check.passthrough("Balance por encima del umbral mínimo (1% del presupuesto global)", details)
+
+        except Exception as e:
+            self._logger.error(f"Error verificando umbral mínimo de presupuesto global: {e}")
+            check.fail("Error verificando umbral mínimo de presupuesto global", {'error': str(e)})
 
         return check
 
@@ -1039,6 +1098,20 @@ class ValidationEngine:
         # Si ambos son None, saltear la validación
         return trader_value is None and global_value is None
 
+    def _should_skip_validation_global(self, attr_name: str) -> bool:
+        """
+        Determina si una validación global debe saltarse porque no está configurada.
+        
+        Args:
+            attr_name: Nombre del atributo de configuración global
+            
+        Returns:
+            True si la validación debe saltarse (pasar como válida)
+        """
+        # Solo verificar configuración global
+        global_value = getattr(self.config, attr_name, None)
+        return global_value is None
+
     def _is_critical_failure(self, validation_name: str) -> bool:
         """
         Determina si un fallo en una validación es crítico y debería cancelar otras validaciones.
@@ -1053,7 +1126,8 @@ class ValidationEngine:
             'AmountCheck',
             'SolBalanceCheck',           # Sin SOL no se puede hacer nada
             'TokenBalanceCheck',         # Sin tokens no se puede vender
-            'PositionSizeCheck'          # Tamaño de posición inválido es crítico
+            'PositionSizeCheck',         # Tamaño de posición inválido es crítico
+            'MinAvailableGlobalBudgetThresholdCheck'  # Umbral mínimo global para BUY
         }
         return validation_name in critical_validations
 
@@ -1071,7 +1145,8 @@ class ValidationEngine:
             'AmountCheck',
             'SolBalanceCheck',
             'TokenBalanceCheck', 
-            'PositionSizeCheck'
+            'PositionSizeCheck',
+            'MinAvailableGlobalBudgetThresholdCheck'
         }
         return validation_name in critical_validations
 
