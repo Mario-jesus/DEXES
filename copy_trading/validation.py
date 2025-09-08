@@ -339,7 +339,7 @@ class ValidationEngine:
                     'threshold_percent': format(pct, "f"),
                     'global_config': format(global_budget, "f")
                 }
-                check.fail("Balance en o por debajo del 1% del presupuesto global; no se permite abrir posiciones BUY", details)
+                check.fail(f"Balance en o por debajo del {format(pct, 'f')}% del presupuesto global; no se permite abrir posiciones BUY", details)
             else:
                 details = {
                     'onchain_available': format(balance_sol, "f"),
@@ -347,7 +347,7 @@ class ValidationEngine:
                     'threshold_percent': format(pct, "f"),
                     'global_config': format(global_budget, "f")
                 }
-                check.passthrough("Balance por encima del umbral mínimo (1% del presupuesto global)", details)
+                check.passthrough(f"Balance por encima del umbral mínimo ({format(pct, 'f')}% del presupuesto global)", details)
 
         except Exception as e:
             self._logger.error(f"Error verificando umbral mínimo de presupuesto global: {e}")
