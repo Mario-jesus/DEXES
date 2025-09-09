@@ -18,7 +18,7 @@ from datetime import datetime
 import aiofiles
 from solders.keypair import Keypair
 
-from .api_client import PumpFunApiClient, ApiClientException
+from .api_client import PumpFunHttpApiClient, ApiClientException
 
 
 # ============================================================================
@@ -274,29 +274,29 @@ class PumpFunWalletCreator:
     Clase responsable de crear wallets Lightning via API de PumpFun
     """
 
-    def __init__(self, api_client: Optional[PumpFunApiClient] = None):
+    def __init__(self, api_client: Optional[PumpFunHttpApiClient] = None):
         """
         Inicializa el creador de wallets.
         
         Args:
             api_client: Una instancia existente de PumpFunApiClient
         """
-        self.client = api_client or PumpFunApiClient(enable_websocket=False)
+        self.client = api_client or PumpFunHttpApiClient()
 
     async def __aenter__(self):
         """Context manager entry"""
         print("🔌 Iniciando sesión de creación de wallets...")
-        if not self.client.enable_http:
+        if not self.client.is_running:
             raise Exception("HTTP no está habilitado en el cliente")
 
-        await self.client._connect_http()
+        await self.client.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit"""
         print("🔌 Cerrando sesión de creación de wallets...")
-        if self.client._http_session:
-            await self.client._disconnect_http()
+        if self.client.is_running:
+            await self.client.disconnect()
         print("✅ Sesión de creación de wallets cerrada correctamente")
 
     async def create_wallet(self, description: str = "") -> WalletData:
@@ -1024,12 +1024,12 @@ class PumpFunWalletManager:
     Mantiene la interfaz original para no romper código existente
     """
 
-    def __init__(self, api_client: Optional[PumpFunApiClient] = None, storage_path: Optional[str] = None):
+    def __init__(self, api_client: Optional[PumpFunHttpApiClient] = None, storage_path: Optional[str] = None):
         """
         Inicializa el gestor de wallets.
         
         Args:
-            api_client: Una instancia existente de PumpFunApiClient
+            api_client: Una instancia existente de PumpFunHttpApiClient
             storage_path: Ruta para almacenar datos de wallets (opcional)
         """
         self.creator = PumpFunWalletCreator(api_client)
@@ -1043,15 +1043,15 @@ class PumpFunWalletManager:
         """Context manager entry"""
         print("🔌 Iniciando sesión de gestión de wallets...")
         await self.storage.initialize()
-        if self.creator.client.enable_http:
-            await self.creator.client._connect_http()
+        if self.creator.client.is_running:
+            await self.creator.client.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit"""
         print("🔌 Cerrando sesión de gestión de wallets...")
-        if self.creator.client._http_session:
-            await self.creator.client._disconnect_http()
+        if self.creator.client.is_running:
+            await self.creator.client.disconnect()
         print("✅ Sesión de gestión de wallets cerrada correctamente")
 
     # Métodos de creación (delegados a creator)

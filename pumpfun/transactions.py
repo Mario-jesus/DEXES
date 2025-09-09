@@ -7,11 +7,16 @@ las APIs de trading de PumpPortal, soportando tanto transacciones "Lightning"
 (ejecutadas por el servidor) como "Local" (firmadas por el cliente).
 """
 
-from typing import Optional, Literal, Union, Dict, Any
+from typing import Optional, Literal, Dict, Any, Type, TYPE_CHECKING
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-from .api_client import PumpFunApiClient, ApiClientException
+from logging_system import AppLogger
+from .api_client import PumpFunHttpApiClient, ApiClientException
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
 
 # Tipos para validación estática
 TradeAction = Literal["buy", "sell"]
@@ -24,16 +29,17 @@ class PumpFunTransactions:
     Soporta context manager async para gestión automática de conexiones.
     """
 
-    def __init__(self, api_client: Optional[PumpFunApiClient] = None, api_key: Optional[str] = None):
+    def __init__(self, api_client: Optional[PumpFunHttpApiClient] = None, api_key: Optional[str] = None):
         """
         Inicializa el gestor de transacciones.
 
         Args:
-            api_client: Una instancia existente de PumpFunApiClient. Si es None, se crea una nueva.
+            api_client: Una instancia existente de PumpFunHttpApiClient. Si es None, se crea una nueva.
             api_key: La clave API para las transacciones Lightning.
         """
-        self.client = api_client or PumpFunApiClient(api_key=api_key, enable_websocket=False)
-        self._api_key = api_key or (self.client.api_key if self.client else None)
+        self.client = api_client or PumpFunHttpApiClient(api_key=api_key)
+        self._api_key = api_key
+        self._logger = AppLogger(self.__class__.__name__)
 
     async def __aenter__(self):
         """
@@ -43,7 +49,7 @@ class PumpFunTransactions:
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional["TracebackType"]):
         """
         Método de salida para el context manager asíncrono.
         Desconecta el cliente API automáticamente.
@@ -51,13 +57,13 @@ class PumpFunTransactions:
         await self.stop()
 
     async def start(self):
-        print("🔌 Iniciando sesión de transacciones PumpFun...")
+        self._logger.debug("Iniciando sesión de transacciones PumpFun...")
         await self.client.connect()
 
     async def stop(self):
-        print("🔌 Cerrando sesión de transacciones PumpFun...")
+        self._logger.debug("Cerrando sesión de transacciones PumpFun...")
         await self.client.disconnect()
-        print("✅ Sesión de transacciones cerrada correctamente")
+        self._logger.debug("Sesión de transacciones cerrada correctamente")
 
     async def execute_lightning_trade(
         self,
@@ -103,9 +109,9 @@ class PumpFunTransactions:
             "jitoOnly": "true" if jito_only else "false",
         }
 
-        print(f"🚀 Ejecutando trade Lightning: {action} {amount} de {mint}")
+        self._logger.debug(f"Ejecutando trade Lightning: {action} {amount} de {mint}")
         response = await self.client.http_post(endpoint="trade", data=payload, use_api_key=True)
-        print(f"✅ Respuesta Lightning: {response}")
+        self._logger.debug(f"Respuesta Lightning: {response}")
         return response or {}
 
     async def create_and_send_local_trade(
@@ -149,21 +155,21 @@ class PumpFunTransactions:
         }
 
         # 1. Obtener la transacción serializada de la API
-        print(f"🛠️ Creando transacción local: {action} {amount} de {mint}")
+        self._logger.debug(f"Creando transacción local: {action} {amount} de {mint}")
         tx_bytes = await self.client.http_post_raw(endpoint="trade-local", data=payload)
         if not tx_bytes:
             raise ApiClientException("No se recibieron datos de la transacción de la API.")
 
-        print("📄 Transacción recibida, firmando localmente...")
+        self._logger.debug("Transacción recibida, firmando localmente...")
 
         # 2. Firmar la transacción localmente
         unsigned_tx = VersionedTransaction.from_bytes(tx_bytes)
         signed_tx = VersionedTransaction(unsigned_tx.message, [keypair])
 
-        print(f"🖋️ Transacción firmada, enviando a {rpc_endpoint}...")
+        self._logger.debug(f"Transacción firmada, enviando a {rpc_endpoint}...")
 
         # 3. Enviar la transacción a la red de Solana
         tx_signature = await self.client.send_signed_transaction(signed_tx, rpc_endpoint)
-        print(f"✅ Transacción enviada. Firma: {tx_signature}")
+        self._logger.debug(f"Transacción enviada. Firma: {tx_signature}")
 
         return tx_signature

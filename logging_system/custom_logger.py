@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Type
+from types import TracebackType
 from .logger_config import (
     get_logger, 
     add_logfire_to_logger, 
@@ -95,27 +96,27 @@ class AppLogger:
             self._stats['last_error'] = message
             self._stats['last_error_time'] = self._stats['last_log_time']
 
-    def debug(self, message: str, **extra):
+    def debug(self, message: str, **extra: Any):
         self._record('DEBUG', message)
         self._logger.debug(message, extra=extra)
 
-    def info(self, message: str, **extra):
+    def info(self, message: str, **extra: Any):
         self._record('INFO', message)
         self._logger.info(message, extra=extra)
 
-    def warning(self, message: str, **extra):
+    def warning(self, message: str, **extra: Any):
         self._record('WARNING', message)
         self._logger.warning(message, extra=extra)
 
-    def error(self, message: str, exc_info: bool = False, **extra):
+    def error(self, message: str, exc_info: bool = False, **extra: Any):
         self._record('ERROR', message)
         self._logger.error(message, exc_info=exc_info, extra=extra)
 
-    def critical(self, message: str, exc_info: bool = False, **extra):
+    def critical(self, message: str, exc_info: bool = False, **extra: Any):
         self._record('CRITICAL', message)
         self._logger.critical(message, exc_info=exc_info, extra=extra)
 
-    def span(self, message: str, **attributes):
+    def span(self, message: str, **attributes: Any):
         """
         Crear un span usando Logfire (solo disponible si Logfire está habilitado).
         Si Logfire no está disponible, crea un log normal.
@@ -179,7 +180,7 @@ class AppLogger:
         """Retorna True si Logfire está habilitado."""
         return bool(self._enable_logfire and self._logfire_instance is not None)
 
-    def stats(self):
+    def stats(self) -> Dict[str, Any]:
         """Devuelve estadísticas y configuración relevante del logger."""
         handlers_info = []
         for handler in self._logger.handlers:
@@ -208,7 +209,7 @@ class AppLogger:
             'logfire_connected': self._stats['logfire_connected'],
         }
 
-    def reset_stats(self):
+    def reset_stats(self) -> None:
         """Resetea las estadísticas del logger."""
         self._stats = {
             'logger_name': self._stats['logger_name'],
@@ -234,5 +235,5 @@ class DummySpan:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType]) -> None:
         pass
