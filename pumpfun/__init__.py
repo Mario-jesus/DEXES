@@ -3,13 +3,12 @@
 Módulo PumpFun - Herramientas para interactuar con Pump.fun
 Incluye análisis de tokens, monitoreo de precios y trading
 """
-
 from .pump_price_fetcher import PumpFunPriceFetcher, PumpTokenPrice, PumpCurveState
 from .transactions import PumpFunTransactions
 from .token_creator import PumpFunTokenCreator, TokenMetadata
 from .wallet_manager import PumpFunWalletManager, WalletData, PumpFunWalletCreator, PumpFunWalletStorage
 from .subscriptions import PumpFunSubscriptions
-from .api_client import PumpFunApiClient, ApiType, RequestMethod
+from .api_client import PumpFunHttpApiClient, PumpFunWebSocketApiClient, RequestMethod, WebSocketMethod
 from .pumpfun_trade_analyzer import (
     PumpFunTradeAnalyzer,
     TokenBalanceInfo,
@@ -31,9 +30,10 @@ __all__ = [
     'PumpFunWalletCreator',
     'PumpFunWalletStorage',
     'PumpFunSubscriptions',
-    'PumpFunApiClient',
-    'ApiType',
+    'PumpFunHttpApiClient',
+    'PumpFunWebSocketApiClient',
     'RequestMethod',
+    'WebSocketMethod',
     'PumpFunTradeAnalyzer',
     'TokenBalanceInfo',
     'InstructionAnalysis',

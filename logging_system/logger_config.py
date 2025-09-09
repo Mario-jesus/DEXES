@@ -254,7 +254,7 @@ def get_logfire_global_min_level() -> str:
     return _LOGFIRE_GLOBAL_MIN_LEVEL
 
 
-def get_logfire_instance(tags: Optional[Dict[str, str]] = None):
+def get_logfire_instance(tags: Optional[Dict[str, str]] = None) -> Optional[logfire.Logfire]:
     """
     Retorna una instancia de Logfire con tags opcionales.
     
@@ -266,5 +266,4 @@ def get_logfire_instance(tags: Optional[Dict[str, str]] = None):
     """
     if tags:
         return logfire.with_tags(*tags.values())
-    else:
-        return logfire
+

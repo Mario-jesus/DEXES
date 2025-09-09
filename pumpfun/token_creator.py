@@ -8,16 +8,17 @@ Este módulo proporciona funcionalidades para:
 - Gestionar metadatos y uploads a IPFS
 - Soporte para transacciones Lightning, Local y Jito Bundle
 """
-
-import asyncio
-import json
-import base64
-from typing import Optional, Literal, Union, Dict, Any, List, BinaryIO
+from typing import Optional, Literal, Union, Dict, Any, Type, TYPE_CHECKING
 from pathlib import Path
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-from .api_client import PumpFunApiClient, ApiClientException
+from logging_system import AppLogger
+from .api_client import PumpFunHttpApiClient, ApiClientException
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
 
 # Tipos para validación estática
 PoolType = Literal["pump", "bonk", "moonshot"]
@@ -26,7 +27,7 @@ TransactionType = Literal["lightning", "local", "bundle"]
 
 class TokenMetadata:
     """Clase para gestionar metadatos de tokens"""
-    
+
     def __init__(
         self,
         name: str,
@@ -72,7 +73,7 @@ class PumpFunTokenCreator:
     Soporta múltiples plataformas y métodos de transacción
     """
 
-    def __init__(self, api_client: Optional[PumpFunApiClient] = None, api_key: Optional[str] = None):
+    def __init__(self, api_client: Optional[PumpFunHttpApiClient] = None, api_key: Optional[str] = None):
         """
         Inicializa el creador de tokens.
 
@@ -80,24 +81,22 @@ class PumpFunTokenCreator:
             api_client: Una instancia existente de PumpFunApiClient
             api_key: La clave API para transacciones Lightning
         """
-        self.client = api_client or PumpFunApiClient(api_key=api_key, enable_websocket=False)
-        self._api_key = api_key or (self.client.api_key if self.client else None)
+        self.client = api_client or PumpFunHttpApiClient(api_key=api_key)
+        self._api_key = api_key
+        self._logger = AppLogger(self.__class__.__name__)
 
     async def __aenter__(self):
         """Context manager entry"""
-        print("🔌 Iniciando sesión de creación de tokens...")
-        # Solo conectar HTTP ya que no necesitamos WebSocket para creación de tokens
-        if self.client.enable_http:
-            await self.client._connect_http()
+        self._logger.debug("Iniciando sesión de creación de tokens...")
+        await self.client.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional["TracebackType"]):
         """Context manager exit"""
-        print("🔌 Cerrando sesión de creación de tokens...")
+        self._logger.debug("Cerrando sesión de creación de tokens...")
         # Solo desconectar HTTP
-        if self.client._http_session:
-            await self.client._disconnect_http()
-        print("✅ Sesión de creación de tokens cerrada correctamente")
+        await self.client.disconnect()
+        self._logger.debug("Sesión de creación de tokens cerrada correctamente")
 
     # ============================================================================
     # UPLOAD DE METADATOS
@@ -118,7 +117,7 @@ class PumpFunTokenCreator:
         if not image_path.exists():
             raise FileNotFoundError(f"Imagen no encontrada: {image_path}")
 
-        print(f"📤 Subiendo imagen a IPFS para {platform}...")
+        self._logger.debug(f"Subiendo imagen a IPFS para {platform}...")
 
         try:
             if platform == "pump":
@@ -126,8 +125,8 @@ class PumpFunTokenCreator:
                 with open(image_path, 'rb') as f:
                     files = {'file': (image_path.name, f, 'image/png')}
                     response = await self.client.http_post_files(endpoint="ipfs", files=files)
-                return response.get('metadataUri', '')
-            
+                return response.get('metadataUri', '') if response else ''
+
             elif platform in ["bonk", "moonshot"]:
                 # Usar NFT Storage workers
                 with open(image_path, 'rb') as f:
@@ -137,10 +136,13 @@ class PumpFunTokenCreator:
                         files=files,
                         url="https://nft-storage.letsbonk22.workers.dev/upload/img"
                     )
-                return response
+                return response.get('metadataUri', '') if response else ''
+
+            else:
+                raise ValueError(f"Plataforma no soportada: {platform}")
 
         except Exception as e:
-            print(f"❌ Error subiendo imagen: {e}")
+            self._logger.error(f"Error subiendo imagen: {e}")
             raise ApiClientException(f"Error subiendo imagen: {e}")
 
     async def create_token_metadata(
@@ -160,17 +162,17 @@ class PumpFunTokenCreator:
         Returns:
             URI de los metadatos en IPFS
         """
-        print(f"📝 Creando metadatos para {platform}...")
+        self._logger.debug(f"Creando metadatos para {platform}...")
 
         try:
             if platform == "pump":
                 # Usar IPFS de Pump.fun
                 form_data = metadata.to_dict()
                 form_data['file'] = image_uri
-                
+
                 response = await self.client.http_post(endpoint="ipfs", data=form_data)
-                return response.get('metadataUri', '')
-            
+                return response.get('metadataUri', '') if response else ''
+
             elif platform in ["bonk", "moonshot"]:
                 # Usar NFT Storage workers
                 meta_data = {
@@ -180,20 +182,22 @@ class PumpFunTokenCreator:
                     'symbol': metadata.symbol,
                     'website': metadata.website
                 }
-                
+
                 if platform == "bonk":
                     meta_data['createdOn'] = "https://bonk.fun"
-                
+
                 response = await self.client.http_post(
                     endpoint="",  # URL completa se maneja en el método
-                    data=json.dumps(meta_data),
+                    data=meta_data,
                     headers={'Content-Type': 'application/json'},
                     url="https://nft-storage.letsbonk22.workers.dev/upload/meta"
                 )
-                return response
+                return response.get('metadataUri', '') if response else ''
+            else:
+                raise ValueError(f"Plataforma no soportada: {platform}")
 
         except Exception as e:
-            print(f"❌ Error creando metadatos: {e}")
+            self._logger.error(f"Error creando metadatos: {e}")
             raise ApiClientException(f"Error creando metadatos: {e}")
 
     # ============================================================================
@@ -226,12 +230,12 @@ class PumpFunTokenCreator:
         if not self._api_key:
             raise ApiClientException("Se requiere API key para transacciones Lightning")
 
-        print(f"🚀 Creando token Lightning en {platform}...")
+        self._logger.debug(f"Creando token Lightning en {platform}...")
 
         try:
             # 1. Generar mint keypair
             mint_keypair = Keypair()
-            print(f"🏦 Mint address: {mint_keypair.pubkey()}")
+            self._logger.debug(f"Mint address: {mint_keypair.pubkey()}")
 
             # 2. Subir imagen
             image_uri = await self.upload_image_to_ipfs(image_path, platform)
@@ -253,11 +257,14 @@ class PumpFunTokenCreator:
             }
 
             response = await self.client.http_post(endpoint="trade", data=payload, use_api_key=True)
-            print(f"✅ Token creado: {response.get('signature', 'N/A')}")
+            if not response:
+                self._logger.error("No se recibieron datos de la transacción")
+                raise ApiClientException("No se recibieron datos de la transacción")
+            self._logger.debug(f"Token creado: {response.get('signature', 'N/A')}")
             return response
 
         except Exception as e:
-            print(f"❌ Error creando token Lightning: {e}")
+            self._logger.error(f"Error creando token Lightning: {e}")
             raise ApiClientException(f"Error creando token Lightning: {e}")
 
     async def create_token_local(
@@ -287,12 +294,12 @@ class PumpFunTokenCreator:
         Returns:
             Firma de la transacción
         """
-        print(f"🛠️ Creando token local en {platform}...")
+        self._logger.debug(f"Creando token local en {platform}...")
 
         try:
             # 1. Generar mint keypair
             mint_keypair = Keypair()
-            print(f"🏦 Mint address: {mint_keypair.pubkey()}")
+            self._logger.debug(f"Mint address: {mint_keypair.pubkey()}")
 
             # 2. Subir imagen
             image_uri = await self.upload_image_to_ipfs(image_path, platform)
@@ -317,6 +324,7 @@ class PumpFunTokenCreator:
             # 5. Obtener transacción serializada
             tx_bytes = await self.client.http_post_raw(endpoint="trade-local", data=payload)
             if not tx_bytes:
+                self._logger.error("No se recibieron datos de la transacción")
                 raise ApiClientException("No se recibieron datos de la transacción")
 
             # 6. Firmar transacción
@@ -325,11 +333,11 @@ class PumpFunTokenCreator:
 
             # 7. Enviar transacción
             tx_signature = await self.client.send_signed_transaction(signed_tx, rpc_endpoint)
-            print(f"✅ Token creado: {tx_signature}")
+            self._logger.debug(f"Token creado: {tx_signature}")
             return tx_signature
 
         except Exception as e:
-            print(f"❌ Error creando token local: {e}")
+            self._logger.error(f"Error creando token local: {e}")
             raise ApiClientException(f"Error creando token local: {e}")
 
     # ============================================================================

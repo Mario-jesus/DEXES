@@ -1,28 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 PumpFun API Client - Cliente centralizado para todas las llamadas a APIs
-Implementa patrón Singleton con soporte async/await, WebSocket y HTTP
+con soporte async/await, WebSocket y HTTP
 """
-from typing import Dict, Any, Optional, Union, Callable, List, TYPE_CHECKING
-from websockets.exceptions import ConnectionClosed
+import asyncio, aiohttp, json, websockets, time
+from typing import Dict, Any, Optional, Union, Type, Tuple, Callable, List, TYPE_CHECKING
+from solders.commitment_config import CommitmentLevel
+from solders.rpc.requests import SendVersionedTransaction
+from solders.rpc.config import RpcSendTransactionConfig
 from enum import Enum
-import asyncio
-import json
-import threading
-import aiohttp
-import websockets
+from logging_system import AppLogger
+
 
 if TYPE_CHECKING:
+    from io import BufferedReader
+    from types import TracebackType
     from solders.transaction import VersionedTransaction
-    from solders.commitment_config import CommitmentLevel
-    from solders.rpc.requests import SendVersionedTransaction
-    from solders.rpc.config import RpcSendTransactionConfig
-
-
-class ApiType(Enum):
-    """Tipos de API disponibles"""
-    HTTP = "http"
-    WEBSOCKET = "websocket"
 
 
 class RequestMethod(Enum):
@@ -32,6 +25,13 @@ class RequestMethod(Enum):
     PUT = "PUT"
     DELETE = "DELETE"
     PATCH = "PATCH"
+
+class WebSocketMethod(Enum):
+    """Métodos WebSocket disponibles"""
+    SUBSCRIBE_NEW_TOKEN = "subscribeNewToken"
+    SUBSCRIBE_MIGRATION = "subscribeMigration"
+    SUBSCRIBE_ACCOUNT_TRADE = "subscribeAccountTrade"
+    SUBSCRIBE_TOKEN_TRADE = "subscribeTokenTrade"
 
 
 class ApiClientException(Exception):
@@ -49,489 +49,635 @@ class HttpRequestError(ApiClientException):
     pass
 
 
-class SingletonMeta(type):
-    """Metaclass para implementar patrón Singleton thread-safe"""
-    _instances = {}
-    _lock = threading.Lock()
-
-    def __call__(cls, *args, **kwargs):
-        if cls not in cls._instances:
-            with cls._lock:
-                if cls not in cls._instances:
-                    instance = super().__call__(*args, **kwargs)
-                    cls._instances[cls] = instance
-        return cls._instances[cls]
-
-
-class PumpFunApiClient(metaclass=SingletonMeta):
+class PumpFunHttpApiClient():
     """
     Cliente centralizado para todas las APIs de PumpFun
-    Implementa patrón Singleton con soporte async/await
+    con soporte async/await
     """
 
-    def __init__(self, 
-                    websocket_url: str = "wss://pumpportal.fun/api/data",
-                    http_base_url: str = "https://pumpportal.fun/api",
-                    api_key: Optional[str] = None,
-                    enable_websocket: bool = True,
-                    enable_http: bool = True,
-                    max_connections: int = 10,
-                    websocket_timeout: int = 60,
-                    http_timeout: int = 30,
-                    max_retries: int = 3,
-                    retry_delay: float = 1.0):
+    def __init__(
+        self,
+        http_base_url: str = "https://pumpportal.fun/api",
+        api_key: Optional[str] = None,
+        max_connections: int = 10,
+        http_timeout: int = 30,
+        max_retries: int = 3,
+        retry_delay: float = 1.0
+    ):
         """
         Inicializa el cliente API
         
         Args:
-            websocket_url: URL del WebSocket
             http_base_url: URL base para peticiones HTTP
             api_key: API key para autenticación
-            enable_websocket: Habilitar conexiones WebSocket
-            enable_http: Habilitar peticiones HTTP
             max_connections: Máximo número de conexiones HTTP
-            websocket_timeout: Timeout para WebSocket (segundos)
             http_timeout: Timeout para HTTP (segundos)
             max_retries: Máximo número de reintentos
             retry_delay: Delay base entre reintentos
         """
-        # Evitar reinicialización en singleton
-        if hasattr(self, '_initialized'):
-            return
-
-        self.websocket_url = websocket_url
-        self.http_base_url = http_base_url
-        self.api_key = api_key
-        self.enable_websocket = enable_websocket
-        self.enable_http = enable_http
-        self.max_connections = max_connections
-        self.websocket_timeout = websocket_timeout
-        self.http_timeout = http_timeout
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.background_tasks: set[asyncio.Task] = set()
-
-        # Estado interno
-        self._websocket = None
+        self._http_base_url = http_base_url
+        self._api_key = api_key
+        self._max_connections = max_connections
+        self._http_timeout = http_timeout
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
         self._http_session = None
-        self._websocket_lock = asyncio.Lock()
-        self._http_lock = asyncio.Lock()
-        self._is_websocket_connected = False
-        self._websocket_callbacks = {}
-        self._websocket_subscriptions = set()
-        self._listener_task = None
 
-        # Métricas y logging
-        self._request_count = 0
-        self._error_count = 0
-        self._connection_attempts = 0
-        self._websocket_message_count = 0
+        self._lock = asyncio.Lock()
+        self._is_running = False
 
-        self._initialized = True
-        print(f"🌐 PumpFun API Client inicializado")
-        print(f"   WebSocket: {'✅' if enable_websocket else '❌'} {websocket_url}")
-        print(f"   HTTP: {'✅' if enable_http else '❌'} {http_base_url}")
-        if api_key:
-            print(f"   API Key: ✅ {api_key[:8]}...")
-        else:
-            print(f"   API Key: ❌ No proporcionada")
+        # Logging
+        self._logger = AppLogger(self.__class__.__name__)
+
+        # Métricas básicas
+        self._metrics: Dict[str, Any] = {
+            'request_count': 0,
+            'error_count': 0,
+            'success_count': 0,
+            'total_response_time_ms': 0.0,
+            'first_request_time': None,
+            'last_request_time': None
+        }
 
     async def __aenter__(self):
         """Context manager entry"""
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional["TracebackType"]):
         """Context manager exit"""
         await self.disconnect()
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_running
 
     # ============================================================================
     # MÉTODOS DE CONEXIÓN
     # ============================================================================
 
     async def connect(self):
-        """Conecta a las APIs habilitadas"""
-        tasks = []
-
-        if self.enable_websocket:
-            tasks.append(self._connect_websocket())
-
-        if self.enable_http:
-            tasks.append(self._connect_http())
-
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def disconnect(self):
-        """Desconecta de todas las APIs"""
-        tasks = []
-
-        if self._websocket:
-            # Desuscribir eventos antes de desconectar
-            await self._unsubscribe_all_events()
-            tasks.append(self._disconnect_websocket())
-
-        if self._http_session:
-            tasks.append(self._disconnect_http())
-
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _connect_websocket(self, use_api_key: bool = False):
-        """
-        Conecta al WebSocket
-        
-        Args:
-            use_api_key: Si True, incluye API key en la URL para PumpSwap data
-        """
-        if not self.enable_websocket:
+        if self._is_running and self._http_session and not self._http_session.closed:
             return
 
-        async with self._websocket_lock:
-            if self._is_websocket_connected:
-                return
-
-            try:
-                self._connection_attempts += 1
-
-                # Construir URL con o sin API key
-                ws_url = self.websocket_url
-                if use_api_key and self.api_key:
-                    ws_url = f"{self.websocket_url}?api-key={self.api_key}"
-
-                print(f"🔗 Conectando WebSocket... (intento {self._connection_attempts})")
-                if use_api_key:
-                    print(f"   🔑 Usando API key para PumpSwap data")
-
-                self._websocket = await asyncio.wait_for(
-                    websockets.connect(
-                        ws_url,
-                        ping_interval=20,
-                        ping_timeout=10,
-                        close_timeout=10
-                    ),
-                    timeout=self.websocket_timeout
-                )
-
-                self._is_websocket_connected = True
-
-                # Iniciar listener en background
-                self._listener_task = asyncio.create_task(self._websocket_listener())
-
-                print("✅ WebSocket conectado exitosamente")
-
-            except Exception as e:
-                print(f"❌ Error conectando WebSocket: {e}")
-                raise WebSocketConnectionError(f"Error conectando WebSocket: {e}")
-
-    async def _connect_http(self):
-        """Conecta sesión HTTP"""
-        if not self.enable_http:
-            return
-
-        async with self._http_lock:
+        async with self._lock:
             if self._http_session and not self._http_session.closed:
+                self._is_running = True
                 return
 
             try:
                 connector = aiohttp.TCPConnector(
-                    limit=self.max_connections,
-                    limit_per_host=self.max_connections,
+                    limit=self._max_connections,
+                    limit_per_host=self._max_connections,
                     ttl_dns_cache=300,
                     use_dns_cache=True
                 )
 
-                timeout = aiohttp.ClientTimeout(total=self.http_timeout)
+                timeout = aiohttp.ClientTimeout(total=self._http_timeout)
 
                 self._http_session = aiohttp.ClientSession(
                     connector=connector,
                     timeout=timeout,
                     headers={
-                        'User-Agent': 'PumpFun-API-Client/1.0',
+                        'User-Agent': 'PumpFun-Http-Api-Client/1.0',
                         'Accept': 'application/json',
                         'Content-Type': 'application/json'
                     }
                 )
 
-                print("✅ Sesión HTTP inicializada")
+                self._is_running = True
+
+                self._logger.info("Sesión HTTP inicializada")
 
             except Exception as e:
-                print(f"❌ Error inicializando HTTP: {e}")
+                self._logger.error(f"Error inicializando HTTP: {e}")
                 raise HttpRequestError(f"Error inicializando HTTP: {e}")
 
-    async def _disconnect_websocket(self):
-        """Desconecta WebSocket"""
-        async with self._websocket_lock:
-            try:
-                self._is_websocket_connected = False
-
-                if self._listener_task:
-                    self._listener_task.cancel()
-                    try:
-                        await self._listener_task
-                    except asyncio.CancelledError:
-                        pass
-
-                if self._websocket:
-                    await self._websocket.close()
-                    self._websocket = None
-
-                print("🔌 WebSocket desconectado")
-
-            except Exception as e:
-                print(f"⚠️ Error desconectando WebSocket: {e}")
-
-    async def _disconnect_http(self):
-        """Desconecta sesión HTTP"""
-        async with self._http_lock:
+    async def disconnect(self):
+        async with self._lock:
             try:
                 if self._http_session and not self._http_session.closed:
                     await self._http_session.close()
                     self._http_session = None
+                    self._is_running = False
 
-                print("🔌 Sesión HTTP cerrada")
+                self._logger.info("Sesión HTTP cerrada")
 
             except Exception as e:
-                print(f"⚠️ Error cerrando HTTP: {e}")
+                self._logger.error(f"Error cerrando HTTP: {e}")
 
     # ============================================================================
     # MÉTODOS GENÉRICOS DE PETICIÓN
     # ============================================================================
 
-    async def request(self, 
-                        api_type: ApiType,
-                        method: Union[RequestMethod, str] = RequestMethod.POST,
-                        endpoint: str = "",
-                        data: Optional[Dict[str, Any]] = None,
-                        params: Optional[Dict[str, Any]] = None,
-                        headers: Optional[Dict[str, str]] = None,
-                        callback: Optional[Callable] = None,
-                        use_api_key: bool = False,
-                        return_json: bool = True,
-                        files: Optional[Dict] = None,
-                        **kwargs) -> Optional[Any]:
-        """
-        Método genérico para enviar peticiones a cualquier API
-        
-        Args:
-            api_type: Tipo de API (HTTP, WEBSOCKET)
-            method: Método HTTP o acción WebSocket
-            endpoint: Endpoint o comando
-            data: Datos a enviar
-            params: Parámetros de query (solo HTTP)
-            headers: Headers adicionales (solo HTTP)
-            callback: Callback para respuestas WebSocket
-            use_api_key: Si True, incluye API key en la petición
-            return_json: Si True, la respuesta HTTP será parseada como JSON
-            **kwargs: Argumentos adicionales
-            
-        Returns:
-            Respuesta de la API o None para WebSocket
-        """
-        self._request_count += 1
-
-        try:
-            if api_type == ApiType.HTTP:
-                return await self._http_request(method, endpoint, data, params, headers, use_api_key, return_json, files, **kwargs)
-
-            elif api_type == ApiType.WEBSOCKET:
-                return await self._websocket_request(method, data, callback, use_api_key, **kwargs)
-
-            else:
-                raise ApiClientException(f"Tipo de API no soportado: {api_type}")
-
-        except Exception as e:
-            self._error_count += 1
-            print(f"❌ Error en petición {api_type.value}: {e}")
-            raise
-
-    async def _http_request_files(self,
-                                method: Union[RequestMethod, str],
-                                endpoint: str,
-                                data: Optional[Dict[str, Any]] = None,
-                                files: Optional[Dict] = None,
-                                params: Optional[Dict[str, Any]] = None,
-                                headers: Optional[Dict[str, str]] = None,
-                                use_api_key: bool = False,
-                                url: Optional[str] = None,
-                                **kwargs) -> Optional[Dict[str, Any]]:
-        """
-        Petición HTTP con archivos usando aiohttp.FormData
-        """
-        if not self._http_session or self._http_session.closed:
-            raise HttpRequestError("Sesión HTTP no disponible")
-
-        # Construir URL
-        if url:
-            request_url = url
-        else:
-            request_url = f"{self.http_base_url}/{endpoint.lstrip('/')}" if endpoint else self.http_base_url
-
-        # Preparar headers
-        request_headers = headers or {}
-        if use_api_key and self.api_key:
-            request_headers['Authorization'] = f'Bearer {self.api_key}'
-
-        # Crear FormData
-        form_data = aiohttp.FormData()
-        
-        # Añadir datos de formulario
-        if data:
-            for key, value in data.items():
-                form_data.add_field(key, str(value))
-        
-        # Añadir archivos
-        if files:
-            for field_name, file_data in files.items():
-                if isinstance(file_data, tuple) and len(file_data) >= 2:
-                    filename, content = file_data[0], file_data[1]
-                    content_type = file_data[2] if len(file_data) > 2 else 'application/octet-stream'
-                    
-                    # Manejar tanto archivos abiertos como contenido binario
-                    if hasattr(content, 'read'):
-                        # Es un archivo abierto
-                        form_data.add_field(field_name, content, filename=filename, content_type=content_type)
-                    else:
-                        # Es contenido binario
-                        form_data.add_field(field_name, content, filename=filename, content_type=content_type)
-                else:
-                    form_data.add_field(field_name, file_data)
-
-        # Implementar reintentos con backoff exponencial
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                async with self._http_session.post(
-                    request_url,
-                    data=form_data,
-                    params=params,
-                    headers=request_headers,
-                    **kwargs
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        error_text = await response.text()
-                        raise HttpRequestError(f"HTTP {response.status}: {error_text}")
-
-            except Exception as e:
-                if attempt < self.max_retries:
-                    delay = self.retry_delay * (2 ** (attempt - 1))
-                    print(f"⚠️ Reintentando HTTP en {delay}s... (intento {attempt}/{self.max_retries})")
-                    await asyncio.sleep(delay)
-                else:
-                    raise HttpRequestError(f"Error HTTP después de {self.max_retries} intentos: {e}")
-
-    async def _http_request(self,
-                            method: Union[RequestMethod, str],
-                            endpoint: str,
-                            data: Optional[Dict[str, Any]] = None,
-                            params: Optional[Dict[str, Any]] = None,
-                            headers: Optional[Dict[str, str]] = None,
-                            use_api_key: bool = False,
-                            return_json: bool = True,
-                            files: Optional[Dict] = None,
-                            url: Optional[str] = None,
-                            **kwargs) -> Optional[Union[Dict[str, Any], bytes]]:
+    async def http_request(self,
+        *,
+        method: Union[RequestMethod, str],
+        endpoint: str,
+        data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        use_api_key: bool = False,
+        return_json: bool = True,
+        files: Optional[Dict[str, Any]] = None,
+        url: Optional[str] = None,
+        **kwargs: Any
+    ) -> Optional[Union[Dict[str, Any], bytes]]:
         """
         Petición HTTP genérica (GET, POST, etc.)
         """
-        if not self._http_session or self._http_session.closed:
-            raise HttpRequestError("Sesión HTTP no disponible")
+        try:
 
-        # Construir URL
-        if url:
-            request_url = url
-        else:
-            request_url = f"{self.http_base_url}/{endpoint.lstrip('/')}" if endpoint else self.http_base_url
+            self._metrics['request_count'] += 1
+            request_start_time = time.time()
 
-        # Preparar parámetros, incluyendo la API key si es necesario
-        request_params = params.copy() if params else {}
-        if use_api_key and self.api_key:
-            request_params['api-key'] = self.api_key
+            if self._metrics['first_request_time'] is None:
+                self._metrics['first_request_time'] = request_start_time
 
-        # Preparar argumentos
-        request_kwargs = {
-            'url': request_url,
-            'params': request_params,
-            'headers': headers or {},
-            **kwargs
-        }
-        
-        # Manejar datos según tipo
-        if files:
-            # Upload de archivos
-            request_kwargs['data'] = data
-            request_kwargs['files'] = files
-        else:
-            # Datos JSON normales
-            request_kwargs['json'] = data
+            if not self._http_session or not self._is_running:
+                raise HttpRequestError("Sesión HTTP no disponible")
 
-        # Implementar reintentos con backoff exponencial
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                async with self._http_session.request(method.value if isinstance(method, RequestMethod) else method,
-                                                     **request_kwargs) as response:
-                    if response.status == 200:
-                        if return_json:
+            # Construir URL
+            if url:
+                request_url = url
+            else:
+                request_url = f"{self._http_base_url}/{endpoint.lstrip('/')}" if endpoint else self._http_base_url
+
+            # Preparar parámetros, incluyendo la API key si es necesario
+            request_params = params.copy() if params else {}
+            if use_api_key and self._api_key:
+                request_params['api-key'] = self._api_key
+
+            # Preparar argumentos
+            request_kwargs: Dict[str, Any] = {
+                'url': request_url,
+                'params': request_params,
+                'headers': headers or {},
+                **kwargs
+            }
+
+            # Manejar datos según tipo
+            if files:
+                # Upload de archivos
+                request_kwargs['data'] = data
+                request_kwargs['files'] = files
+            else:
+                # Datos JSON normales
+                request_kwargs['json'] = data
+
+            # Implementar reintentos con backoff exponencial
+            for attempt in range(1, self._max_retries + 1):
+                try:
+                    async with self._http_session.request(
+                        method.value if isinstance(method, RequestMethod) else method,
+                        **request_kwargs
+                    ) as response:
+                        # Registrar tiempo de respuesta
+                        response_time_ms = (time.time() - request_start_time) * 1000
+                        self._metrics['total_response_time_ms'] += response_time_ms
+                        self._metrics['last_request_time'] = time.time()
+
+                        if response.status == 200:
+                            self._metrics['success_count'] += 1
+                            if return_json:
+                                return await response.json()
+                            else:
+                                return await response.read()
+                        else:
+                            self._metrics['error_count'] += 1
+                            error_text = await response.text()
+                            raise HttpRequestError(f"HTTP {response.status}: {error_text}")
+                except Exception as e:
+                    if attempt < self._max_retries:
+                        delay = self._retry_delay * (2 ** (attempt - 1))
+                        self._logger.warning(f"Reintentando HTTP en {delay}s... (intento {attempt}/{self._max_retries})")
+                        await asyncio.sleep(delay)
+                    else:
+                        raise HttpRequestError(f"Error HTTP después de {self._max_retries} intentos: {e}")
+        except Exception as e:
+            self._metrics['error_count'] += 1
+            self._logger.error(f"Error en petición: {e}")
+            raise
+
+    async def _http_request_files(self,
+        *,
+        endpoint: str,
+        data: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Tuple[str, "BufferedReader", str]]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        use_api_key: bool = False,
+        url: Optional[str] = None,
+        **kwargs: Any
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Petición HTTP con archivos usando aiohttp.FormData
+        """
+        try:
+
+            self._metrics['request_count'] += 1
+            request_start_time = time.time()
+
+            if self._metrics['first_request_time'] is None:
+                self._metrics['first_request_time'] = request_start_time
+
+            if not self._http_session or self._http_session.closed:
+                raise HttpRequestError("Sesión HTTP no disponible")
+
+            # Construir URL
+            if url:
+                request_url = url
+            else:
+                request_url = f"{self._http_base_url}/{endpoint.lstrip('/')}" if endpoint else self._http_base_url
+
+            # Preparar headers
+            request_headers = headers or {}
+            if use_api_key and self._api_key:
+                request_headers['Authorization'] = f'Bearer {self._api_key}'
+
+            # Crear FormData
+            form_data = aiohttp.FormData()
+
+            # Añadir datos de formulario
+            if data:
+                for key, value in data.items():
+                    form_data.add_field(key, str(value))
+
+            # Añadir archivos
+            if files:
+                for field_name, file_data in files.items():
+                    if len(file_data) >= 2:
+                        filename, content = file_data[0], file_data[1]
+                        content_type = file_data[2] if len(file_data) > 2 else 'application/octet-stream'
+
+                        # Manejar tanto archivos abiertos como contenido binario
+                        if hasattr(content, 'read'):
+                            # Es un archivo abierto
+                            form_data.add_field(field_name, content, filename=filename, content_type=content_type)
+                        else:
+                            # Es contenido binario
+                            form_data.add_field(field_name, content, filename=filename, content_type=content_type)
+                    else:
+                        form_data.add_field(field_name, file_data)
+
+            # Implementar reintentos con backoff exponencial
+            for attempt in range(1, self._max_retries + 1):
+                try:
+                    async with self._http_session.post(
+                        request_url,
+                        data=form_data,
+                        params=params,
+                        headers=request_headers,
+                        **kwargs
+                    ) as response:
+                        # Registrar tiempo de respuesta
+                        response_time_ms = (time.time() - request_start_time) * 1000
+                        self._metrics['total_response_time_ms'] += response_time_ms
+                        self._metrics['last_request_time'] = time.time()
+
+                        if response.status == 200:
+                            self._metrics['success_count'] += 1
                             return await response.json()
                         else:
-                            return await response.read()
-                    else:
-                        error_text = await response.text()
-                        raise HttpRequestError(f"HTTP {response.status}: {error_text}")
-            except Exception as e:
-                if attempt < self.max_retries:
-                    delay = self.retry_delay * (2 ** (attempt - 1))
-                    print(f"⚠️ Reintentando HTTP en {delay}s... (intento {attempt}/{self.max_retries})")
-                    await asyncio.sleep(delay)
-                else:
-                    raise HttpRequestError(f"Error HTTP después de {self.max_retries} intentos: {e}")
+                            self._metrics['error_count'] += 1
+                            error_text = await response.text()
+                            raise HttpRequestError(f"HTTP {response.status}: {error_text}")
 
-    async def _websocket_request(self,
-                                command: str,
-                                data: Optional[Dict[str, Any]] = None,
-                                callback: Optional[Callable] = None,
-                                use_api_key: bool = False,
-                                **kwargs) -> None:
+                except Exception as e:
+                    if attempt < self._max_retries:
+                        delay = self._retry_delay * (2 ** (attempt - 1))
+                        self._logger.warning(f"Reintentando HTTP en {delay}s... (intento {attempt}/{self._max_retries})")
+                        await asyncio.sleep(delay)
+                    else:
+                        raise HttpRequestError(f"Error HTTP después de {self._max_retries} intentos: {e}")
+        except Exception as e:
+            self._metrics['error_count'] += 1
+            self._logger.error(f"Error en petición: {e}")
+            raise
+
+    # ============================================================================
+    # MÉTODOS DE CONVENIENCIA
+    # ============================================================================
+
+    async def http_get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, use_api_key: bool = False, **kwargs: Any) -> Optional[Dict[str, Any]]:
+        """Petición HTTP GET"""
+        result = await self.http_request(method=RequestMethod.GET, endpoint=endpoint, params=params, use_api_key=use_api_key, **kwargs)
+        return result if isinstance(result, dict) else None
+
+    async def http_post(self, endpoint: str, data: Optional[Dict[str, Any]] = None, use_api_key: bool = False, url: Optional[str] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
+        """Petición HTTP POST"""
+        result = await self.http_request(method=RequestMethod.POST, endpoint=endpoint, data=data, use_api_key=use_api_key, url=url, **kwargs)
+        return result if isinstance(result, dict) else None
+
+    async def http_post_files(self, endpoint: str, data: Optional[Dict[str, Any]] = None, files: Optional[Dict[str, Any]] = None, use_api_key: bool = False, **kwargs: Any) -> Optional[Dict[str, Any]]:
+        """Petición HTTP POST con archivos"""
+        return await self._http_request_files(endpoint=endpoint, data=data, files=files, use_api_key=use_api_key, **kwargs)
+
+    async def http_post_raw(self, endpoint: str, data: Optional[Dict[str, Any]] = None, use_api_key: bool = False, **kwargs: Any) -> Optional[bytes]:
+        """Petición HTTP POST que devuelve bytes crudos"""
+        result = await self.http_request(method=RequestMethod.POST, endpoint=endpoint, data=data, use_api_key=use_api_key, return_json=False, **kwargs)
+        return result if isinstance(result, bytes) else None
+
+    async def send_signed_transaction(self, signed_tx: "VersionedTransaction", rpc_endpoint: str) -> str:
+        """
+        Envía una transacción firmada a un endpoint RPC de Solana
+        
+        Args:
+            signed_tx: La transacción VersionedTransaction ya firmada
+            rpc_endpoint: El endpoint RPC de Solana al que se enviará la transacción
+            
+        Returns:
+            La firma de la transacción como string
+        """
+        if not self._http_session:
+            await self.connect()
+
+        commitment = CommitmentLevel.Confirmed
+        config = RpcSendTransactionConfig(preflight_commitment=commitment)
+        payload = SendVersionedTransaction(signed_tx, config).to_json()
+
+        if not self._http_session:
+            raise HttpRequestError("Sesión HTTP no disponible")
+
+        async with self._http_session.post(rpc_endpoint, data=payload, headers={"Content-Type": "application/json"}) as response:
+            if response.status == 200:
+                result = await response.json()
+                return result.get('result')
+            else:
+                error_text = await response.text()
+                raise HttpRequestError(f"Error enviando transacción a {rpc_endpoint}: HTTP {response.status} - {error_text}")
+
+    # ============================================================================
+    # MÉTODOS DE ESTADO Y MÉTRICAS
+    # ============================================================================
+
+    def get_status(self) -> Dict[str, Any]:
+        """Obtiene estado actual del cliente"""
+
+        # Calcular métricas derivadas
+        total_requests = self._metrics['request_count'] or 0
+        success_count = self._metrics['success_count'] or 0
+        total_response_time = self._metrics['total_response_time_ms'] or 0.0
+
+        success_rate = (success_count / max(1, total_requests)) * 100
+        avg_response_time = 0.0
+        if total_requests > 0:
+            avg_response_time = total_response_time / total_requests
+
+        # Calcular uptime
+        uptime_seconds = 0
+        if self._metrics['first_request_time'] is not None:
+            uptime_seconds = time.time() - self._metrics['first_request_time']
+
+        return {
+            'http_session_active': self._http_session is not None and not self._http_session.closed,
+            'is_running': self._is_running,
+            'api_key_configured': bool(self._api_key),
+            'request_count': total_requests,
+            'success_count': self._metrics['success_count'],
+            'error_count': self._metrics['error_count'],
+            'success_rate_percent': round(success_rate, 2),
+            'avg_response_time_ms': round(avg_response_time, 2),
+            'uptime_seconds': round(uptime_seconds, 2),
+            'first_request_time': self._metrics['first_request_time'],
+            'last_request_time': self._metrics['last_request_time']
+        }
+
+    def reset_metrics(self):
+        """Resetea métricas del cliente"""
+        self._metrics['request_count'] = 0
+        self._metrics['error_count'] = 0
+        self._metrics['success_count'] = 0
+        self._metrics['total_response_time_ms'] = 0.0
+        self._metrics['first_request_time'] = None
+        self._metrics['last_request_time'] = None
+
+        self._logger.info("Métricas del cliente reseteadas")
+
+
+class PumpFunWebSocketApiClient():
+    """
+    Cliente centralizado para todas las APIs de PumpFun
+    con soporte async/await
+    """
+
+    def __init__(self, 
+        websocket_base_url: str = "wss://pumpportal.fun/api/data",
+        api_key: Optional[str] = None,
+        websocket_timeout: int = 60,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+        inactivity_watch_seconds: int = 120
+    ):
+        """
+        Inicializa el cliente API
+        
+        Args:
+            websocket_base_url: URL del WebSocket
+            api_key: API key para autenticación
+            websocket_timeout: Timeout para WebSocket (segundos)
+            max_retries: Máximo número de reintentos
+            retry_delay: Delay base entre reintentos
+        """
+        self._websocket_base_url = websocket_base_url
+        self._api_key = api_key
+        self._websocket_timeout = websocket_timeout
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
+        self._websocket = None
+        self._websocket_callbacks: Dict[str, Callable[[Any], Any]] = {}
+        self._websocket_subscriptions: set[str] = set()
+        self._listener_task: Optional[asyncio.Task[Any]] = None
+        self._inactivity_task: Optional[asyncio.Task[Any]] = None
+
+        self._is_running = False
+        self._is_reconnecting = False
+
+        self._logger = AppLogger(self.__class__.__name__)
+
+        # Config watchdog
+        self._inactivity_watch_seconds = inactivity_watch_seconds
+
+        # Métricas básicas
+        self._metrics: Dict[str, Any] = {
+            'connection_attempts': 0,
+            'error_count': 0,
+            'message_count': 0,
+            'subscription_count': 0,
+            'callback_count': 0,
+            'total_response_time_ms': 0.0,
+            'first_connection_time': None,
+            'last_message_time': None,
+            'reconnect_count': 0,
+            'ping_count': 0,
+            'inactivity_reconnects': 0,
+            'inactivity_last_check': None,
+            'inactivity_triggered': False,
+            # Métricas de trades
+            'trade_count': 0,
+            'last_trade_time': None,
+            'total_trade_intervals': 0.0,
+            'min_trade_interval': float('inf'),
+            'max_trade_interval': 0.0
+        }
+
+    async def __aenter__(self):
+        """Context manager entry"""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional["TracebackType"]):
+        """Context manager exit"""
+        await self.disconnect()
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_running
+
+    # ============================================================================
+    # MÉTODOS DE CONEXIÓN
+    # ============================================================================
+
+    async def connect(self):
+        if self._is_running:
+            return
+
+        try:
+            self._metrics['connection_attempts'] += 1
+
+            if self._metrics['first_connection_time'] is None:
+                self._metrics['first_connection_time'] = time.time()
+
+            # Construir URL con o sin API key
+            ws_url = self._websocket_base_url
+            if self._api_key:
+                ws_url = f"{self._websocket_base_url}?api-key={self._api_key}"
+
+            self._logger.debug(f"Conectando WebSocket... (intento {self._metrics['connection_attempts']})")
+            if self._api_key:
+                self._logger.debug(f"Usando API key para PumpSwap data")
+
+            self._websocket = await asyncio.wait_for(
+                websockets.connect(
+                    ws_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=10
+                ),
+                timeout=self._websocket_timeout
+            )
+
+            self._is_running = True
+
+            # Iniciar listener en background
+            self._listener_task = asyncio.create_task(self._websocket_listener())
+            # Iniciar watchdog de inactividad
+            if self._inactivity_task and not self._inactivity_task.done():
+                try:
+                    self._inactivity_task.cancel()
+                    await self._inactivity_task
+                except Exception:
+                    pass
+            self._inactivity_task = asyncio.create_task(self._inactivity_watchdog())
+
+        except Exception as e:
+            self._metrics['error_count'] += 1
+            self._logger.error(f"Error conectando WebSocket: {e}")
+            raise WebSocketConnectionError(f"Error conectando WebSocket: {e}")
+
+    async def disconnect(self):
+        try:
+            if self._listener_task:
+                self._listener_task.cancel()
+                try:
+                    await self._listener_task
+                except asyncio.CancelledError:
+                    pass
+            if self._inactivity_task:
+                self._inactivity_task.cancel()
+                try:
+                    await self._inactivity_task
+                except asyncio.CancelledError:
+                    pass
+
+            await self._unsubscribe_all_events()
+
+            if self._websocket:
+                await self._websocket.close()
+                self._websocket = None
+
+            self._is_running = False
+
+            # WebSocket desconectado
+        except Exception as e:
+            self._logger.error(f"Error desconectando WebSocket: {e}")
+
+    # ============================================================================
+    # MÉTODOS AUXILIARES DE MÉTRICAS
+    # ============================================================================
+
+    def _update_trade_metrics(self):
+        """Actualiza métricas de trades"""
+        current_time = time.time()
+
+        # Incrementar contador de trades
+        self._metrics['trade_count'] += 1
+
+        # Calcular intervalo desde el último trade
+        if self._metrics['last_trade_time'] is not None:
+            interval = current_time - self._metrics['last_trade_time']
+            self._metrics['total_trade_intervals'] += interval
+            self._metrics['min_trade_interval'] = min(self._metrics['min_trade_interval'], interval)
+            self._metrics['max_trade_interval'] = max(self._metrics['max_trade_interval'], interval)
+
+        # Actualizar tiempo del último trade
+        self._metrics['last_trade_time'] = current_time
+
+    # ============================================================================
+    # MÉTODOS GENÉRICOS DE PETICIÓN
+    # ============================================================================
+
+    async def websocket_request(
+        self,
+        method: str,
+        data: Optional[Dict[str, Any]] = None,
+        callback: Optional[Callable[[Any], Any]] = None,
+        **kwargs: Any
+    ) -> None:
         """
         Ejecuta petición WebSocket
         
         Args:
-            use_api_key: Si True, reconecta con API key si es necesario
+            method: Método WebSocket a ejecutar
+            data: Datos a enviar
+            callback: Función callback para procesar mensajes
+            **kwargs: Argumentos adicionales
         """
-        if not self.enable_websocket:
+        if not self._is_running or not self._websocket:
             raise WebSocketConnectionError("WebSocket no habilitado")
-
-        # Si necesitamos API key y no está en la URL actual, reconectar
-        if use_api_key and self.api_key and self._websocket:
-            current_url = str(self._websocket.remote_address)
-            if 'api-key=' not in current_url:
-                print("🔄 Reconectando WebSocket con API key...")
-                await self._disconnect_websocket()
-                await self._connect_websocket(use_api_key=True)
-
-        if not self._is_websocket_connected:
-            await self._connect_websocket(use_api_key=use_api_key)
 
         # Preparar mensaje
         message = {
-            'method': command,
+            'method': method,
             **(data or {}),
             **kwargs
         }
 
         # Registrar callback si se proporciona
         if callback:
-            self._websocket_callbacks[command] = callback
+            self._websocket_callbacks[method] = callback
 
         try:
             await self._websocket.send(json.dumps(message))
-            print(f"📤 Mensaje WebSocket enviado: {command}")
+            # Mensaje WebSocket enviado: {method}
 
         except Exception as e:
-            print(f"❌ Error enviando mensaje WebSocket: {e}")
+            self._metrics['error_count'] += 1
+            self._logger.error(f"Error enviando mensaje WebSocket: {e}")
             # Intentar reconectar
-            await self._reconnect_websocket(use_api_key=use_api_key)
+            await self._reconnect_websocket()
             raise WebSocketConnectionError(f"Error enviando mensaje: {e}")
 
     async def _websocket_listener(self):
@@ -543,28 +689,33 @@ class PumpFunApiClient(metaclass=SingletonMeta):
         # Crear tarea de ping en background
         ping_task = asyncio.create_task(self._ping_keepalive())
 
+        was_cancelled = False
         try:
-            while self._is_websocket_connected:
+            while self._is_running:
                 try:
                     if not self._websocket:
-                        print("🔌 WebSocket desconectado")
+                        # WebSocket desconectado
                         break
 
                     # Escuchar mensaje SIN timeout para no perder trades
                     message = await self._websocket.recv()
 
-                    self._websocket_message_count += 1
+                    self._metrics['message_count'] += 1
+                    self._metrics['last_message_time'] = time.time()
+
                     # Procesar mensaje en background para no bloquear la escucha
                     task = asyncio.create_task(self._process_websocket_message(message if isinstance(message, str) else message.decode('utf-8')))
-                    self.background_tasks.add(task)
-                    task.add_done_callback(self.background_tasks.discard)
-
-                except ConnectionClosed:
-                    print("🔌 WebSocket desconectado")
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
+                except websockets.ConnectionClosed:
+                    # WebSocket desconectado
                     break
-
+                except asyncio.CancelledError:
+                    was_cancelled = True
+                    # Tarea de listener cancelada
+                    break
                 except Exception as e:
-                    print(f"❌ Error en listener WebSocket: {e}")
+                    self._logger.error(f"Error en listener WebSocket: {e}")
                     break
 
         finally:
@@ -575,8 +726,8 @@ class PumpFunApiClient(metaclass=SingletonMeta):
             except asyncio.CancelledError:
                 pass
 
-            # Reconectar si es necesario
-            if self._is_websocket_connected:
+            # Reconectar si es necesario y no fue un cancel explícito ni hay reconexión en curso
+            if self._is_running and not was_cancelled and not self._is_reconnecting:
                 await self._reconnect_websocket()
 
     async def _ping_keepalive(self):
@@ -586,36 +737,74 @@ class PumpFunApiClient(metaclass=SingletonMeta):
         """
         ping_interval = 30  # Ping cada 30 segundos
 
-        while self._is_websocket_connected:
+        while self._is_running:
             try:
                 await asyncio.sleep(ping_interval)
 
-                if self._websocket and self._is_websocket_connected:
-                    await self._websocket.ping()
-                    print("🏓 Keepalive ping enviado")
+                if self._websocket and self._is_running:
+                    self._metrics['ping_count'] += 1
+                    # Enviar ping y esperar pong
+                    try:
+                        pong_waiter = await self._websocket.ping()
+                        # Esperar el pong correspondiente
+                        latency = await asyncio.wait_for(pong_waiter, timeout=60)
+                        self._logger.debug(f"Keepalive ping enviado, latency: {latency:.9f} segundos")
+                    except asyncio.TimeoutError:
+                        self._logger.warning("Keepalive ping timeout - posible problema de conectividad")
+                    except Exception as e:
+                        self._logger.warning(f"Error en keepalive ping: {e}")
 
             except asyncio.CancelledError:
                 # Tarea cancelada, salir limpiamente
                 break
             except Exception as e:
-                print(f"⚠️ Error en keepalive ping: {e}")
+                self._logger.error(f"Error en keepalive ping: {e}")
                 # Continuar intentando, el listener principal manejará la reconexión si es necesario
                 await asyncio.sleep(5)  # Esperar antes de reintentar
 
-    async def _background_ping(self):
-        """
-        Envía ping en background sin bloquear la escucha de mensajes
-        (Método legacy mantenido para compatibilidad)
-        """
-        try:
-            if self._websocket and self._is_websocket_connected:
-                await self._websocket.ping()
-                print("🏓 Ping enviado (background)")
-        except Exception as e:
-            print(f"⚠️ Error en ping background: {e}")
-            # No reconectar aquí, dejar que el listener principal lo maneje
+    async def _inactivity_watchdog(self):
+        """Reinicia la conexión si no llegan mensajes por un período adaptativo basado en patrones de trades"""
+        while self._is_running:
+            try:
+                # Calcular tiempo de espera adaptativo
+                avg_trade_interval = 0
+                if self._metrics['trade_count'] > 1 and self._metrics['total_trade_intervals'] > 0:
+                    avg_trade_interval = self._metrics['total_trade_intervals'] / (self._metrics['trade_count'] - 1)
 
-    def _is_async_callback(self, callback) -> bool:
+                # Usar el mayor entre: tiempo promedio de trades * 2, o el mínimo configurado
+                adaptive_wait = max(
+                    avg_trade_interval * 2,  # 2x el promedio de trades
+                    self._inactivity_watch_seconds  # Mínimo configurado
+                )
+
+                self._logger.debug(f"Watchdog esperando {adaptive_wait:.1f}s (promedio trades: {avg_trade_interval:.1f}s, mínimo: {self._inactivity_watch_seconds}s)")
+                await asyncio.sleep(adaptive_wait)
+
+                last_time = self._metrics['last_message_time'] or 0
+                now = time.time()
+                self._metrics['inactivity_last_check'] = now
+
+                # Si nunca hubo mensajes y ya pasó el período, también actúa
+                if last_time == 0:
+                    last_time = self._metrics['first_connection_time'] or now
+
+                gap = now - last_time
+                if gap >= adaptive_wait:
+                    # Reconectar indefinidamente por inactividad
+                    self._metrics['inactivity_reconnects'] += 1
+                    self._metrics['inactivity_triggered'] = True
+                    self._logger.info(
+                        f"Inactividad detectada ({int(gap)}s sin mensajes, umbral: {adaptive_wait:.1f}s). Reconectando WebSocket... (reconexión #{self._metrics['inactivity_reconnects']})"
+                    )
+                    await self._reconnect_websocket()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(f"Error en watchdog de inactividad: {e}")
+                # En caso de error, usar el tiempo mínimo configurado
+                await asyncio.sleep(self._inactivity_watch_seconds)
+
+    def _is_async_callback(self, callback: Callable[[Any], Any]) -> bool:
         """
         Determina si un callback es asíncrono
         
@@ -631,7 +820,7 @@ class PumpFunApiClient(metaclass=SingletonMeta):
             return True
         return False
 
-    async def _execute_callback(self, callback, data: Dict[str, Any], callback_type: str = "callback"):
+    async def _execute_callback(self, callback: Callable[[Any], Any], data: Dict[str, Any], callback_type: str = "callback"):
         """
         Ejecuta un callback de forma segura, manejando tanto sync como async
         
@@ -648,9 +837,9 @@ class PumpFunApiClient(metaclass=SingletonMeta):
                 # Ejecutar callback síncrono directamente
                 callback(data)
             else:
-                print(f"⚠️ {callback_type} no es callable: {type(callback)}")
+                self._logger.warning(f"{callback_type} no es callable: {type(callback)}")
         except Exception as e:
-            print(f"❌ Error en {callback_type}: {e}")
+            self._logger.error(f"Error en {callback_type}: {e}")
 
     async def _process_websocket_message(self, message: str):
         """
@@ -662,7 +851,7 @@ class PumpFunApiClient(metaclass=SingletonMeta):
 
             # Si el mensaje es de confirmación, solo lo mostramos y salimos
             if 'message' in data:
-                print(f"ℹ️ Mensaje del servidor: {data['message']}")
+                self._logger.info(f"Mensaje del servidor: {data['message']}")
                 return
 
             event_type = data.get('txType')
@@ -674,11 +863,14 @@ class PumpFunApiClient(metaclass=SingletonMeta):
             elif event_type in ['buy', 'sell']:
                 # Un trade puede venir de una suscripción a token o a cuenta
                 callback = self._websocket_callbacks.get('subscribeTokenTrade') or self._websocket_callbacks.get('subscribeAccountTrade')
+                # Actualizar métricas de trades
+                self._update_trade_metrics()
             elif event_type == 'migrate':
                 callback = self._websocket_callbacks.get('subscribeMigration')
 
             # Ejecutar callback principal
             if callback:
+                # Ejecutando callback para {event_type}
                 await self._execute_callback(callback, data, f"callback principal para {event_type}")
             else:
                 # Usar callback por defecto si existe uno para eventos no manejados
@@ -686,7 +878,7 @@ class PumpFunApiClient(metaclass=SingletonMeta):
                 if default_cb:
                     await self._execute_callback(default_cb, data, "callback por defecto")
                 else:
-                    print(f"⚠️ Evento no manejado o sin callback para txType '{event_type}'")
+                    self._logger.warning(f"Evento no manejado o sin callback para txType '{event_type}'")
 
             # Callback genérico para todos los mensajes (si existe)
             on_message_cb = self._websocket_callbacks.get('on_message')
@@ -694,93 +886,107 @@ class PumpFunApiClient(metaclass=SingletonMeta):
                 await self._execute_callback(on_message_cb, data, "callback genérico")
 
         except json.JSONDecodeError:
-            print(f"❌ Error decodificando JSON del mensaje: {message[:200]}...")
+            self._logger.error(f"Error decodificando JSON del mensaje: {message[:200]}...")
         except Exception as e:
-            print(f"❌ Error procesando mensaje WebSocket: {e}")
+            self._logger.error(f"Error procesando mensaje WebSocket: {e}")
 
     async def _unsubscribe_all_events(self):
         """
         Desuscribe de todos los eventos activos antes de desconectar
         """
-        if not self._websocket_subscriptions:
+        if not self._websocket or not self._websocket_subscriptions:
             return
 
-        print(f"🔌 Desuscribiendo de {len(self._websocket_subscriptions)} eventos...")
-        
         try:
-            for subscription_json in self._websocket_subscriptions.copy():
+            for subscription_data in self._websocket_subscriptions:
+                subscription_json: Dict[str, Any] = json.loads(subscription_data)
+                method: str = subscription_json.get('method', '')
                 try:
-                    subscription_data: Dict[str, Any] = json.loads(subscription_json)
-                    method: str = subscription_data.get('method', '')
-
                     if method.startswith('subscribe'):
                         # Crear mensaje de desuscripción
                         unsubscribe_method = method.replace('subscribe', 'unsubscribe')
-                        unsubscribe_data = {
+                        unsubscribe_data: Dict[str, Any] = {
                             'method': unsubscribe_method,
-                            'keys': subscription_data.get('keys', [])
+                            'keys': subscription_json.get('keys', [])
                         }
 
                         await self._websocket.send(json.dumps(unsubscribe_data))
-                        print(f"   ✅ Desuscrito de: {method}")
-
-                except json.JSONDecodeError:
-                    print(f"   ⚠️ Error decodificando suscripción: {subscription_json}")
                 except Exception as e:
-                    print(f"   ❌ Error desuscribiendo {method}: {e}")
+                    self._logger.error(f"Error desuscribiendo {method}: {e}")
 
             # Limpiar suscripciones
-            self._websocket_subscriptions.clear()
-            print("✅ Todas las suscripciones desuscritas")
+            if not self._is_reconnecting:
+                self._websocket_subscriptions.clear()
+            self._logger.debug("Todas las suscripciones desuscritas")
 
         except Exception as e:
-            print(f"❌ Error en desuscripción masiva: {e}")
+            self._logger.error(f"Error en desuscripción masiva: {e}")
 
-    async def _reconnect_websocket(self, use_api_key: bool = False):
+    async def _reconnect_websocket(self):
         """
         Reconecta WebSocket automáticamente
         
         Args:
             use_api_key: Si True, reconecta con API key
         """
-        if not self.enable_websocket:
+        if not self._is_running:
             return
 
-        print("🔄 Reconectando WebSocket...")
+        self._logger.debug("Reconectando WebSocket automáticamente...")
+        self._metrics['reconnect_count'] += 1
 
+        reconnect_start = time.time()
         try:
-            await self._disconnect_websocket()
-            await asyncio.sleep(self.retry_delay)
-            await self._connect_websocket(use_api_key=use_api_key)
+            self._is_reconnecting = True
 
-            # Reestablecer suscripciones
-            for subscription in self._websocket_subscriptions:
-                await self._websocket.send(json.dumps(subscription))
+            # Fase 1: Desconectar
+            disconnect_start = time.time()
+            await self.disconnect()
+            disconnect_time = time.time() - disconnect_start
+            self._logger.debug(f"Desconexión completada en {disconnect_time:.6f}s")
+
+            # Fase 2: Esperar delay
+            #await asyncio.sleep(0.1)
+
+            # Fase 3: Reconectar
+            connect_start = time.time()
+            await self.connect()
+            connect_time = time.time() - connect_start
+            self._logger.debug(f"Conexión establecida en {connect_time:.6f}s")
+
+            # Fase 4: Reestablecer suscripciones
+            subscriptions_start = time.time()
+            if self._websocket_subscriptions:
+                self._logger.info(f"Reestableciendo {len(self._websocket_subscriptions)} suscripciones...")
+                for i, subscription in enumerate(self._websocket_subscriptions):
+                    if self._websocket:
+                        try:
+                            await self._websocket.send(subscription)
+                            self._logger.debug(f"Suscripción {i+1}/{len(self._websocket_subscriptions)} reestablecida")
+                        except Exception as e:
+                            self._logger.error(f"Error reestableciendo suscripción {i+1}: {e}")
+                self._logger.info("Suscripciones reestablecidas")
+            else:
+                self._logger.debug("No hay suscripciones que reestablecer")
+            subscriptions_time = time.time() - subscriptions_start
+
+            # Tiempo total de reconexión
+            total_reconnect_time = time.time() - reconnect_start
+
+            self._logger.info(f"Reconexión completada en {total_reconnect_time:.6f}s (desconectar: {disconnect_time:.6f}s, conectar: {connect_time:.6f}s, suscripciones: {subscriptions_time:.6f}s)")
 
         except Exception as e:
-            print(f"❌ Error reconectando WebSocket: {e}")
+            total_reconnect_time = time.time() - reconnect_start
+            self._logger.error(f"Error reconectando WebSocket después de {total_reconnect_time:.6f}s: {e}")
+        finally:
+            self._logger.info("WebSocket reconectado exitosamente")
+            self._is_reconnecting = False
 
     # ============================================================================
     # MÉTODOS DE CONVENIENCIA
     # ============================================================================
 
-    async def http_get(self, endpoint: str, params: Optional[Dict] = None, use_api_key: bool = False, **kwargs) -> Optional[Dict]:
-        """Petición HTTP GET"""
-        return await self.request(ApiType.HTTP, RequestMethod.GET, endpoint, params=params, use_api_key=use_api_key, **kwargs)
-
-    async def http_post(self, endpoint: str, data: Optional[Dict] = None, use_api_key: bool = False, url: Optional[str] = None, **kwargs) -> Optional[Dict]:
-        """Petición HTTP POST"""
-        return await self._http_request(RequestMethod.POST, endpoint, data=data, use_api_key=use_api_key, url=url, **kwargs)
-
-    async def http_post_files(self, endpoint: str, data: Optional[Dict] = None, files: Optional[Dict] = None, use_api_key: bool = False, **kwargs) -> Optional[Dict]:
-        """Petición HTTP POST con archivos"""
-        return await self._http_request_files(RequestMethod.POST, endpoint, data=data, files=files, use_api_key=use_api_key, **kwargs)
-
-    async def http_post_raw(self, endpoint: str, data: Optional[Dict] = None, use_api_key: bool = False, **kwargs) -> Optional[bytes]:
-        """Petición HTTP POST que devuelve bytes crudos"""
-        return await self.request(ApiType.HTTP, RequestMethod.POST, endpoint, data=data, use_api_key=use_api_key, return_json=False, **kwargs)
-
-    async def subscribe(self, method: str, keys: Optional[List[str]] = None, callback: Optional[Callable] = None, use_api_key: bool = False):
+    async def subscribe(self, method: WebSocketMethod, keys: Optional[List[str]] = None, callback: Optional[Callable[[Any], Any]] = None):
         """
         Suscribe a eventos WebSocket
         
@@ -790,20 +996,25 @@ class PumpFunApiClient(metaclass=SingletonMeta):
             callback: Función callback para procesar mensajes
             use_api_key: Si True, usa conexión con API key para PumpSwap data
         """
-        subscription_data = {'method': method}
+        subscription_data: Dict[str, Any] = {'method': method.value}
         if keys:
             subscription_data['keys'] = keys
 
         # Guardar suscripción para reconexiones
-        self._websocket_subscriptions.add(json.dumps(subscription_data))
+        subscription_json = json.dumps(subscription_data)
+        self._websocket_subscriptions.add(subscription_json)
+        self._metrics['subscription_count'] += 1
+
+        self._logger.info(f"Suscribiendo a {method.value} con {len(keys) if keys else 0} claves")
 
         # Registrar callback si se proporciona
         if callback:
-            self._websocket_callbacks[method] = callback
+            self._websocket_callbacks[method.value] = callback
+            self._metrics['callback_count'] += 1
 
-        await self.request(ApiType.WEBSOCKET, method=method, data=subscription_data, callback=callback, use_api_key=use_api_key)
+        await self.websocket_request(method=method.value, data=subscription_data, callback=callback)
 
-    async def unsubscribe(self, method: str, keys: Optional[List[str]] = None):
+    async def unsubscribe(self, method: WebSocketMethod, keys: Optional[List[str]] = None):
         """
         Desuscribe de eventos WebSocket
         
@@ -811,27 +1022,27 @@ class PumpFunApiClient(metaclass=SingletonMeta):
             method: Método de suscripción a desuscribir
             keys: Lista de claves (tokens/cuentas) a desuscribir
         """
-        unsubscribe_method = method.replace('subscribe', 'unsubscribe')
-        unsubscribe_data = {'method': unsubscribe_method}
+        unsubscribe_method = method.value.replace('subscribe', 'unsubscribe')
+        unsubscribe_data: Dict[str, Any] = {'method': unsubscribe_method}
         if keys:
             unsubscribe_data['keys'] = keys
 
         # Remover de suscripciones
-        subscription_json = json.dumps({'method': method, 'keys': keys})
+        subscription_json = json.dumps({'method': method.value, 'keys': keys})
         self._websocket_subscriptions.discard(subscription_json)
 
         # Enviar mensaje de desuscripción
-        await self.request(ApiType.WEBSOCKET, method=unsubscribe_method, data=unsubscribe_data)
+        await self.websocket_request(method=unsubscribe_method, data=unsubscribe_data)
 
-        print(f"✅ Desuscrito de: {method}")
+        self._logger.debug(f"Desuscrito de: {method}")
         if keys:
-            print(f"   📍 Claves: {keys}")
+            self._logger.debug(f"Claves: {keys}")
 
-    def set_global_callback(self, callback: Callable):
+    def set_global_callback(self, callback: Callable[[Any], Any]):
         """Establece callback global para todos los mensajes WebSocket"""
         self._websocket_callbacks['on_message'] = callback
 
-    def set_method_callback(self, method: str, callback: Callable):
+    def set_method_callback(self, method: str, callback: Callable[[Any], Any]):
         """Establece callback específico para un método WebSocket"""
         self._websocket_callbacks[method] = callback
 
@@ -840,8 +1051,8 @@ class PumpFunApiClient(metaclass=SingletonMeta):
         Desuscribe manualmente de todos los eventos activos
         Útil para limpiar suscripciones antes de cambiar de estrategia
         """
-        if not self._is_websocket_connected:
-            print("⚠️ WebSocket no conectado, no hay suscripciones activas")
+        if not self._is_running:
+            self._logger.warning("WebSocket no conectado, no hay suscripciones activas")
             return
 
         await self._unsubscribe_all_events()
@@ -851,86 +1062,81 @@ class PumpFunApiClient(metaclass=SingletonMeta):
     # ============================================================================
 
     def get_status(self) -> Dict[str, Any]:
-        """Obtiene estado actual del cliente"""
-        # Obtener detalles de suscripciones activas
-        subscription_details = []
-        for subscription_json in self._websocket_subscriptions:
-            try:
-                subscription_data = json.loads(subscription_json)
-                subscription_details.append({
-                    'method': subscription_data.get('method', 'unknown'),
-                    'keys': subscription_data.get('keys', [])
-                })
-            except json.JSONDecodeError:
-                subscription_details.append({'method': 'invalid_json', 'keys': []})
+        """Obtiene estado actual del cliente WebSocket"""
 
-        # Estado de la conexión WebSocket
-        websocket_health = {
-            'connected': self._is_websocket_connected,
-            'listener_active': self._listener_task is not None and not self._listener_task.done(),
-            'websocket_object_exists': self._websocket is not None
-        }
+        # Calcular métricas derivadas
+        message_count = self._metrics['message_count'] or 0
+        error_count = self._metrics['error_count'] or 0
+        connection_attempts = self._metrics['connection_attempts'] or 0
+
+        # Calcular uptime
+        uptime_seconds = 0
+        if self._metrics['first_connection_time'] is not None:
+            uptime_seconds = time.time() - self._metrics['first_connection_time']
+
+        # Calcular mensajes por segundo
+        messages_per_second = 0
+        if uptime_seconds > 0:
+            messages_per_second = message_count / uptime_seconds
+
+        # Calcular métricas de trades
+        trade_count = self._metrics['trade_count'] or 0
+        avg_trade_interval = 0.0
+        if trade_count > 1 and self._metrics['total_trade_intervals'] > 0:
+            avg_trade_interval = self._metrics['total_trade_intervals'] / (trade_count - 1)
+
+        min_trade_interval = self._metrics['min_trade_interval'] if self._metrics['min_trade_interval'] != float('inf') else 0
+        max_trade_interval = self._metrics['max_trade_interval'] or 0
 
         return {
-            'websocket_connected': self._is_websocket_connected,
-            'websocket_health': websocket_health,
-            'http_session_active': self._http_session is not None and not self._http_session.closed,
-            'api_key_configured': bool(self.api_key),
-            'request_count': self._request_count,
-            'error_count': self._error_count,
-            'connection_attempts': self._connection_attempts,
-            'websocket_messages_received': self._websocket_message_count,
+            'websocket_connected': self._is_running and self._websocket is not None,
+            'is_running': self._is_running,
+            'api_key_configured': bool(self._api_key),
+            'connection_attempts': connection_attempts,
+            'error_count': error_count,
+            'message_count': message_count,
+            'subscription_count': self._metrics['subscription_count'] or 0,
+            'callback_count': self._metrics['callback_count'] or 0,
+            'reconnect_count': self._metrics['reconnect_count'] or 0,
+            'ping_count': self._metrics['ping_count'] or 0,
+            'inactivity_reconnects': self._metrics['inactivity_reconnects'] or 0,
+            'inactivity_last_check': self._metrics['inactivity_last_check'],
+            'inactivity_triggered': self._metrics['inactivity_triggered'],
             'active_subscriptions': len(self._websocket_subscriptions),
-            'subscription_details': subscription_details,
             'registered_callbacks': len(self._websocket_callbacks),
-            'estimated_cost_sol': self._websocket_message_count * 0.01 / 10000,  # Costo estimado en SOL
-            'performance': {
-                'messages_per_second': self._websocket_message_count / max(1, self._connection_attempts * 60),
-                'error_rate': self._error_count / max(1, self._request_count),
-                'uptime_estimate': 'continuous' if self._is_websocket_connected else 'disconnected'
-            }
+            'messages_per_second': round(messages_per_second, 2),
+            'uptime_seconds': round(uptime_seconds, 2),
+            'first_connection_time': self._metrics['first_connection_time'],
+            'last_message_time': self._metrics['last_message_time'],
+            'websocket_url': self._websocket_base_url,
+            # Métricas de trades
+            'trade_count': trade_count,
+            'last_trade_time': self._metrics['last_trade_time'],
+            'avg_trade_interval_seconds': round(avg_trade_interval, 2),
+            'min_trade_interval_seconds': round(min_trade_interval, 2),
+            'max_trade_interval_seconds': round(max_trade_interval, 2)
         }
 
     def reset_metrics(self):
-        """Resetea métricas del cliente"""
-        self._request_count = 0
-        self._error_count = 0
-        self._connection_attempts = 0
-        self._websocket_message_count = 0
+        """Resetea métricas del cliente WebSocket"""
+        self._metrics['connection_attempts'] = 0
+        self._metrics['error_count'] = 0
+        self._metrics['message_count'] = 0
+        self._metrics['subscription_count'] = 0
+        self._metrics['callback_count'] = 0
+        self._metrics['total_response_time_ms'] = 0.0
+        self._metrics['first_connection_time'] = None
+        self._metrics['last_message_time'] = None
+        self._metrics['reconnect_count'] = 0
+        self._metrics['ping_count'] = 0
+        self._metrics['inactivity_reconnects'] = 0
+        self._metrics['inactivity_last_check'] = None
+        self._metrics['inactivity_triggered'] = False
+        # Resetear métricas de trades
+        self._metrics['trade_count'] = 0
+        self._metrics['last_trade_time'] = None
+        self._metrics['total_trade_intervals'] = 0.0
+        self._metrics['min_trade_interval'] = float('inf')
+        self._metrics['max_trade_interval'] = 0.0
 
-    @classmethod
-    def reset_singleton(cls):
-        """Resetea instancia singleton (útil para testing)"""
-        if cls in cls._instances:
-            del cls._instances[cls]
-
-    async def send_signed_transaction(self, signed_tx: "VersionedTransaction", rpc_endpoint: str) -> str:
-        """
-        Envía una transacción firmada a un endpoint RPC de Solana
-        
-        Args:
-            signed_tx: La transacción VersionedTransaction ya firmada
-            rpc_endpoint: El endpoint RPC de Solana al que se enviará la transacción
-            
-        Returns:
-            La firma de la transacción como string
-        """
-        # Importar solders solo cuando se necesite
-        from solders.commitment_config import CommitmentLevel
-        from solders.rpc.requests import SendVersionedTransaction
-        from solders.rpc.config import RpcSendTransactionConfig
-
-        if not self._http_session:
-            await self._connect_http()
-
-        commitment = CommitmentLevel.Confirmed
-        config = RpcSendTransactionConfig(preflight_commitment=commitment)
-        payload = SendVersionedTransaction(signed_tx, config).to_json()
-
-        async with self._http_session.post(rpc_endpoint, data=payload, headers={"Content-Type": "application/json"}) as response:
-            if response.status == 200:
-                result = await response.json()
-                return result.get('result')
-            else:
-                error_text = await response.text()
-                raise HttpRequestError(f"Error enviando transacción a {rpc_endpoint}: HTTP {response.status} - {error_text}")
+        self._logger.info("Métricas del cliente WebSocket reseteadas")

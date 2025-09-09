@@ -3,8 +3,7 @@
 PumpFun Callbacks - Funciones de callback para procesar eventos de PumpPortal
 Proporciona funciones para formatear y mostrar diferentes tipos de eventos.
 """
-
-from typing import Dict, Any
+from typing import Dict, Any, Final, Callable
 import time
 from datetime import datetime
 
@@ -55,7 +54,7 @@ def print_trade_event(data: Dict[str, Any]) -> None:
     timestamp = data.get('timestamp', time.time() * 1000)
     market_cap = data.get('marketCapSol', 0)
     signature = data.get('signature', 'N/A')
-    
+
     # Determinar emoji y texto según tipo
     type_info = {
         'buy': ('🟢', 'COMPRA'),
@@ -63,7 +62,7 @@ def print_trade_event(data: Dict[str, Any]) -> None:
         'create': ('🆕', 'CREACIÓN'),
         'migrate': ('🔄', 'MIGRACIÓN'),
     }.get(tx_type, ('🔵', tx_type.upper()))
-    
+
     print(f"""
 🎯═══════════════════════════════════════🎯
 {type_info[0]} Tipo: {type_info[1]}
@@ -93,7 +92,7 @@ def print_new_token_event(data: Dict[str, Any]) -> None:
     sol_amount = data.get('solAmount', 0)
     market_cap = data.get('marketCapSol', 0)
     creator = data.get('traderPublicKey', 'N/A')
-    
+
     print(f"""
 ✨═══════════════════════════════════════✨
 🆕 NUEVO TOKEN CREADO
@@ -120,7 +119,7 @@ def print_migration_event(data: Dict[str, Any]) -> None:
     new_mint = data.get('newMint', 'N/A')
     migrator = data.get('traderPublicKey', 'N/A')
     timestamp = data.get('timestamp', time.time() * 1000)
-    
+
     print(f"""
 🔄═══════════════════════════════════════🔄
 ♻️ MIGRACIÓN DE TOKEN
@@ -149,7 +148,7 @@ def default_callback(data: Dict[str, Any]) -> None:
 
 
 # Mapa de callbacks por tipo de evento
-EVENT_CALLBACKS = {
+EVENT_CALLBACKS: Final[Dict[str, Callable[[Dict[str, Any]], None]]] = {
     'subscribeTokenTrade': print_trade_event,
     'subscribeAccountTrade': print_trade_event,
     'subscribeNewToken': print_new_token_event,
