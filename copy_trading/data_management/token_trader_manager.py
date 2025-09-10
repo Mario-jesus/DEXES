@@ -95,7 +95,7 @@ class TokenTraderManager:
                 token_info = await self._fetch_token_info(token_address)
 
                 # Guardar en cache optimizado solo si se obtuvo información válida
-                if token_info:
+                if token_info and token_info.name and token_info.name.strip() not in ('Unknown', '') and token_info.symbol and token_info.symbol.strip() not in ('UNK', ''):
                     await self._trading_data_store.set_token_data(token_address, token_info)
                     self._logger.debug(f"Token {token_address} guardado en cache")
                     return token_info
@@ -106,7 +106,7 @@ class TokenTraderManager:
                         self._logger.debug(f"Retornando datos del cache para {token_address}")
                         return cached_data
 
-                    self._logger.warning(f"No se pudo obtener información del token {token_address}")
+                    self._logger.info(f"No se pudo obtener información del token {token_address} desde la fuente externa")
                     return None
         except Exception as e:
             self._logger.error(f"Error obteniendo información del token {token_address}: {e}")
@@ -1065,7 +1065,7 @@ class TokenTraderManager:
                     self._logger.debug(f"Retornando información existente del cache para {token_address}")
                     return existing_info
                 else:
-                    self._logger.warning(f"No se pudo obtener información del token {token_address}")
+                    self._logger.info(f"No se pudo obtener información del token desde la fuente externa para {token_address}")
                     return None
 
         except Exception as e:
