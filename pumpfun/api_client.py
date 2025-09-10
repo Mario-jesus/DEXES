@@ -3,7 +3,7 @@
 PumpFun API Client - Cliente centralizado para todas las llamadas a APIs
 con soporte async/await, WebSocket y HTTP
 """
-import asyncio, aiohttp, json, websockets, time
+import asyncio, aiohttp, json, websockets, time, random
 from typing import Dict, Any, Optional, Union, Type, Tuple, Callable, List, TYPE_CHECKING
 from solders.commitment_config import CommitmentLevel
 from solders.rpc.requests import SendVersionedTransaction
@@ -467,7 +467,12 @@ class PumpFunWebSocketApiClient():
         websocket_timeout: int = 60,
         max_retries: int = 3,
         retry_delay: float = 1.0,
-        inactivity_watch_seconds: int = 120
+        inactivity_watch_seconds: int = 3600,
+        # Parámetros para reconexión exponencial
+        max_reconnect_attempts: int = 10,
+        base_reconnect_delay: float = 15.0,
+        max_reconnect_delay: float = 300.0,
+        reconnect_jitter: bool = True
     ):
         """
         Inicializa el cliente API
@@ -478,6 +483,11 @@ class PumpFunWebSocketApiClient():
             websocket_timeout: Timeout para WebSocket (segundos)
             max_retries: Máximo número de reintentos
             retry_delay: Delay base entre reintentos
+            inactivity_watch_seconds: Segundos de inactividad antes de reconectar
+            max_reconnect_attempts: Máximo número de intentos de reconexión exponencial
+            base_reconnect_delay: Delay base para reconexión exponencial (segundos)
+            max_reconnect_delay: Delay máximo para reconexión exponencial (segundos)
+            reconnect_jitter: Si True, añade jitter aleatorio para evitar thundering herd
         """
         self._websocket_base_url = websocket_base_url
         self._api_key = api_key
@@ -485,6 +495,12 @@ class PumpFunWebSocketApiClient():
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._background_tasks: set[asyncio.Task[Any]] = set()
+
+        # Parámetros de reconexión exponencial
+        self._max_reconnect_attempts = max_reconnect_attempts
+        self._base_reconnect_delay = base_reconnect_delay
+        self._max_reconnect_delay = max_reconnect_delay
+        self._reconnect_jitter = reconnect_jitter
 
         self._websocket = None
         self._websocket_callbacks: Dict[str, Callable[[Any], Any]] = {}
@@ -494,6 +510,7 @@ class PumpFunWebSocketApiClient():
 
         self._is_running = False
         self._is_reconnecting = False
+        self._reconnect_attempts = 0
 
         self._logger = AppLogger(self.__class__.__name__)
 
@@ -511,10 +528,16 @@ class PumpFunWebSocketApiClient():
             'first_connection_time': None,
             'last_message_time': None,
             'reconnect_count': 0,
+            'reconnect_attempts': 0,
+            'exponential_reconnect_count': 0,
             'ping_count': 0,
+            'ping_failures': 0,
+            'ping_reconnects': 0,
             'inactivity_reconnects': 0,
             'inactivity_last_check': None,
             'inactivity_triggered': False,
+            'last_reconnect_reason': None,
+            'last_reconnect_time': None,
             # Métricas de trades
             'trade_count': 0,
             'last_trade_time': None,
@@ -540,52 +563,90 @@ class PumpFunWebSocketApiClient():
     # MÉTODOS DE CONEXIÓN
     # ============================================================================
 
+    def _calculate_exponential_delay(self, attempt: int) -> float:
+        """
+        Calcula el delay exponencial con jitter para reconexión
+        
+        Args:
+            attempt: Número de intento (0-based)
+            
+        Returns:
+            Delay en segundos
+        """
+        # Calcular delay exponencial: base_delay * (2^attempt)
+        exponential_delay = self._base_reconnect_delay * (2 ** attempt)
+
+        # Limitar al máximo configurado
+        delay = min(exponential_delay, self._max_reconnect_delay)
+
+        # Añadir jitter si está habilitado (hasta 25% de variación)
+        if self._reconnect_jitter:
+            jitter_factor = random.uniform(0.75, 1.25)
+            delay *= jitter_factor
+
+        return delay
+
     async def connect(self):
         if self._is_running:
             return
 
-        try:
-            self._metrics['connection_attempts'] += 1
+        # Implementar reconexión exponencial
+        for attempt in range(self._max_reconnect_attempts):
+            try:
+                self._metrics['connection_attempts'] += 1
+                self._reconnect_attempts = attempt
 
-            if self._metrics['first_connection_time'] is None:
-                self._metrics['first_connection_time'] = time.time()
+                if self._metrics['first_connection_time'] is None:
+                    self._metrics['first_connection_time'] = time.time()
 
-            # Construir URL con o sin API key
-            ws_url = self._websocket_base_url
-            if self._api_key:
-                ws_url = f"{self._websocket_base_url}?api-key={self._api_key}"
+                # Construir URL con o sin API key
+                ws_url = self._websocket_base_url
+                if self._api_key:
+                    ws_url = f"{self._websocket_base_url}?api-key={self._api_key}"
 
-            self._logger.debug(f"Conectando WebSocket... (intento {self._metrics['connection_attempts']})")
-            if self._api_key:
-                self._logger.debug(f"Usando API key para PumpSwap data")
+                self._logger.debug(f"Conectando WebSocket... (intento {attempt + 1}/{self._max_reconnect_attempts})")
+                if self._api_key:
+                    self._logger.debug(f"Usando API key para PumpSwap data")
 
-            self._websocket = await asyncio.wait_for(
-                websockets.connect(
-                    ws_url,
-                    ping_interval=20,
-                    ping_timeout=10,
-                    close_timeout=10
-                ),
-                timeout=self._websocket_timeout
-            )
+                async with asyncio.timeout(self._websocket_timeout):
+                    self._websocket = await websockets.connect(
+                            ws_url,
+                            ping_interval=20,
+                            ping_timeout=10,
+                            close_timeout=10
+                        )
 
-            self._is_running = True
+                self._is_running = True
+                self._reconnect_attempts = 0  # Resetear contador en conexión exitosa
 
-            # Iniciar listener en background
-            self._listener_task = asyncio.create_task(self._websocket_listener())
-            # Iniciar watchdog de inactividad
-            if self._inactivity_task and not self._inactivity_task.done():
-                try:
-                    self._inactivity_task.cancel()
-                    await self._inactivity_task
-                except Exception:
-                    pass
-            self._inactivity_task = asyncio.create_task(self._inactivity_watchdog())
+                # Iniciar listener en background
+                self._listener_task = asyncio.create_task(self._websocket_listener())
+                # Iniciar watchdog de inactividad
+                if self._inactivity_task and not self._inactivity_task.done():
+                    try:
+                        self._inactivity_task.cancel()
+                        await self._inactivity_task
+                    except Exception:
+                        pass
+                self._inactivity_task = asyncio.create_task(self._inactivity_watchdog())
 
-        except Exception as e:
-            self._metrics['error_count'] += 1
-            self._logger.error(f"Error conectando WebSocket: {e}")
-            raise WebSocketConnectionError(f"Error conectando WebSocket: {e}")
+                self._logger.info(f"WebSocket conectado exitosamente en intento {attempt + 1}")
+                return  # Conexión exitosa, salir del bucle
+
+            except Exception as e:
+                self._metrics['error_count'] += 1
+                self._metrics['exponential_reconnect_count'] += 1
+
+                if attempt < self._max_reconnect_attempts - 1:
+                    # Calcular delay exponencial con jitter
+                    delay = self._calculate_exponential_delay(attempt)
+                    self._logger.warning(f"Error conectando WebSocket (intento {attempt + 1}/{self._max_reconnect_attempts}): {e}")
+                    self._logger.info(f"Reintentando en {delay:.2f} segundos...")
+                    await asyncio.sleep(delay)
+                else:
+                    # Último intento fallido
+                    self._logger.error(f"Error conectando WebSocket después de {self._max_reconnect_attempts} intentos: {e}")
+                    raise WebSocketConnectionError(f"Error conectando WebSocket después de {self._max_reconnect_attempts} intentos: {e}")
 
     async def disconnect(self):
         try:
@@ -698,7 +759,12 @@ class PumpFunWebSocketApiClient():
                         break
 
                     # Escuchar mensaje SIN timeout para no perder trades
-                    message = await self._websocket.recv()
+                    try:
+                        async with asyncio.timeout(self._websocket_timeout):
+                            message = await self._websocket.recv()
+                    except asyncio.TimeoutError:
+                        # Timeout normal, continuar
+                        continue
 
                     self._metrics['message_count'] += 1
                     self._metrics['last_message_time'] = time.time()
@@ -728,14 +794,17 @@ class PumpFunWebSocketApiClient():
 
             # Reconectar si es necesario y no fue un cancel explícito ni hay reconexión en curso
             if self._is_running and not was_cancelled and not self._is_reconnecting:
-                await self._reconnect_websocket()
+                await self._reconnect_websocket(reason="listener_error_or_close")
 
     async def _ping_keepalive(self):
         """
         Tarea independiente para mantener la conexión WebSocket viva
         Se ejecuta en paralelo al listener principal
+        Si el ping falla, intenta reconectar el websocket
         """
         ping_interval = 30  # Ping cada 30 segundos
+        consecutive_ping_failures = 0
+        max_consecutive_failures = 3  # Máximo 3 fallos consecutivos antes de reconectar
 
         while self._is_running:
             try:
@@ -745,14 +814,43 @@ class PumpFunWebSocketApiClient():
                     self._metrics['ping_count'] += 1
                     # Enviar ping y esperar pong
                     try:
-                        pong_waiter = await self._websocket.ping()
-                        # Esperar el pong correspondiente
-                        latency = await asyncio.wait_for(pong_waiter, timeout=60)
-                        self._logger.debug(f"Keepalive ping enviado, latency: {latency:.9f} segundos")
+                        async with asyncio.timeout(self._websocket_timeout):
+                            pong_waiter = await self._websocket.ping()
+                            latency = await pong_waiter
+                            self._logger.debug(f"Keepalive ping enviado, latency: {latency:.9f} segundos")
+                            # Resetear contador de fallos en ping exitoso
+                            consecutive_ping_failures = 0
+
                     except asyncio.TimeoutError:
-                        self._logger.warning("Keepalive ping timeout - posible problema de conectividad")
+                        consecutive_ping_failures += 1
+                        self._metrics['ping_failures'] += 1
+                        self._logger.warning(f"Keepalive ping timeout - posible problema de conectividad (fallo {consecutive_ping_failures}/{max_consecutive_failures})")
+
+                        if consecutive_ping_failures >= max_consecutive_failures:
+                            self._logger.warning(f"Demasiados fallos de ping consecutivos ({consecutive_ping_failures}), iniciando reconexión...")
+                            if not self._is_reconnecting:
+                                self._metrics['ping_reconnects'] += 1
+                                await self._reconnect_websocket(reason="ping_timeouts")
+                            consecutive_ping_failures = 0  # Resetear después de reconectar
+
+                    except websockets.ConnectionClosed:
+                        self._logger.warning("WebSocket cerrado durante ping, iniciando reconexión...")
+                        if not self._is_reconnecting:
+                            self._metrics['ping_reconnects'] += 1
+                            await self._reconnect_websocket(reason="ping_connection_closed")
+                        consecutive_ping_failures = 0
+
                     except Exception as e:
-                        self._logger.warning(f"Error en keepalive ping: {e}")
+                        consecutive_ping_failures += 1
+                        self._metrics['ping_failures'] += 1
+                        self._logger.warning(f"Error en keepalive ping: {e} (fallo {consecutive_ping_failures}/{max_consecutive_failures})")
+
+                        if consecutive_ping_failures >= max_consecutive_failures:
+                            self._logger.warning(f"Demasiados fallos de ping consecutivos ({consecutive_ping_failures}), iniciando reconexión...")
+                            if not self._is_reconnecting:
+                                self._metrics['ping_reconnects'] += 1
+                                await self._reconnect_websocket(reason="ping_generic_errors")
+                            consecutive_ping_failures = 0
 
             except asyncio.CancelledError:
                 # Tarea cancelada, salir limpiamente
@@ -763,40 +861,32 @@ class PumpFunWebSocketApiClient():
                 await asyncio.sleep(5)  # Esperar antes de reintentar
 
     async def _inactivity_watchdog(self):
-        """Reinicia la conexión si no llegan mensajes por un período adaptativo basado en patrones de trades"""
+        """Reconecta solo si no hubo trades durante el período mínimo configurado"""
         while self._is_running:
             try:
-                # Calcular tiempo de espera adaptativo
-                avg_trade_interval = 0
-                if self._metrics['trade_count'] > 1 and self._metrics['total_trade_intervals'] > 0:
-                    avg_trade_interval = self._metrics['total_trade_intervals'] / (self._metrics['trade_count'] - 1)
+                # Espera basada en configuración mínima (por ejemplo, 1 hora)
+                wait_seconds = self._inactivity_watch_seconds
+                self._logger.debug(f"Watchdog esperando {wait_seconds:.1f}s (basado en inactividad de trades)")
+                await asyncio.sleep(wait_seconds)
 
-                # Usar el mayor entre: tiempo promedio de trades * 2, o el mínimo configurado
-                adaptive_wait = max(
-                    avg_trade_interval * 2,  # 2x el promedio de trades
-                    self._inactivity_watch_seconds  # Mínimo configurado
-                )
-
-                self._logger.debug(f"Watchdog esperando {adaptive_wait:.1f}s (promedio trades: {avg_trade_interval:.1f}s, mínimo: {self._inactivity_watch_seconds}s)")
-                await asyncio.sleep(adaptive_wait)
-
-                last_time = self._metrics['last_message_time'] or 0
+                # Evaluar inactividad basada en trades
+                last_time = self._metrics['last_trade_time'] or 0
                 now = time.time()
                 self._metrics['inactivity_last_check'] = now
 
-                # Si nunca hubo mensajes y ya pasó el período, también actúa
+                # Si nunca hubo trades y ya pasó el período, también actúa
                 if last_time == 0:
                     last_time = self._metrics['first_connection_time'] or now
 
                 gap = now - last_time
-                if gap >= adaptive_wait:
+                if gap >= wait_seconds:
                     # Reconectar indefinidamente por inactividad
                     self._metrics['inactivity_reconnects'] += 1
                     self._metrics['inactivity_triggered'] = True
                     self._logger.info(
-                        f"Inactividad detectada ({int(gap)}s sin mensajes, umbral: {adaptive_wait:.1f}s). Reconectando WebSocket... (reconexión #{self._metrics['inactivity_reconnects']})"
+                        f"Inactividad detectada ({int(gap)}s sin trades, umbral: {wait_seconds:.1f}s). Reconectando WebSocket... (reconexión #{self._metrics['inactivity_reconnects']})"
                     )
-                    await self._reconnect_websocket()
+                    await self._reconnect_websocket(reason="inactivity_no_trades")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -911,29 +1001,33 @@ class PumpFunWebSocketApiClient():
                         }
 
                         await self._websocket.send(json.dumps(unsubscribe_data))
+                        self._logger.debug(f"Desuscripción enviada para {method}")
+
+                except websockets.ConnectionClosed:
+                    self._logger.debug(f"WebSocket cerrado durante desuscripción de {method}")
+                    break  # Salir del bucle si la conexión se cerró
                 except Exception as e:
-                    self._logger.error(f"Error desuscribiendo {method}: {e}")
+                    self._logger.warning(f"Error desuscribiendo {method}: {e}")
 
             # Limpiar suscripciones
             if not self._is_reconnecting:
                 self._websocket_subscriptions.clear()
-            self._logger.debug("Todas las suscripciones desuscritas")
+            self._logger.debug("Proceso de desuscripción completado")
 
         except Exception as e:
-            self._logger.error(f"Error en desuscripción masiva: {e}")
+            self._logger.warning(f"Error en desuscripción masiva: {e}")
 
-    async def _reconnect_websocket(self):
+    async def _reconnect_websocket(self, reason: str = "unknown"):
         """
-        Reconecta WebSocket automáticamente
-        
-        Args:
-            use_api_key: Si True, reconecta con API key
+        Reconecta WebSocket automáticamente usando sistema de reconexión exponencial
         """
         if not self._is_running:
             return
 
-        self._logger.debug("Reconectando WebSocket automáticamente...")
+        self._logger.debug(f"Reconectando WebSocket automáticamente... (motivo: {reason})")
         self._metrics['reconnect_count'] += 1
+        self._metrics['last_reconnect_reason'] = reason
+        self._metrics['last_reconnect_time'] = time.time()
 
         reconnect_start = time.time()
         try:
@@ -945,16 +1039,15 @@ class PumpFunWebSocketApiClient():
             disconnect_time = time.time() - disconnect_start
             self._logger.debug(f"Desconexión completada en {disconnect_time:.6f}s")
 
-            # Fase 2: Esperar delay
-            #await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
 
-            # Fase 3: Reconectar
+            # Fase 2: Reconectar usando sistema exponencial
             connect_start = time.time()
-            await self.connect()
+            await self.connect()  # Ya incluye el sistema de reconexión exponencial
             connect_time = time.time() - connect_start
             self._logger.debug(f"Conexión establecida en {connect_time:.6f}s")
 
-            # Fase 4: Reestablecer suscripciones
+            # Fase 3: Reestablecer suscripciones
             subscriptions_start = time.time()
             if self._websocket_subscriptions:
                 self._logger.info(f"Reestableciendo {len(self._websocket_subscriptions)} suscripciones...")
@@ -973,7 +1066,7 @@ class PumpFunWebSocketApiClient():
             # Tiempo total de reconexión
             total_reconnect_time = time.time() - reconnect_start
 
-            self._logger.info(f"Reconexión completada en {total_reconnect_time:.6f}s (desconectar: {disconnect_time:.6f}s, conectar: {connect_time:.6f}s, suscripciones: {subscriptions_time:.6f}s)")
+            self._logger.info(f"Reconexión completada en {total_reconnect_time:.6f}s (desconectar: {disconnect_time:.6f}s, conectar: {connect_time:.6f}s, suscripciones: {subscriptions_time:.6f}s) - motivo: {reason}")
 
         except Exception as e:
             total_reconnect_time = time.time() - reconnect_start
@@ -1098,10 +1191,16 @@ class PumpFunWebSocketApiClient():
             'subscription_count': self._metrics['subscription_count'] or 0,
             'callback_count': self._metrics['callback_count'] or 0,
             'reconnect_count': self._metrics['reconnect_count'] or 0,
+            'reconnect_attempts': self._reconnect_attempts,
+            'exponential_reconnect_count': self._metrics['exponential_reconnect_count'] or 0,
             'ping_count': self._metrics['ping_count'] or 0,
+            'ping_failures': self._metrics['ping_failures'] or 0,
+            'ping_reconnects': self._metrics['ping_reconnects'] or 0,
             'inactivity_reconnects': self._metrics['inactivity_reconnects'] or 0,
             'inactivity_last_check': self._metrics['inactivity_last_check'],
             'inactivity_triggered': self._metrics['inactivity_triggered'],
+            'last_reconnect_reason': self._metrics['last_reconnect_reason'],
+            'last_reconnect_time': self._metrics['last_reconnect_time'],
             'active_subscriptions': len(self._websocket_subscriptions),
             'registered_callbacks': len(self._websocket_callbacks),
             'messages_per_second': round(messages_per_second, 2),
@@ -1109,6 +1208,11 @@ class PumpFunWebSocketApiClient():
             'first_connection_time': self._metrics['first_connection_time'],
             'last_message_time': self._metrics['last_message_time'],
             'websocket_url': self._websocket_base_url,
+            # Configuración de reconexión exponencial
+            'max_reconnect_attempts': self._max_reconnect_attempts,
+            'base_reconnect_delay': self._base_reconnect_delay,
+            'max_reconnect_delay': self._max_reconnect_delay,
+            'reconnect_jitter_enabled': self._reconnect_jitter,
             # Métricas de trades
             'trade_count': trade_count,
             'last_trade_time': self._metrics['last_trade_time'],
@@ -1128,15 +1232,24 @@ class PumpFunWebSocketApiClient():
         self._metrics['first_connection_time'] = None
         self._metrics['last_message_time'] = None
         self._metrics['reconnect_count'] = 0
+        self._metrics['reconnect_attempts'] = 0
+        self._metrics['exponential_reconnect_count'] = 0
         self._metrics['ping_count'] = 0
+        self._metrics['ping_failures'] = 0
+        self._metrics['ping_reconnects'] = 0
         self._metrics['inactivity_reconnects'] = 0
         self._metrics['inactivity_last_check'] = None
         self._metrics['inactivity_triggered'] = False
+        self._metrics['last_reconnect_reason'] = None
+        self._metrics['last_reconnect_time'] = None
         # Resetear métricas de trades
         self._metrics['trade_count'] = 0
         self._metrics['last_trade_time'] = None
         self._metrics['total_trade_intervals'] = 0.0
         self._metrics['min_trade_interval'] = float('inf')
         self._metrics['max_trade_interval'] = 0.0
+
+        # Resetear contador de intentos de reconexión
+        self._reconnect_attempts = 0
 
         self._logger.info("Métricas del cliente WebSocket reseteadas")

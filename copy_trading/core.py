@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 import asyncio
 
-from pumpfun.api_client import PumpFunApiClient
+from pumpfun.api_client import PumpFunHttpApiClient, PumpFunWebSocketApiClient
 from pumpfun.transactions import PumpFunTransactions
 from pumpfun.subscriptions import PumpFunSubscriptions
 from pumpfun.wallet_manager import PumpFunWalletStorage, WalletData, WalletImportException
@@ -114,7 +114,8 @@ class CopyTrading:
         self._logger.debug("CopyAmountCalculator inicializado")
 
         # Cliente API centralizado (se configurará en start())
-        self.client: Optional[PumpFunApiClient] = None
+        self.http_client: Optional[PumpFunHttpApiClient] = None
+        self.ws_client: Optional[PumpFunWebSocketApiClient] = None
 
         # Wallet data
         self.wallet_data: Optional[WalletData] = None
@@ -232,9 +233,14 @@ class CopyTrading:
 
             # Conectar cliente API
             self._logger.debug("Conectando cliente API...")
-            self.client = PumpFunApiClient(api_key=self.wallet_data.api_key, enable_websocket=True, enable_http=True)
-            await self.client.connect()
+            self.http_client = PumpFunHttpApiClient(api_key=self.wallet_data.api_key)
+            await self.http_client.connect()
             self._logger.debug("Cliente API conectado")
+
+            # Conectar cliente WebSocket
+            self.ws_client = PumpFunWebSocketApiClient(api_key=self.wallet_data.api_key)
+            await self.ws_client.connect()
+            self._logger.debug("Cliente WebSocket conectado")
 
             # Inicializar SolanaTxAnalyzer
             await self.solana_analyzer.__aenter__()
@@ -250,7 +256,7 @@ class CopyTrading:
             self._logger.debug("BalanceManager inicializado")
 
             # Initialize transaction manager con el cliente centralizado
-            self.transactions_manager = PumpFunTransactions(api_client=self.client)
+            self.transactions_manager = PumpFunTransactions(api_client=self.http_client, api_key=self.wallet_data.api_key)
             self._logger.debug("PumpFunTransactions inicializado")
 
             # Inicializar TransactionExecutor
@@ -271,7 +277,7 @@ class CopyTrading:
             self._logger.debug("Liquidations inicializado")
 
             # Inicializar subscriptions con el cliente centralizado
-            self.subscriptions = PumpFunSubscriptions(api_client=self.client)
+            self.subscriptions = PumpFunSubscriptions(ws_client=self.ws_client)
             self._logger.debug("PumpFunSubscriptions inicializado")
 
             if not self.queue_manager.pending_queue:
@@ -303,7 +309,6 @@ class CopyTrading:
             await self.subscriptions.subscribe_account_trade(
                 account_addresses=trader_addresses,
                 callback=self.trade_processor_callback,
-                use_api_key=True
             )
 
             self._logger.debug(f"Suscrito a {len(self.config.traders)} traders")
@@ -383,10 +388,10 @@ class CopyTrading:
                     self._logger.error(f"Error cerrando BalanceManager: {e}")
 
             # Desconectar API
-            if self.client:
+            if self.http_client:
                 try:
                     self._logger.debug("Desconectando cliente API...")
-                    await self.client.disconnect()
+                    await self.http_client.disconnect()
                     self._logger.debug("Cliente API desconectado")
                 except Exception as e:
                     self._logger.error(f"Error desconectando PumpFunApiClient: {e}")
@@ -454,7 +459,6 @@ class CopyTrading:
                 await self.subscriptions.subscribe_account_trade(
                     account_addresses=[trader.wallet_address for trader in self.config.traders],
                     callback=self.trade_processor_callback,
-                    use_api_key=True
                 )
                 self._logger.debug("Suscripciones actualizadas")
 
@@ -483,7 +487,6 @@ class CopyTrading:
                     await self.subscriptions.subscribe_account_trade(
                         account_addresses=[trader.wallet_address for trader in self.config.traders],
                         callback=self.trade_processor_callback,
-                        use_api_key=True
                     )
                     self._logger.debug("Suscripciones actualizadas")
                 else:
@@ -522,7 +525,7 @@ class CopyTrading:
                     self._logger.warning(f"No se pudo obtener balance: {e}")
 
         # Obtener estado del cliente API centralizado
-        client_status = self.client.get_status() if self.client else None
+        client_status = self.http_client.get_status() if self.http_client else None
 
         # Obtener información del TransactionExecutor
         transaction_info = self.transaction_executor.get_transaction_type_info() if self.transaction_executor else None
@@ -622,8 +625,8 @@ class CopyTrading:
                 self._logger.info(f"  • Volumen total: {vol:.6f} SOL")
 
             # Estadísticas del cliente API
-            if self.client:
-                client_status = self.client.get_status()
+            if self.http_client:
+                client_status = self.http_client.get_status()
                 self._logger.info("📡 Estadísticas del cliente API:")
                 self._logger.info(f"  • Peticiones HTTP: {client_status.get('request_count', 0)}")
                 self._logger.info(f"  • Errores: {client_status.get('error_count', 0)}")
@@ -643,8 +646,8 @@ class CopyTrading:
         self._logger.debug("Información de wallet obtenida")
 
         # Añadir información del cliente API centralizado
-        if self.client:
-            wallet_info['client_status'] = self.client.get_status() # type: ignore
+        if self.http_client:
+            wallet_info['client_status'] = self.http_client.get_status() # type: ignore
             self._logger.debug("Estado del cliente API añadido a la información de wallet")
 
         return wallet_info
@@ -656,18 +659,18 @@ class CopyTrading:
         Returns:
             Estado del cliente API
         """
-        if not self.client:
+        if not self.http_client:
             self._logger.warning("Cliente API no inicializado")
             return {'error': 'Cliente API no inicializado'}
 
-        status = self.client.get_status()
+        status = self.http_client.get_status()
         self._logger.debug("Estado del cliente API obtenido")
         return status
 
     async def reset_client_metrics(self):
         """Resetea las métricas del cliente API centralizado"""
-        if self.client:
-            self.client.reset_metrics()
+        if self.http_client:
+            self.http_client.reset_metrics()
             self._logger.info("Métricas del cliente API reseteadas")
         else:
             self._logger.warning("No se pueden resetear métricas: cliente API no inicializado")

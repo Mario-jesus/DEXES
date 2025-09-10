@@ -120,10 +120,10 @@ class CopyAmountCalculator:
 
             self._logger.debug(f"Actualizados {len(event.processed_open_position_ids)} intentos de cierre de posición")
         except Exception as e:
-            self._logger.error(f"Error al actualizar el estado de los intentos de cierre de posición procesados: {e}")
+            self._logger.error(f"Error al actualizar el estado de los intentos de cierre de posición procesados: {e}", exc_info=True)
 
     async def _on_position_failed(self, event: Union[PositionValidationFailedEvent, PositionExecutionFailedEvent]) -> None:
-        self._logger.warning(f"Posición falló: {event.position_id} para trader {event.trader_wallet} - {type(event).__name__}")
+        self._logger.info(f"Posición falló: {event.position_id} para trader {event.trader_wallet} - {type(event).__name__}")
         position_closure_attempts = self._open_position_closure_attempts[event.trader_wallet, event.token_address]
         for open_position_id, attempt in position_closure_attempts.items():
             if event.position_id == attempt.close_position_id:

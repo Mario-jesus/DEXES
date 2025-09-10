@@ -44,6 +44,13 @@ class BalanceResponse:
     def total_tokens(self) -> int:
         return len(self.tokens)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "owner": self.owner,
+            "tokens": [token._asdict() for token in self.tokens]
+        }
+
 
 @dataclass(slots=True)
 class TransactionAnalysis:
