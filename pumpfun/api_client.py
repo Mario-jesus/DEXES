@@ -755,7 +755,7 @@ class PumpFunWebSocketApiClient():
             while self._is_running:
                 try:
                     if not self._websocket:
-                        # WebSocket desconectado
+                        self._logger.warning("No se encontró el WebSocket")
                         break
 
                     # Escuchar mensaje SIN timeout para no perder trades
@@ -763,7 +763,6 @@ class PumpFunWebSocketApiClient():
                         async with asyncio.timeout(self._websocket_timeout):
                             message = await self._websocket.recv()
                     except asyncio.TimeoutError:
-                        # Timeout normal, continuar
                         continue
 
                     self._metrics['message_count'] += 1
@@ -773,8 +772,8 @@ class PumpFunWebSocketApiClient():
                     task = asyncio.create_task(self._process_websocket_message(message if isinstance(message, str) else message.decode('utf-8')))
                     self._background_tasks.add(task)
                     task.add_done_callback(self._background_tasks.discard)
-                except websockets.ConnectionClosed:
-                    # WebSocket desconectado
+                except websockets.ConnectionClosed as e:
+                    self._logger.warning(f"WebSocket desconectado: {e}")
                     break
                 except asyncio.CancelledError:
                     was_cancelled = True
@@ -833,8 +832,8 @@ class PumpFunWebSocketApiClient():
                                 await self._reconnect_websocket(reason="ping_timeouts")
                             consecutive_ping_failures = 0  # Resetear después de reconectar
 
-                    except websockets.ConnectionClosed:
-                        self._logger.warning("WebSocket cerrado durante ping, iniciando reconexión...")
+                    except websockets.ConnectionClosed as e:
+                        self._logger.warning(f"WebSocket cerrado durante ping, iniciando reconexión...: {e}")
                         if not self._is_reconnecting:
                             self._metrics['ping_reconnects'] += 1
                             await self._reconnect_websocket(reason="ping_connection_closed")
@@ -853,7 +852,6 @@ class PumpFunWebSocketApiClient():
                             consecutive_ping_failures = 0
 
             except asyncio.CancelledError:
-                # Tarea cancelada, salir limpiamente
                 break
             except Exception as e:
                 self._logger.error(f"Error en keepalive ping: {e}")
@@ -944,7 +942,12 @@ class PumpFunWebSocketApiClient():
                 self._logger.info(f"Mensaje del servidor: {data['message']}")
                 return
 
-            event_type = data.get('txType')
+            try:
+                event_type = data['txType']
+            except KeyError:
+                self._logger.error(f"Mensaje no válido: {data}")
+                return
+
             callback = None
 
             # Determinar callback según el tipo de evento
@@ -1003,8 +1006,8 @@ class PumpFunWebSocketApiClient():
                         await self._websocket.send(json.dumps(unsubscribe_data))
                         self._logger.debug(f"Desuscripción enviada para {method}")
 
-                except websockets.ConnectionClosed:
-                    self._logger.debug(f"WebSocket cerrado durante desuscripción de {method}")
+                except websockets.ConnectionClosed as e:
+                    self._logger.debug(f"WebSocket cerrado durante desuscripción de {method}: {e}")
                     break  # Salir del bucle si la conexión se cerró
                 except Exception as e:
                     self._logger.warning(f"Error desuscribiendo {method}: {e}")
