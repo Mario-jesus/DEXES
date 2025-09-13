@@ -65,7 +65,7 @@ class RpcContext:
 @dataclass(slots=True)
 class SignatureNotificationValue:
     """Valor de la notificación de firma."""
-    err: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'unknown']] = None
+    err: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'insufficient_compute_units', 'unknown']] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -113,9 +113,16 @@ class SignatureNotificationValue:
                         and ins_err[1] == "InsufficientFundsForRent"
                     ):
                         type_error = "insufficient_funds_for_rent"
+                    elif (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], str)
+                        and ins_err[1] in ("ProgramFailedToComplete", "ComputationalBudgetExceeded")
+                    ):    
+                        type_error = "insufficient_compute_units"
 
                     if type_error is None:
-                        if code_error == 6002:
+                        if code_error in (6002, 6004):
                             type_error = "slippage"
                         elif code_error == 6023:
                             type_error = "insufficient_tokens"
@@ -125,7 +132,7 @@ class SignatureNotificationValue:
                             type_error = "unknown"
                     _logger.debug(f"[SignatureNotificationValue] type_error mapeado: {type_error}")
             elif (isinstance(err_data, str) and
-                err_data in ["slippage", "insufficient_tokens", "insufficient_lamports", "insufficient_funds_for_rent", "unknown"]):
+                err_data in ["slippage", "insufficient_tokens", "insufficient_lamports", "insufficient_funds_for_rent", "insufficient_compute_units", "unknown"]):
                 _logger.debug(f"[SignatureNotificationValue] err_data es string conocido: {err_data}")
                 type_error = err_data
             elif err_data is not None:
@@ -229,7 +236,7 @@ class SignatureNotification:
         return isinstance(self.result.value, str) and self.result.value == "receivedSignature"
 
     @property
-    def error(self) -> Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'unknown']]:
+    def error(self) -> Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'insufficient_compute_units', 'unknown']]:
         """Obtiene el error si existe."""
         if not self.result or isinstance(self.result.value, str):
             return None

@@ -157,7 +157,7 @@ class AnalysisPositionQueue:
 
     async def _handle_error_position(self,
         position: Position,
-        error_kind: Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"],
+        error_kind: Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "insufficient_compute_units", "unknown"],
         error_message: Optional[str] = None
     ) -> None:
         """
@@ -172,7 +172,7 @@ class AnalysisPositionQueue:
             for position in positions_removed:
                 await self._notify_analysis_finished(position, ProcessedAnalysisResult(
                     success=False,
-                    error_kind=error_kind,
+                    error_kind=cast(Optional[Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"]], error_kind),
                     error_message=error_message
                 ))
 
@@ -702,12 +702,12 @@ class AnalysisPositionQueue:
                             return
 
                         # Si no fue exitoso, verificar si es un error que no debe reintentarse
-                        if transaction_analysis and transaction_analysis.error_kind in ["slippage", "insufficient_tokens", "insufficient_lamports", "insufficient_funds_for_rent"]:
+                        if transaction_analysis and transaction_analysis.error_kind in ["slippage", "insufficient_tokens", "insufficient_lamports", "insufficient_funds_for_rent", "insufficient_compute_units"]:
                             self._logger.debug(f"Posición {position.id} con error no reintentable: {transaction_analysis.error_kind}")
                             await self._handle_error_position(
                                 position=position,
                                 error_kind=cast(
-                                    Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"],
+                                    Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "insufficient_compute_units", "unknown"],
                                     transaction_analysis.error_kind
                                 ),
                                 error_message=transaction_analysis.error_message
@@ -720,13 +720,13 @@ class AnalysisPositionQueue:
                             error_kind = transaction_analysis.error_kind if transaction_analysis else "unknown"
                             message = transaction_analysis.error_message if transaction_analysis else "Error después de múltiples reintentos"
 
-                            if error_kind not in ["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent"]:
+                            if error_kind not in ["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "insufficient_compute_units"]:
                                 error_kind = "unknown"
 
                             await self._handle_error_position(
                                 position=position,
                                 error_kind=cast(
-                                    Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"],
+                                    Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "insufficient_compute_units", "unknown"],
                                     error_kind
                                 ),
                                 error_message=message

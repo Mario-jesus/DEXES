@@ -215,6 +215,12 @@ class CopyTrading:
             # Inyectar open_position_queue a amount_calculator
             self.amount_calculator.set_open_position_queue(self.queue_manager.open_queue)
 
+            # Inicializar NotificationManager
+            if self.notification_manager:
+                self._logger.debug("Inicializando NotificationManager...")
+                await self.notification_manager.start()
+                self._logger.debug("NotificationManager inicializado")
+
             # Cargar datos completos de la wallet usando WalletManager
             try:
                 self._logger.debug(f"Cargando wallet desde: {self.config.wallet_file}")
@@ -321,10 +327,12 @@ class CopyTrading:
 
             # Notificar inicio del sistema
             if self.notification_manager:
-                await self.notification_manager.notify_system(
-                    "Sistema iniciado correctamente",
-                    "success"
+                status_msg = (
+                    f"Sistema iniciado correctamente\n"
+                    f"- Modo: {'🔄 DRY RUN' if self.config.dry_run else '🚀 LIVE'}\n"
+                    f"- Traders: 👥 {len(self.config.traders)}"
                 )
+                await self.notification_manager.notify_system(status_msg, "success")
 
             # Lanzar el loop de procesamiento de posiciones pendientes
             if not self._pending_task:
@@ -346,6 +354,19 @@ class CopyTrading:
         """Detiene el sistema"""
         try:
             self._logger.info("Deteniendo sistema Copy Trading")
+            # Desuscribir y desconectar WebSocket de PumpFun para detener pings
+            try:
+                if self.subscriptions:
+                    self._logger.debug("Desconectando cliente WebSocket de PumpFun...")
+                    await self.subscriptions.disconnect()
+                    self._logger.debug("Cliente WebSocket de PumpFun desconectado")
+                elif self.ws_client:
+                    self._logger.debug("Desconectando cliente WebSocket de PumpFun...")
+                    await self.ws_client.disconnect()
+                    self._logger.debug("Cliente WebSocket de PumpFun desconectado")
+            except Exception as e:
+                self._logger.error(f"Error desconectando WebSocket de PumpFun: {e}")
+
             # Cerrar callback
             if self.trade_processor_callback:
                 await self.trade_processor_callback.shutdown()
@@ -418,6 +439,11 @@ class CopyTrading:
                 )
                 await self.notification_manager.notify_system(stats_msg, "stopped")
 
+                # Cerrar NotificationManager
+                self._logger.debug("Cerrando NotificationManager...")
+                await self.notification_manager.stop()
+                self._logger.debug("NotificationManager cerrado")
+
             # Cancelar el loop de procesamiento de posiciones pendientes
             if self._pending_task:
                 self._logger.debug("Cancelando loop de posiciones pendientes...")
@@ -447,7 +473,7 @@ class CopyTrading:
             trader_address: Dirección del wallet del trader
         """
         self._logger.info(f"Añadiendo trader: {trader_address[:8]}...")
-        
+
         trader_info = self.config.get_trader_info(trader_address)
         if not trader_info:
             trader_info = self.config.add_trader_by_wallet_address(trader_address)
@@ -474,7 +500,7 @@ class CopyTrading:
             trader_address: Dirección del wallet del trader
         """
         self._logger.info(f"Eliminando trader: {trader_address[:8]}...")
-        
+
         trader_info = self.config.get_trader_info(trader_address)
         if trader_info:
             self.config.remove_trader_info(trader_info)

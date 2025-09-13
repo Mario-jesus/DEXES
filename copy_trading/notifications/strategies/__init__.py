@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Módulo de estrategias de notificaciones para copy_trading_mini
+Módulo de estrategias de notificaciones para copy_trading
 """
 from .console_strategy import ConsoleStrategy
-from .telegram_strategy import TelegramStrategy, TelegramPrintBot
-from .base_strategy import BaseNotificationStrategy, NotificationStrategy
+from .telegram_strategy import TelegramStrategy
+from .base_strategy import BaseNotificationStrategy
 
 __all__ = [
     "BaseNotificationStrategy",
-    "NotificationStrategy", 
     "ConsoleStrategy",
-    "TelegramStrategy", 
-    "TelegramPrintBot"
+    "TelegramStrategy"
 ]

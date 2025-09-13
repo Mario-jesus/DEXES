@@ -59,7 +59,7 @@ class TransactionAnalysis:
     """
     success: bool
     op_type: Optional[str] = None
-    error_kind: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'invalid_transaction_format', 'transaction_not_found', 'insufficient_funds_for_rent', 'unknown']] = None
+    error_kind: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'invalid_transaction_format', 'transaction_not_found', 'insufficient_funds_for_rent', 'insufficient_compute_units', 'unknown']] = None
     error_message: Optional[str] = None
     token_ui_delta: Optional[str] = None
     bonding_curve_sol_delta: Optional[str] = None
@@ -78,7 +78,7 @@ class SignatureStatus:
     confirmations: Optional[int]
     slot: int
     success: bool
-    type_error: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'unknown']] = None
+    type_error: Optional[Literal['slippage', 'insufficient_tokens', 'insufficient_lamports', 'insufficient_funds_for_rent', 'insufficient_compute_units', 'unknown']] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -135,9 +135,17 @@ class SignatureStatus:
                     ):
                         type_error = "insufficient_funds_for_rent"
                         _logger.debug(f"[SignatureStatus.from_dict] InsufficientFundsForRent string dentro de InstructionError detectado")
+                    elif (
+                        isinstance(ins_err, list)
+                        and len(ins_err) > 1
+                        and isinstance(ins_err[1], str)
+                        and ins_err[1] in ("ProgramFailedToComplete", "ComputationalBudgetExceeded")
+                    ):
+                        type_error = "insufficient_compute_units"
+                        _logger.debug(f"[SignatureStatus.from_dict] Falta de unidades de cómputo detectado: {ins_err[1]}")
 
                     if type_error is None:
-                        if code_error == 6002:
+                        if code_error in (6002, 6004):
                             type_error = "slippage"
                         elif code_error == 6023:
                             type_error = "insufficient_tokens"

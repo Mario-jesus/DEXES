@@ -104,7 +104,7 @@ class PositionAnalysisEvent(BasePositionEvent):
 class PositionAnalysisFinishedEvent(BasePositionEvent):
     success: bool = False
     position_type: Literal["open", "close"] = "open"
-    error_kind: Optional[Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"]] = None
+    error_kind: Optional[Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "insufficient_compute_units", "unknown"]] = None
     error_message: Optional[str] = None
 
 

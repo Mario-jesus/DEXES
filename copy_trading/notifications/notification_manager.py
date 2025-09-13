@@ -21,29 +21,120 @@ class NotificationManager:
         try:
             self._strategies: Dict[str, BaseNotificationStrategy] = {}
             self._logger = AppLogger(self.__class__.__name__)
+            self._is_running = False
 
             # Registrar estrategias iniciales
             if strategies:
                 for strategy in strategies:
                     self.add_strategy(strategy.__class__.__name__, strategy)
 
-            self._logger.debug(f"NotificationManager inicializado con {len(self._strategies)} estrategias")
+            self._logger.debug(f"NotificationManager configurado con {len(self._strategies)} estrategias")
         except Exception as e:
             print(f"Error inicializando NotificationManager: {e}")
             raise
 
-    def add_strategy(self, name: str, strategy: BaseNotificationStrategy) -> None:
-        """Añade una estrategia de notificación"""
+    @property
+    def is_running(self) -> bool:
+        """Indica si el gestor de notificaciones está corriendo"""
+        return self._is_running
+
+    async def start(self) -> None:
+        """
+        Inicializa todas las estrategias de notificación registradas
+        """
         try:
+            for strategy_name, strategy in self._strategies.items():
+                try:
+                    await strategy.initialize()
+                    self._logger.debug(f"Estrategia {strategy_name} inicializada correctamente")
+                except Exception as e:
+                    self._logger.error(f"Error inicializando estrategia {strategy_name}: {e}")
+                    # Continuar con las demás estrategias aunque una falle
+                    continue
+
+            self._is_running = True
+            self._logger.debug(f"NotificationManager iniciado correctamente con {len(self._strategies)} estrategias")
+
+        except Exception as e:
+            self._logger.error(f"Error inicializando NotificationManager: {e}")
+            raise
+
+    async def stop(self) -> None:
+        """
+        Cierra todas las estrategias de notificación registradas
+        """
+        try:
+            self._logger.debug("Cerrando NotificationManager...")
+
+            # Cerrar estrategias primero
+            for strategy_name, strategy in self._strategies.items():
+                try:
+                    await strategy.shutdown()
+                    self._logger.debug(f"Estrategia {strategy_name} cerrada correctamente")
+                except Exception as e:
+                    self._logger.error(f"Error cerrando estrategia {strategy_name}: {e}")
+                    # Continuar cerrando las demás estrategias aunque una falle
+                    continue
+
+            # Cambiar estado después de cerrar las estrategias
+            self._is_running = False
+
+            self._logger.debug("NotificationManager cerrado correctamente")
+
+        except Exception as e:
+            self._logger.error(f"Error cerrando NotificationManager: {e}")
+            raise
+
+    def add_strategy(self, name: str, strategy: BaseNotificationStrategy) -> None:
+        """Añade una estrategia de notificación (solo registro, no inicializa)"""
+        try:
+            if self._is_running:
+                self._logger.warning(f"Estrategia {name} no se puede agregar si el manager está corriendo. Use add_and_initialize_strategy() para inicializar inmediatamente.")
+                return
+
             self._strategies[name] = strategy
             self._logger.debug(f"Estrategia agregada: {name}")
         except Exception as e:
             self._logger.error(f"Error agregando estrategia {name}: {e}")
 
-    def remove_strategy(self, name: str) -> None:
+    async def add_and_initialize_strategy(self, name: str, strategy: BaseNotificationStrategy) -> None:
+        """Añade una estrategia de notificación y la inicializa si el manager está corriendo"""
+        try:
+            self._strategies[name] = strategy
+            self._logger.debug(f"Estrategia agregada: {name}")
+
+            # Si el manager ya está corriendo, inicializar la nueva estrategia inmediatamente
+            if self._is_running:
+                self._logger.debug(f"Inicializando nueva estrategia {name}...")
+                try:
+                    await strategy.initialize()
+                    self._logger.debug(f"Estrategia {name} inicializada correctamente")
+                except Exception as e:
+                    self._logger.error(f"Error inicializando estrategia {name}: {e}")
+                    # Remover la estrategia si falla la inicialización
+                    del self._strategies[name]
+                    raise
+            else:
+                self._logger.debug(f"Estrategia {name} registrada, se inicializará cuando el manager se inicie")
+
+        except Exception as e:
+            self._logger.error(f"Error agregando e inicializando estrategia {name}: {e}")
+            raise
+
+    async def remove_strategy(self, name: str) -> None:
         """Elimina una estrategia de notificación"""
         try:
             if name in self._strategies:
+                strategy = self._strategies[name]
+
+                # Cerrar la estrategia antes de removerla si está corriendo
+                if self._is_running and hasattr(strategy, 'is_running') and strategy.is_running:
+                    self._logger.debug(f"Cerrando estrategia {name} antes de removerla...")
+                    try:
+                        await strategy.shutdown()
+                    except Exception as e:
+                        self._logger.error(f"Error cerrando estrategia {name} antes de remover: {e}")
+
                 del self._strategies[name]
                 self._logger.debug(f"Estrategia removida: {name}")
             else:
@@ -83,11 +174,20 @@ class NotificationManager:
             level: Nivel de la notificación (info, success, warning, error, critical)
             **kwargs: Argumentos adicionales para las estrategias
         """
+        if not self._is_running:
+            self._logger.warning("NotificationManager no está corriendo, no se puede enviar notificación")
+            return
+
         try:
             self._logger.debug(f"Enviando notificación {level} a {len(self._strategies)} estrategias")
 
             for strategy_name, strategy in self._strategies.items():
                 try:
+                    # Verificar que la estrategia esté corriendo antes de enviar
+                    if hasattr(strategy, 'is_running') and not strategy.is_running:
+                        self._logger.warning(f"Estrategia {strategy_name} no está corriendo, saltando notificación")
+                        continue
+
                     await strategy.send_notification(message, level)
                     self._logger.debug(f"Notificación enviada exitosamente a {strategy_name}")
                 except Exception as e:
@@ -106,6 +206,10 @@ class NotificationManager:
             trade_data: Datos del trade a notificar
         """
         try:
+            if not self._is_running:
+                self._logger.warning("NotificationManager no está corriendo, no se puede enviar notificación")
+                return
+
             self._logger.debug("Procesando notificación de trade")
 
             # Determinar el tipo de trade
@@ -244,6 +348,10 @@ class NotificationManager:
             context: Contexto adicional del error
         """
         try:
+            if not self._is_running:
+                self._logger.warning("NotificationManager no está corriendo, no se puede enviar notificación")
+                return
+
             self._logger.debug("Procesando notificación de error")
 
             message = f"❌ Error: {str(error)}"
@@ -265,6 +373,10 @@ class NotificationManager:
             level: Nivel de la notificación (info, success, warning, error)
         """
         try:
+            if not self._is_running:
+                self._logger.warning("NotificationManager no está corriendo, no se puede enviar notificación")
+                return
+
             self._logger.debug("Procesando notificación del sistema")
 
             # Formatear mensaje con emojis

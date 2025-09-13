@@ -18,32 +18,10 @@ class BaseNotificationStrategy(ABC):
         """
         self.config = config
 
+    @property
     @abstractmethod
-    async def send_notification(self, message: str, notification_type: str = "info") -> None:
-        """
-        Envía una notificación
-        
-        Args:
-            message: Mensaje a enviar
-            notification_type: Tipo de la notificación (info, success, warning, error, etc.)
-        """
-        pass
-
-
-# Mantener compatibilidad con código existente
-class NotificationStrategy(BaseNotificationStrategy):
-    """Alias para compatibilidad con código existente"""
-
-    @abstractmethod
-    async def send_notification(self, message: str, level: str = "info", **kwargs) -> None:
-        """
-        Envía una notificación
-        
-        Args:
-            message: Mensaje a enviar
-            level: Nivel de la notificación
-            **kwargs: Argumentos adicionales específicos de la estrategia
-        """
+    def is_running(self) -> bool:
+        """Indica si la estrategia está corriendo"""
         pass
 
     @abstractmethod
@@ -54,4 +32,15 @@ class NotificationStrategy(BaseNotificationStrategy):
     @abstractmethod
     async def shutdown(self) -> None:
         """Cierra la estrategia"""
+        pass
+
+    @abstractmethod
+    async def send_notification(self, message: str, notification_type: str = "info") -> None:
+        """
+        Envía una notificación
+        
+        Args:
+            message: Mensaje a enviar
+            notification_type: Tipo de la notificación (info, success, warning, error, etc.)
+        """
         pass

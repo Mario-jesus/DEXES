@@ -100,36 +100,41 @@ class CopyAmountCalculator:
         """
         Actualiza el estado de los intentos de cierre de posición procesados
         """
-        self._logger.debug(f"Procesando evento de cierre de posición: {event.position_id} para trader {event.trader_wallet}")
+        self._logger.info(f"Procesando evento de cierre de posición: {event.position_id} para trader {event.trader_wallet} (token: {event.token_address})")
         try:
             async with self._lock:
+                cache = self._open_position_closure_attempts[event.trader_wallet, event.token_address]
                 for index, open_position_id in enumerate(event.processed_open_position_ids):
-                    if open_position_id in self._open_position_closure_attempts[event.trader_wallet, event.token_address]:
+                    if open_position_id not in cache:
+                        self._logger.debug(f"Intento de cierre no encontrado para posición {open_position_id} en evento {event.position_id}; omitiendo actualización")
                         continue
 
-                    attempt = self._open_position_closure_attempts[event.trader_wallet, event.token_address][open_position_id]
+                    attempt = cache[open_position_id]
                     if index == len(event.processed_open_position_ids) - 1 and event.last_partial_closure:
                         attempt.status = "partially_closed"
+                        self._logger.debug(f"Posición {open_position_id} marcada como parcialmente cerrada por evento {event.position_id}")
                     elif event.status == "success":
                         attempt.status = "closed"
+                        self._logger.debug(f"Posición {open_position_id} marcada como cerrada exitosamente por evento {event.position_id}")
                     else:
                         attempt.status = "failed"
+                        self._logger.warning(f"Posición {open_position_id} marcada como fallida por evento {event.position_id}")
 
                     attempt.close_position_id = event.position_id
-                    self._open_position_closure_attempts[event.trader_wallet, event.token_address][open_position_id] = attempt
+                    cache[open_position_id] = attempt
 
-            self._logger.debug(f"Actualizados {len(event.processed_open_position_ids)} intentos de cierre de posición")
+            self._logger.info(f"Actualizados {len(event.processed_open_position_ids)} intentos de cierre de posición para evento {event.position_id}")
         except Exception as e:
-            self._logger.error(f"Error al actualizar el estado de los intentos de cierre de posición procesados: {e}", exc_info=True)
+            self._logger.error(f"Error al actualizar el estado de los intentos de cierre de posición procesados para evento {event.position_id}: {e}", exc_info=True)
 
     async def _on_position_failed(self, event: Union[PositionValidationFailedEvent, PositionExecutionFailedEvent]) -> None:
-        self._logger.info(f"Posición falló: {event.position_id} para trader {event.trader_wallet} - {type(event).__name__}")
+        self._logger.warning(f"Posición falló: {event.position_id} para trader {event.trader_wallet} (token: {event.token_address}) - {type(event).__name__}")
         position_closure_attempts = self._open_position_closure_attempts[event.trader_wallet, event.token_address]
         for open_position_id, attempt in position_closure_attempts.items():
             if event.position_id == attempt.close_position_id:
                 attempt.status = "failed"
                 position_closure_attempts[open_position_id] = attempt
-                self._logger.debug(f"Marcado intento de cierre como fallido: {open_position_id}")
+                self._logger.warning(f"Marcado intento de cierre como fallido: {open_position_id} por evento {event.position_id}")
                 break
 
     def calculate_copy_amount(self, trade_data: TraderTradeData) -> str:
@@ -137,10 +142,7 @@ class CopyAmountCalculator:
         Calcula el monto a copiar basado en la configuración usando Decimal
         
         Args:
-            trader_wallet: Dirección del trader
-            original_amount: Monto original del trade (como string)
-            action: Accion del trade (buy o sell)
-            denominate_in_sol: Si el monto se debe denominar en SOL
+            trade_data: Datos del trade del trader con ID único
             
         Returns:
             Monto calculado para copiar (como string)
@@ -148,35 +150,43 @@ class CopyAmountCalculator:
         Exceptions:
             ValueError: Si el trader no se encuentra o no se puede calcular el monto
         """
-        # Validar y preparar contexto
-        context = self._prepare_calculation_context(
-            position_id=trade_data.id,
-            trader_wallet=trade_data.trader_wallet,
-            token_address=trade_data.token_address,
-            original_amount=trade_data.amount_sol if trade_data.side == 'buy' else trade_data.token_amount,
-            action=trade_data.side,
-            denominate_in_sol=True if trade_data.side == 'buy' else False
-        )
+        trade_id = trade_data.id
+        self._logger.info(f"Iniciando cálculo de monto para trade {trade_id} - Trader: {trade_data.trader_wallet[:8]}..., Acción: {trade_data.side}, Token: {trade_data.token_address[:8]}...")
+        
+        try:
+            # Validar y preparar contexto
+            context = self._prepare_calculation_context(
+                position_id=trade_id,
+                trader_wallet=trade_data.trader_wallet,
+                token_address=trade_data.token_address,
+                original_amount=trade_data.amount_sol if trade_data.side == 'buy' else trade_data.token_amount,
+                action=trade_data.side,
+                denominate_in_sol=True if trade_data.side == 'buy' else False
+            )
 
-        # Determinar modo de cálculo
-        mode = self._determine_calculation_mode(context)
-        self._logger.debug(f"Modo de cálculo determinado: {mode.value}")
+            # Determinar modo de cálculo
+            mode = self._determine_calculation_mode(context)
+            self._logger.debug(f"Trade {trade_id}: Modo de cálculo determinado: {mode.value}")
 
-        # Calcular monto base según el modo
-        copy_amount = self._calculate_base_amount(context, mode)
-        self._logger.debug(f"Monto base calculado: {copy_amount}")
+            # Calcular monto base según el modo
+            copy_amount = self._calculate_base_amount(context, mode)
+            self._logger.debug(f"Trade {trade_id}: Monto base calculado: {copy_amount}")
 
-        # Aplicar límites de posición
-        copy_amount = self._apply_position_limits(context, copy_amount)
-        self._logger.debug(f"Monto final después de límites: {copy_amount}")
+            # Aplicar límites de posición
+            copy_amount = self._apply_position_limits(context, copy_amount)
+            self._logger.debug(f"Trade {trade_id}: Monto final después de límites: {copy_amount}")
 
-        # Formatear resultado
-        result = format(copy_amount, "f")
+            # Formatear resultado
+            result = format(copy_amount, "f")
 
-        # Logging
-        self._logger.debug(f"Monto calculado para trader {trade_data.trader_wallet}: {result} (modo: {mode.value}, acción: {trade_data.side})")
+            # Logging de éxito
+            self._logger.info(f"Trade {trade_id}: Monto calculado exitosamente - {result} SOL (modo: {mode.value}, acción: {trade_data.side}, trader: {trade_data.trader_wallet})")
 
-        return result
+            return result
+
+        except Exception as e:
+            self._logger.error(f"Trade {trade_id}: Error al calcular monto - {str(e)} (trader: {trade_data.trader_wallet}, acción: {trade_data.side})", exc_info=True)
+            raise
 
     def _prepare_calculation_context(self,
         position_id: str,
@@ -191,7 +201,9 @@ class CopyAmountCalculator:
         Prepara el contexto de cálculo validando la configuración
         
         Args:
+            position_id: ID único del trade
             trader_wallet: Dirección del trader
+            token_address: Dirección del token
             original_amount: Monto original como string
             action: Accion del trade (buy o sell)
             denominate_in_sol: Si el monto se debe denominar en SOL
@@ -204,11 +216,11 @@ class CopyAmountCalculator:
         # Validar trader
         trader_info = self._global_config.get_trader_info(trader_wallet)
         if not trader_info:
-            error_msg = f"Trader not found: {trader_wallet}"
+            error_msg = f"Trade {position_id}: Trader no encontrado: {trader_wallet}"
             self._logger.error(error_msg)
             raise ValueError(error_msg)
 
-        self._logger.debug(f"Trader encontrado: {trader_wallet}, acción: {action}, monto original: {original_amount}")
+        self._logger.debug(f"Trade {position_id}: Trader encontrado - {trader_wallet[:8]}..., acción: {action}, monto original: {original_amount}, token: {token_address[:8]}...")
 
         trader_config = self._global_config.get_trader_config(trader_info)
         original_amount_dec = Decimal(original_amount)
@@ -235,7 +247,10 @@ class CopyAmountCalculator:
             Modo de cálculo a utilizar
         """
         if context.trader_config and context.trader_config.amount_mode:
+            self._logger.debug(f"Trade {context.position_id}: Usando modo de cálculo individual: {context.trader_config.amount_mode.value}")
             return context.trader_config.amount_mode
+
+        self._logger.debug(f"Trade {context.position_id}: Usando modo de cálculo global: {context.global_config.amount_mode.value}")
         return context.global_config.amount_mode
 
     def _calculate_base_amount(self, context: CalculationContext, mode: AmountMode) -> Decimal:
@@ -255,10 +270,10 @@ class CopyAmountCalculator:
             strategy = self._calculation_strategies_for_sell.get(mode)
 
         if not strategy:
-            self._logger.warning(f"Modo de cálculo no reconocido: {mode}, usando EXACT")
+            self._logger.warning(f"Trade {context.position_id}: Modo de cálculo no reconocido: {mode}, usando EXACT")
             return context.original_amount
 
-        self._logger.debug(f"Aplicando estrategia de cálculo: {strategy.__name__}")
+        self._logger.debug(f"Trade {context.position_id}: Aplicando estrategia de cálculo: {strategy.__name__} para acción {context.action}")
 
         return strategy(context)
 
@@ -286,17 +301,16 @@ class CopyAmountCalculator:
     def _calculate_fixed_amount_to_sell(self, context: CalculationContext) -> Decimal:
         """Calcula monto fijo independiente del original"""
         if not self._open_position_queue:
-            self._logger.warning("No hay cola de posiciones abiertas disponible para cálculo de venta")
+            self._logger.warning(f"Trade {context.position_id}: No hay cola de posiciones abiertas disponible para cálculo de venta")
             return Decimal('0')
 
         self._logger.debug(
-            f"Calculando monto fijo para venta: trader={context.trader_wallet}, token={context.token_address}, "
-            f"position_id={getattr(context, 'position_id', None)}"
+            f"Trade {context.position_id}: Calculando monto fijo para venta - trader={context.trader_wallet}, token={context.token_address}"
         )
 
         positions_to_sell = self._open_position_queue.get_open_positions(context.trader_wallet, context.token_address)
         self._logger.debug(
-            f"Obtenidas {len(positions_to_sell)} posiciones abiertas para vender "
+            f"Trade {context.position_id}: Obtenidas {len(positions_to_sell)} posiciones abiertas para vender "
             f"(trader={context.trader_wallet}, token={context.token_address})"
         )
 
@@ -304,7 +318,7 @@ class CopyAmountCalculator:
 
         for idx, position in enumerate(positions_to_sell):
             self._logger.debug(
-                f"Procesando posición {idx+1}/{len(positions_to_sell)}: id={position.id}, "
+                f"Trade {context.position_id}: Procesando posición {idx+1}/{len(positions_to_sell)}: id={position.id}, "
                 f"status={getattr(position, 'status', None)}, "
                 f"is_fully_closed={getattr(position, 'is_fully_closed', lambda: None)()}"
             )
@@ -313,48 +327,48 @@ class CopyAmountCalculator:
             if position.id in closure_attempts:
                 attempt_to_close = closure_attempts[position.id]
                 self._logger.debug(
-                    f"Intento previo de cierre encontrado para posición {position.id}: status={attempt_to_close.status}"
+                    f"Trade {context.position_id}: Intento previo de cierre encontrado para posición {position.id}: status={attempt_to_close.status}"
                 )
                 if attempt_to_close.status in ["pending", "closed"]:
-                    self._logger.debug(f"Saltando posición {position.id} con estado {attempt_to_close.status}")
+                    self._logger.debug(f"Trade {context.position_id}: Saltando posición {position.id} con estado {attempt_to_close.status}")
                     continue
 
             if position.status == PositionStatus.OPEN:
                 remaining_tokens = Decimal(PositionCalculationService.calculate_remaining_tokens(position, exact=True))
                 self._logger.debug(
-                    f"Posición {position.id} está ABIERTA. Tokens restantes para cerrar: {remaining_tokens}"
+                    f"Trade {context.position_id}: Posición {position.id} está ABIERTA. Tokens restantes para cerrar: {remaining_tokens}"
                 )
                 close_tokens_amount += remaining_tokens
                 self._logger.debug(
-                    f"Registrando intento de cierre para posición {position.id} (open). close_position_id={context.position_id}"
+                    f"Trade {context.position_id}: Registrando intento de cierre para posición {position.id} (open). close_position_id={context.position_id}"
                 )
                 self._open_position_closure_attempts[context.trader_wallet, context.token_address][position.id] = OpenPositionClosureAttempt(
                     close_position_id=context.position_id
                 )
                 self._logger.debug(
-                    f"Agregada posición abierta {position.id}: {remaining_tokens} tokens. "
+                    f"Trade {context.position_id}: Agregada posición abierta {position.id}: {remaining_tokens} tokens. "
                     f"Total acumulado: {close_tokens_amount}"
                 )
                 break
             elif not position.is_fully_closed():
                 remaining_tokens = Decimal(PositionCalculationService.calculate_remaining_tokens(position, exact=True))
                 self._logger.debug(
-                    f"Posición {position.id} está PARCIALMENTE CERRADA. Tokens restantes para cerrar: {remaining_tokens}"
+                    f"Trade {context.position_id}: Posición {position.id} está PARCIALMENTE CERRADA. Tokens restantes para cerrar: {remaining_tokens}"
                 )
                 close_tokens_amount += remaining_tokens
                 self._logger.debug(
-                    f"Registrando intento de cierre para posición {position.id} (partial). close_position_id={context.position_id}"
+                    f"Trade {context.position_id}: Registrando intento de cierre para posición {position.id} (partial). close_position_id={context.position_id}"
                 )
                 self._open_position_closure_attempts[context.trader_wallet, context.token_address][position.id] = OpenPositionClosureAttempt(
                     close_position_id=context.position_id
                 )
                 self._logger.debug(
-                    f"Agregada posición parcialmente cerrada {position.id}: {remaining_tokens} tokens. "
+                    f"Trade {context.position_id}: Agregada posición parcialmente cerrada {position.id}: {remaining_tokens} tokens. "
                     f"Total acumulado: {close_tokens_amount}"
                 )
 
         self._logger.debug(
-            f"Monto total calculado para venta (trader={context.trader_wallet}, token={context.token_address}): {close_tokens_amount} tokens"
+            f"Trade {context.position_id}: Monto total calculado para venta (trader={context.trader_wallet}, token={context.token_address}): {close_tokens_amount} tokens"
         )
         return close_tokens_amount
 
@@ -368,17 +382,17 @@ class CopyAmountCalculator:
         # Obtener parámetros de distribución
         distribution_params = self._get_distribution_parameters(context)
         if not distribution_params:
-            error_msg = "No se puede calcular el monto a copiar en modo DISTRIBUTED, no se encontró la configuración del trader o la configuración global"
+            error_msg = f"Trade {context.position_id}: No se puede calcular el monto a copiar en modo DISTRIBUTED, no se encontró la configuración del trader o la configuración global"
             self._logger.error(error_msg)
             raise ValueError(error_msg)
 
-        self._logger.debug(f"Parámetros de distribución: {distribution_params}")
+        self._logger.debug(f"Trade {context.position_id}: Parámetros de distribución: {distribution_params}")
 
         # Calcular monto distribuido
         balance_per_token = distribution_params['max_amount_to_invest'] / distribution_params['max_open_tokens']
         distributed_amount = balance_per_token / distribution_params['max_open_positions_per_token']
 
-        self._logger.debug(f"Cálculo distribuido: balance por token={balance_per_token}, monto distribuido={distributed_amount}")
+        self._logger.debug(f"Trade {context.position_id}: Cálculo distribuido - balance por token={balance_per_token}, monto distribuido={distributed_amount}")
         return distributed_amount
 
     def _calculate_distributed_amount_to_sell(self, context: CalculationContext) -> Decimal:
@@ -438,19 +452,19 @@ class CopyAmountCalculator:
         original_amount = amount
         amount = self._apply_max_limit(context, amount)
         if amount != original_amount:
-            self._logger.debug(f"Aplicado límite máximo: {original_amount} -> {amount}")
+            self._logger.debug(f"Trade {context.position_id}: Aplicado límite máximo: {original_amount} -> {amount}")
 
         # Aplicar límite mínimo
         original_amount = amount
         amount = self._apply_min_limit(context, amount)
         if amount != original_amount:
-            self._logger.debug(f"Aplicado límite mínimo: {original_amount} -> {amount}")
+            self._logger.debug(f"Trade {context.position_id}: Aplicado límite mínimo: {original_amount} -> {amount}")
 
         exp = Decimal("0.000000001" if context.denominate_in_sol else "0.000001")
         final_amount = amount.quantize(exp, rounding=ROUND_DOWN).normalize()
 
         if final_amount != amount:
-            self._logger.debug(f"Redondeado monto: {amount} -> {final_amount} (precisión: {exp})")
+            self._logger.debug(f"Trade {context.position_id}: Redondeado monto: {amount} -> {final_amount} (precisión: {exp})")
 
         return final_amount
 

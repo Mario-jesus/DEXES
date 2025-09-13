@@ -48,19 +48,18 @@ class ConsoleStrategy(BaseNotificationStrategy):
             print(f"Error inicializando ConsoleStrategy: {e}")
             raise
 
+    @property
+    def is_running(self) -> bool:
+        """Indica si la estrategia está corriendo"""
+        return True
+
     async def initialize(self) -> None:
         """No requiere inicialización"""
-        try:
-            self._logger.debug("ConsoleStrategy no requiere inicialización")
-        except Exception as e:
-            self._logger.error(f"Error en initialize de ConsoleStrategy: {e}")
+        pass
 
     async def shutdown(self) -> None:
         """No requiere limpieza"""
-        try:
-            self._logger.debug("ConsoleStrategy no requiere limpieza")
-        except Exception as e:
-            self._logger.error(f"Error en shutdown de ConsoleStrategy: {e}")
+        pass
 
     async def send_notification(self, message: str, level: str = "info") -> None:
         """
