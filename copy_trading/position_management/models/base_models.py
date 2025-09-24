@@ -81,12 +81,22 @@ class TraderTradeData:
 class PositionTraderTradeData:
     """Clase que envuelve TraderTradeData con funcionalidad de copy trading"""
 
-    def __init__(self, trader_trade_data: TraderTradeData, copy_amount_sol: str="", copy_amount_tokens: str="", is_liquidation: bool=False):
+    def __init__(
+        self,
+        trader_trade_data: TraderTradeData,
+        copy_amount_sol: str="",
+        copy_amount_tokens: str="",
+        denominate_in_sol: bool=True,
+        is_liquidation: bool=False,
+        **kwargs
+    ):
         self._trader_trade_data = trader_trade_data
         self._copy_amount_sol = copy_amount_sol
         self._copy_amount_tokens = copy_amount_tokens
+        self._denominate_in_sol = denominate_in_sol
         self._created_at = datetime.now()
         self._is_liquidation = is_liquidation
+        self._metadata = kwargs
 
     @property
     def id(self) -> str:
@@ -101,6 +111,10 @@ class PositionTraderTradeData:
     def copy_amount_tokens(self) -> str:
         """Calcula el monto de tokens a copiar basado en la configuración"""
         return self._copy_amount_tokens
+
+    @property
+    def denominate_in_sol(self) -> bool:
+        return self._denominate_in_sol
 
     @property
     def is_liquidation(self) -> bool:
@@ -133,6 +147,18 @@ class PositionTraderTradeData:
     @property
     def created_at(self) -> datetime:
         return self._created_at
+
+    def get_metadata(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+        return self._metadata.get(key, default)
+
+    def add_metadata(self, key: str, value: Any, max_metadata_size: int = 1000) -> None:
+        if len(self._metadata) >= max_metadata_size:
+            # Eliminar las claves más antiguas (primeras 10)
+            keys_to_remove = list(self._metadata.keys())[:10]
+            for key_to_remove in keys_to_remove:
+                del self._metadata[key_to_remove]
+
+        self._metadata[key] = value
 
     def get_sol_per_token_price(self) -> str:
         """Calcula el precio SOL por token con validación para evitar división por cero"""
@@ -173,7 +199,9 @@ class PositionTraderTradeData:
             'trader_trade_data': serialize_for_json(trader_data_dict),
             'copy_amount_sol': self._copy_amount_sol,
             'copy_amount_tokens': self._copy_amount_tokens,
-            'created_at': self._created_at.isoformat()
+            'denominate_in_sol': self._denominate_in_sol,
+            'created_at': self._created_at.isoformat(),
+            'metadata': self._metadata
         }
 
     @classmethod
@@ -186,7 +214,9 @@ class PositionTraderTradeData:
         return cls(
             trader_trade_data=TraderTradeData.from_dict(trader_data_dict),
             copy_amount_sol=data['copy_amount_sol'],
-            copy_amount_tokens=data['copy_amount_tokens']
+            copy_amount_tokens=data['copy_amount_tokens'],
+            denominate_in_sol=data['denominate_in_sol'],
+            **data['metadata']
         )
 
 
@@ -274,7 +304,7 @@ class Position:
 
         self.metadata[key] = value
 
-    def get_metadata(self, key: str, default: Any = None) -> Any:
+    def get_metadata(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
         return self.metadata.get(key, default)
 
     def get_is_analyzed(self) -> bool:

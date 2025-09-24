@@ -109,7 +109,9 @@ class CopyTrading:
 
         self.amount_calculator = CopyAmountCalculator(
             config=config,
-            position_event_bus=self.position_event_bus
+            position_event_bus=self.position_event_bus,
+            solana_analyzer=self.solana_analyzer,
+            balance_manager=self.balance_manager
         )
         self._logger.debug("CopyAmountCalculator inicializado")
 

@@ -361,6 +361,8 @@ class OpenPositionQueue:
 
     async def handle_failed_position(self, position: OpenPosition, event: PositionAnalysisFinishedEvent) -> None:
         try:
+            self._logger.debug(f"Manejando resultado del análisis de posición {event.position_id}")
+
             if not event.success:
                 error_kind = event.error_kind
                 if error_kind == "slippage":
@@ -381,6 +383,7 @@ class OpenPositionQueue:
                 else:
                     self._logger.warning(f"Position {position.id} not removed from open positions queue")
 
+                self._logger.debug(f"Notificando resultado del análisis de posición {position.id}")
                 await self._notify_position(position)
 
         except Exception as e:
@@ -421,6 +424,8 @@ class OpenPositionQueue:
         try:
             if event.position_type != "open":
                 return
+
+            self._logger.debug(f"Manejando resultado del análisis de posición {event.position_id}")
 
             positions = self.get_open_positions(
                 trader_address=event.trader_wallet,

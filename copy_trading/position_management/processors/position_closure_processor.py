@@ -90,7 +90,7 @@ class PositionClosureProcessor:
         Returns:
             Tuple:
                 - bool: True si el cierre fue exitoso, False si falló completamente.
-                - List[str]: Lista de IDs de posiciones abiertas cerradas.
+                - List[str]: Lista de IDs de posiciones abiertas cerradas completa o parcialmente.
                 - bool: True si la última posición fue un cierre parcial, False si fue cierre total.
         """
         if not close_position.trader_trade_data:
@@ -106,7 +106,7 @@ class PositionClosureProcessor:
         )
 
         last_partial_closure = False
-        positions_closed_ids = []
+        processed_open_position_ids = []
 
         while close_amount_tokens_remaining > 0:
 
@@ -150,7 +150,7 @@ class PositionClosureProcessor:
 
                 was_removed = await self.complete_position_closure(open_position)
                 if was_removed:
-                    positions_closed_ids.append(open_position.id)
+                    processed_open_position_ids.append(open_position.id)
                 last_partial_closure = False
 
                 close_amount_tokens_remaining -= open_amount_tokens_remaining
@@ -171,6 +171,7 @@ class PositionClosureProcessor:
                 )
                 open_position.add_close(close_position_partial)
                 self.position_calculation_service.update_position_status_after_close(open_position)
+                processed_open_position_ids.append(open_position.id)
                 last_partial_closure = True
             else:
                 self._logger.debug(
@@ -180,6 +181,7 @@ class PositionClosureProcessor:
                 close_position.status = ClosePositionStatus.SUCCESS
                 open_position.add_close(close_position)
                 self.position_calculation_service.update_position_status_after_close(open_position)
+                processed_open_position_ids.append(open_position.id)
                 last_partial_closure = True
 
             if close_amount_tokens_remaining == open_amount_tokens_remaining:
@@ -188,7 +190,7 @@ class PositionClosureProcessor:
                 )
                 was_removed = await self.complete_position_closure(open_position)
                 if was_removed:
-                    positions_closed_ids.append(open_position.id)
+                    processed_open_position_ids.append(open_position.id)
                 last_partial_closure = False
             else:
                 self._logger.debug(
@@ -224,12 +226,12 @@ class PositionClosureProcessor:
                 f"No se encontró la posición abierta para cerrar el resto de la posición."
             )
             await self._notify_position(close_position_partial)
-            return False, positions_closed_ids, last_partial_closure
+            return False, processed_open_position_ids, last_partial_closure
 
         self._logger.info(
-            f"Cierre de posición {close_position.id} completado exitosamente. Posiciones procesadas: {positions_closed_ids}"
+            f"Cierre de posición {close_position.id} completado exitosamente. Posiciones procesadas: {processed_open_position_ids}"
         )
-        return True, positions_closed_ids, last_partial_closure
+        return True, processed_open_position_ids, last_partial_closure
 
     async def complete_position_closure(self, position: OpenPosition) -> bool:
         """

@@ -171,14 +171,15 @@ class TradeProcessorCallback:
         """Procesa un trade de manera asíncrona con todas las validaciones"""
         try:
             # Calcular montos de copia
-            copy_amount = self._amount_calculator.calculate_copy_amount(trade_data)
+            copy_amount, context = await self._amount_calculator.calculate_copy_amount(trade_data)
 
             # Validación avanzada (operación lenta)
             is_valid, validation_checks = await self.validation_engine.validate_trade(
                 trader_wallet=trade_data.trader_wallet,
                 token_address=trade_data.token_address,
-                amount_sol=copy_amount if trade_data.side == 'buy' else "",
-                amount_tokens=copy_amount if trade_data.side == 'sell' else "",
+                amount_sol=copy_amount if context.denominate_in_sol else "",
+                amount_tokens=copy_amount if not context.denominate_in_sol else "",
+                denominate_in_sol=context.denominate_in_sol,
                 side=trade_data.side
             )
 
@@ -206,8 +207,12 @@ class TradeProcessorCallback:
 
             position = PositionTraderTradeData(
                 trader_trade_data=trade_data,
-                copy_amount_sol=copy_amount if trade_data.side == 'buy' else "",
-                copy_amount_tokens=copy_amount if trade_data.side == 'sell' else ""
+                copy_amount_sol=copy_amount if context.denominate_in_sol else "",
+                copy_amount_tokens=copy_amount if not context.denominate_in_sol else "",
+                denominate_in_sol=context.denominate_in_sol,
+                trader_balance_used=format(context.trader_balance, "f") if context.trader_balance else None,
+                own_balance_used=format(context.own_balance, "f") if context.own_balance else None,
+                original_percentage=context.original_percentage
             )
 
             # Encolar posición

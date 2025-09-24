@@ -27,16 +27,19 @@ from ..position_management.services import (
 )
 
 
+
 class PositionNotificationCallback:
     """
     Callback especializado para notificaciones de posiciones.
     Procesa diferentes tipos de eventos y envía notificaciones apropiadas.
     """
 
-    def __init__(self, 
-                    notification_manager: Optional[NotificationManager] = None,
-                    trading_data_fetcher: Optional[TradingDataFetcher] = None,
-                    token_trader_manager: Optional[TokenTraderManager] = None):
+    def __init__(
+        self,
+        notification_manager: Optional[NotificationManager] = None,
+        trading_data_fetcher: Optional[TradingDataFetcher] = None,
+        token_trader_manager: Optional[TokenTraderManager] = None
+    ):
         """
         Inicializa el callback de notificaciones.
         
@@ -56,7 +59,7 @@ class PositionNotificationCallback:
         self.position_calculation_service = PositionCalculationService()
 
         # Cache de precios de SOL en USD
-        self.sol_price_usd_cache: TTLCache = TTLCache(maxsize=1, ttl=60)
+        self.sol_price_usd_cache: TTLCache[str, str] = TTLCache(maxsize=1, ttl=300)
 
         # Estadísticas
         self.stats = {
@@ -248,14 +251,22 @@ class PositionNotificationCallback:
     async def _get_sol_price_usd(self) -> Optional[str]:
         """Obtiene el precio del SOL en USD"""
         if not self.trading_data_fetcher:
-            self._logger.debug("TradingDataFetcher no disponible para obtener precio SOL/USD")
-            return None
+            self._logger.warning("TradingDataFetcher no está disponible para obtener el precio SOL/USD")
+            return
 
         if "sol_price_usd" not in self.sol_price_usd_cache:
-            self._logger.debug("Obteniendo precio SOL/USD del cache")
-            self.sol_price_usd_cache["sol_price_usd"] = await self.trading_data_fetcher.get_sol_price_usd()
+            self._logger.info("Precio SOL/USD no encontrado en cache, solicitando a TradingDataFetcher")
+            sol_price_usd = await self.trading_data_fetcher.get_sol_price_usd()
+            if sol_price_usd:
+                self.sol_price_usd_cache["sol_price_usd"] = sol_price_usd
+                self._logger.debug(f"Precio SOL/USD obtenido y almacenado en cache: {sol_price_usd}")
+            else:
+                self._logger.error("No se pudo obtener el precio SOL/USD desde TradingDataFetcher")
+                return
+        else:
+            self._logger.debug(f"Precio SOL/USD obtenido del cache: {self.sol_price_usd_cache['sol_price_usd']}")
 
-        return self.sol_price_usd_cache.get("sol_price_usd")
+        return self.sol_price_usd_cache["sol_price_usd"]
 
     async def _calculate_pnl_and_register_trader_stats(self, position: OpenPosition) -> Dict[str, str]:
         """Calcula el P&L de una posición
@@ -366,6 +377,12 @@ class PositionNotificationCallback:
 
             self._logger.debug(f"amount_sol: {amount_sol}, amount_tokens: {amount_tokens}, total_cost_sol: {position.total_cost_sol}, fee_sol: {position.fee_sol}")
 
+            sol_price_usd = await self._get_sol_price_usd()
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+
+            # Obtener información de porcentajes
+            percentage_info = await self._get_percentage_info(position)
+
             message = (
                 f"🟢 <b>Position Opened</b>\n\n"
                 f"📊 <b>Trade Summary</b>\n"
@@ -381,10 +398,11 @@ class PositionNotificationCallback:
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
                 f"🔑 <b>ID:</b> {position.id[:8]}...\n"
-                f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
+                f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"🧾 <b>Fee:</b> {self._format_amount(position.total_cost_sol)} SOL\n\n"
 
+                f"{percentage_info}"
                 f"⏰ <b>Time:</b> {position.executed_at.strftime('%Y-%m-%d %H:%M:%S') if position.executed_at else 'N/A'}"
             )
 
@@ -414,7 +432,7 @@ class PositionNotificationCallback:
                 self._logger.warning(f"Position data issues: {validation['issues']}")
 
             # Obtener precio del SOL en USD
-            #sol_price_usd = await self._get_sol_price_usd()
+            sol_price_usd = await self._get_sol_price_usd()
 
             # Calcular métricas usando el servicio de cálculo de posición
             total_closed_sol, total_closed_tokens = self.position_calculation_service.calculate_total_closed_amounts(position)
@@ -450,6 +468,9 @@ class PositionNotificationCallback:
             original_amount = position.amount_sol_executed
             original_amount_tokens = position.amount_tokens_executed
 
+            original_amount_usd = float(original_amount) * float(sol_price_usd) if sol_price_usd else 0.0
+            total_closed_sol_usd = float(total_closed_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
             pnl_with_costs_indicator = '🟢' if total_pnl_sol_with_costs > 0 else '🔴'
@@ -473,8 +494,8 @@ class PositionNotificationCallback:
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
                 f"🔑 <b>ID:</b> {position.id[:8]}...\n"
-                f"📥 <b>Original SOL:</b> {self._format_amount(original_amount)} SOL\n"
-                f"📤 <b>Received SOL:</b> {self._format_amount(total_closed_sol)} SOL\n"
+                f"📥 <b>Original SOL:</b> {self._format_amount(original_amount)} SOL ({self._format_amount(original_amount_usd)} USD)\n"
+                f"📤 <b>Received SOL:</b> {self._format_amount(total_closed_sol)} SOL ({self._format_amount(total_closed_sol_usd)} USD)\n"
                 f"🪙 <b>Original Tokens:</b> {self._format_amount(original_amount_tokens)} Tokens\n"
                 f"🪙 <b>Received Tokens:</b> {self._format_amount(total_closed_tokens)} Tokens\n\n"
 
@@ -523,6 +544,9 @@ class PositionNotificationCallback:
             amount_tokens = position.amount_tokens_executed
             error_message = position.message_error
 
+            sol_price_usd = await self._get_sol_price_usd()
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+
             message = (
                 f"❌ <b>Trade Opening Failed</b>\n\n"
                 f"📊 <b>Trade Summary</b>\n"
@@ -538,7 +562,7 @@ class PositionNotificationCallback:
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
                 f"🔑 <b>ID:</b> {position.id[:8]}...\n"
-                f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
+                f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
 
@@ -569,11 +593,18 @@ class PositionNotificationCallback:
             executed_at = close_position.created_at
             signature = close_position.signature
 
+            sol_price_usd = await self._get_sol_price_usd()
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+            self._logger.debug(f"Amount SOL USD: {amount_sol_usd}")
+
             if not close_position.is_liquidation:
                 trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
                 trader_info_message += f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
             else:
                 trader_info_message = "⚡ Automatic liquidation by the system\n\n"
+
+            # Obtener información de porcentajes
+            percentage_info = await self._get_percentage_info(close_position)
 
             message = (
                 f"🟡 <b>Partial Close Success</b>\n\n"
@@ -589,9 +620,10 @@ class PositionNotificationCallback:
                 f"💰 <b>Close Details</b>\n"
                 f"{'─'*12}\n"
                 f"🔑 <b>ID:</b> {position_id[:8]}...\n"
-                f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
+                f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n\n"
 
+                f"{percentage_info}"
                 f"⏰ <b>Time:</b> {executed_at.strftime('%Y-%m-%d %H:%M:%S') if executed_at else 'N/A'}"
             )
 
@@ -620,6 +652,9 @@ class PositionNotificationCallback:
             executed_at = close_position.created_at
             signature = close_position.signature
 
+            sol_price_usd = await self._get_sol_price_usd()
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+
             if not close_position.is_liquidation:
                 trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
                 trader_info_message += f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
@@ -640,7 +675,7 @@ class PositionNotificationCallback:
                 f"💰 <b>Close Details</b>\n"
                 f"{'─'*12}\n"
                 f"🔑 <b>ID:</b> {position_id[:8]}...\n"
-                f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL\n"
+                f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
 
@@ -703,6 +738,48 @@ class PositionNotificationCallback:
         except Exception as e:
             self._logger.error(f"Error formateando valor '{value}': {e}")
             return '0'
+
+    async def _get_percentage_info(self, position: Union[OpenPosition, ClosePosition, SubClosePosition]) -> str:
+        try:
+            if isinstance(position, SubClosePosition):
+                trader_balance_used = position.close_position.get_metadata("trader_balance_used")
+                own_balance_used = position.close_position.get_metadata("own_balance_used")
+                original_percentage = position.close_position.get_metadata("original_percentage")
+                amount_sol = position.close_position.amount_sol_executed
+            else:
+                trader_balance_used = position.get_metadata("trader_balance_used")
+                own_balance_used = position.get_metadata("own_balance_used")
+                original_percentage = position.get_metadata("original_percentage")
+                amount_sol = position.amount_sol_executed
+
+            if not trader_balance_used or not own_balance_used or not original_percentage:
+                self._logger.debug("Trader balance, own balance or original percentage is None")
+                return ""
+
+            sol_price_usd = await self._get_sol_price_usd()
+
+            trader_balance_used_usd = float(trader_balance_used) * float(sol_price_usd) if sol_price_usd else 0.0
+            own_balance_used_usd = float(own_balance_used) * float(sol_price_usd) if sol_price_usd else 0.0
+
+            applied_percentage = (
+                (Decimal(amount_sol) / Decimal(own_balance_used)) * Decimal("100")
+            ).quantize(Decimal("0.000001"), rounding=ROUND_DOWN).normalize()
+
+            original_percentage = (
+                Decimal(original_percentage) * Decimal("100")
+            ).quantize(Decimal("0.000001"), rounding=ROUND_DOWN).normalize()
+
+            return (
+                f"📈 <b>Percentage Info</b>\n"
+                f"{'─'*12}\n"
+                f"🎯 <b>Trader balance:</b> {float(trader_balance_used):.6f} SOL ({trader_balance_used_usd:.2f} USD)\n"
+                f"💼 <b>Own balance:</b> {float(own_balance_used):.6f} SOL ({own_balance_used_usd:.2f} USD)\n"
+                f"🔢 <b>Original pct:</b> {original_percentage}%\n"
+                f"⚡ <b>Applied pct:</b> {format(applied_percentage, "f")}%\n\n"
+            )
+        except Exception as e:
+            self._logger.error(f"Error en notificación de porcentaje: {e}")
+            return ""
 
     def get_stats(self) -> Dict[str, Any]:
         """Obtiene estadísticas del callback"""

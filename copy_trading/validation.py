@@ -106,6 +106,7 @@ class ValidationEngine:
         token_address: str, 
         amount_sol: str,
         amount_tokens: str,
+        denominate_in_sol: bool,
         side: str
     ) -> Tuple[bool, List[ValidationCheck]]:
         """
@@ -116,6 +117,7 @@ class ValidationEngine:
             token_address: Dirección del token
             amount_sol: Monto en SOL
             amount_tokens: Monto en tokens
+            denominate_in_sol: Si el monto se debe denominar en SOL
             side: 'buy' o 'sell'
             
         Returns:
@@ -135,7 +137,7 @@ class ValidationEngine:
         try:
             # Ejecutar validaciones concurrentes
             checks, failed_checks, cancelled_tasks = await self._execute_concurrent_validations(
-                trader_wallet, token_address, amount_sol, amount_tokens, side
+                trader_wallet, token_address, amount_sol, amount_tokens, denominate_in_sol, side
             )
 
             # Procesar resultados y estadísticas
@@ -173,6 +175,7 @@ class ValidationEngine:
         token_address: str,
         amount_sol: str,
         amount_tokens: str,
+        denominate_in_sol: bool,
         side: str
     ) -> Tuple[List[ValidationCheck], List[ValidationCheck], List[str]]:
         """
@@ -188,7 +191,7 @@ class ValidationEngine:
         try:
             async with TaskGroup() as tg:
                 # Crear tareas para todas las validaciones
-                tasks = self._create_validation_tasks(tg, trader_wallet, token_address, amount_sol, amount_tokens, side)
+                tasks = self._create_validation_tasks(tg, trader_wallet, token_address, amount_sol, amount_tokens, denominate_in_sol, side)
 
                 # Monitorear y procesar resultados
                 checks, failed_checks, cancelled_tasks = await self._monitor_validation_tasks(tasks)
@@ -210,6 +213,7 @@ class ValidationEngine:
         token_address: str,
         amount_sol: str,
         amount_tokens: str,
+        denominate_in_sol: bool,
         side: str
     ) -> Dict[str, asyncio.Task[ValidationCheck]]:
         """Crea las tareas de validación para ejecutar concurrentemente."""
@@ -218,7 +222,7 @@ class ValidationEngine:
         }
 
         # Agregar validación de token balance solo para ventas
-        if side == "buy":
+        if denominate_in_sol:
             tasks['sol_balance'] = tg.create_task(self.check_sol_balance(amount_sol))
             tasks['position_size'] = tg.create_task(self.check_position_size(amount_sol, trader_wallet))
             tasks['max_amount'] = tg.create_task(self.check_max_amount_to_invest_per_trader(trader_wallet, amount_sol, side))
@@ -229,7 +233,7 @@ class ValidationEngine:
             tasks['max_tokens'] = tg.create_task(self.check_max_open_tokens_per_trader(trader_wallet, token_address, side))
             tasks['max_positions'] = tg.create_task(self.check_max_open_positions_per_token_per_trader(trader_wallet, token_address, side))
             tasks['amount'] = tg.create_task(self.check_amount(amount_sol))
-        elif side == "sell":
+        else:
             tasks['token_balance'] = tg.create_task(self.check_token_balance(token_address, amount_tokens))
             tasks['amount'] = tg.create_task(self.check_amount(amount_tokens))
         return tasks
@@ -315,11 +319,15 @@ class ValidationEngine:
             global_budget_str = getattr(self.config, 'general_available_balance_to_invest', "0.0") or "0.0"
             global_budget = Decimal(global_budget_str)
 
-            pct = Decimal(getattr(self.config, 'min_global_available_balance_threshold_percent', "1.0"))
+            pct = Decimal(getattr(self.config, 'min_global_available_balance_threshold_percent', "1.0") or "0.0")
 
             # Si no hay presupuesto global (>0), no aplica el umbral
             if global_budget <= 0:
                 check.passthrough(f"Umbral {format(pct, 'f')}% no aplicable: general_available_balance_to_invest <= 0")
+                return check
+
+            if pct == 0:
+                check.passthrough(f"Umbral {format(pct, 'f')}% no aplicable: pct == 0")
                 return check
 
             # Leer balance
@@ -603,6 +611,157 @@ class ValidationEngine:
         except Exception as e:
             self._logger.error(f"Error verificando tamaño de posición para {trader_wallet}: {e}")
             check.fail("Error al verificar tamaño de posición", {'error': str(e), 'trader_wallet': trader_wallet})
+
+        return check
+
+    async def check_position_size_percentage(self, amount_sol: str, trader_wallet: str) -> ValidationCheck:
+        """Verifica que el tamaño de la posición esté dentro de los límites porcentuales configurados.
+        Considera: min_position_size_percentage, max_position_size_percentage y adjust_position_size.
+        Prioriza configuración del trader sobre la global.
+        """
+        check = ValidationCheck(name="PositionSizePercentageCheck")
+
+        # Si no hay percentiles configurados, no aplica esta validación
+        if (
+            self._should_skip_validation(trader_wallet, 'min_position_size_percentage') and
+            self._should_skip_validation(trader_wallet, 'max_position_size_percentage')
+        ):
+            check.passthrough("Validación de tamaño de posición por porcentaje no configurada")
+            return check
+
+        try:
+            # Base de cálculo: preferimos balance onchain si hay BalanceManager; si no, usamos presupuesto global configurado
+            base_source = 'config'
+            if self.balance_manager:
+                try:
+                    balance_sol_str = await self.balance_manager.get_sol_balance()
+                    base_balance = Decimal(balance_sol_str)
+                    base_source = 'onchain'
+                except Exception as be:
+                    self._logger.warning(f"No se pudo leer balance onchain; usando presupuesto global. Error: {be}")
+                    global_budget_str = getattr(self.config, 'general_available_balance_to_invest', "0.0") or "0.0"
+                    base_balance = Decimal(global_budget_str)
+            else:
+                global_budget_str = getattr(self.config, 'general_available_balance_to_invest', "0.0") or "0.0"
+                base_balance = Decimal(global_budget_str)
+
+            # Si la base es inválida o no positiva, la validación porcentual no aplica
+            if base_balance <= 0:
+                details = {
+                    'trader_wallet': trader_wallet,
+                    'amount': amount_sol,
+                    'base_balance': format(base_balance, 'f'),
+                    'base_source': base_source
+                }
+                check.passthrough("Balance base no disponible o <= 0; validación porcentual no aplicable", details)
+                return check
+
+            amount_sol_dec = Decimal(amount_sol)
+
+            # Obtener configuraciones con prioridad (trader > global)
+            min_pct = self._get_trader_config_value(trader_wallet, 'min_position_size_percentage')
+            max_pct = self._get_trader_config_value(trader_wallet, 'max_position_size_percentage')
+            adjust_position_size = self._get_trader_config_value(trader_wallet, 'adjust_position_size', True)
+
+            # Validar mínimo porcentual
+            if min_pct is not None:
+                min_pct_dec = Decimal(min_pct)
+                if min_pct_dec < 0:
+                    min_pct_dec = Decimal("0")
+                if min_pct_dec > 100:
+                    min_pct_dec = Decimal("100")
+                min_amount = (base_balance * min_pct_dec) / Decimal("100")
+
+                if amount_sol_dec < min_amount:
+                    if adjust_position_size:
+                        details = {
+                            'trader_wallet': trader_wallet,
+                            'amount': amount_sol,
+                            'min_required_pct': format(min_pct_dec, 'f'),
+                            'min_required_amount': format(min_amount, 'f'),
+                            'adjusted': True,
+                            'adjustment': format(min_amount - amount_sol_dec, 'f'),
+                            'base_balance': format(base_balance, 'f'),
+                            'base_source': base_source
+                        }
+                        check.warning(
+                            f"Posición será ajustada al mínimo porcentual: {amount_sol} SOL -> {format(min_amount, 'f')} SOL",
+                            details
+                        )
+                    else:
+                        details = {
+                            'trader_wallet': trader_wallet,
+                            'amount': amount_sol,
+                            'min_required_pct': format(min_pct_dec, 'f'),
+                            'min_required_amount': format(min_amount, 'f'),
+                            'adjusted': False,
+                            'deficit': format(min_amount - amount_sol_dec, 'f'),
+                            'base_balance': format(base_balance, 'f'),
+                            'base_source': base_source
+                        }
+                        check.fail(
+                            f"Posición por debajo del mínimo porcentual: {format(amount_sol_dec, 'f')} SOL < {format(min_amount, 'f')} SOL",
+                            details
+                        )
+                        return check
+
+            # Validar máximo porcentual
+            if max_pct is not None:
+                max_pct_dec = Decimal(max_pct)
+                if max_pct_dec < 0:
+                    max_pct_dec = Decimal("0")
+                if max_pct_dec > 100:
+                    max_pct_dec = Decimal("100")
+                max_amount = (base_balance * max_pct_dec) / Decimal("100")
+
+                if amount_sol_dec > max_amount:
+                    if adjust_position_size:
+                        details = {
+                            'trader_wallet': trader_wallet,
+                            'amount': amount_sol,
+                            'max_allowed_pct': format(max_pct_dec, 'f'),
+                            'max_allowed_amount': format(max_amount, 'f'),
+                            'adjusted': True,
+                            'adjustment': format(amount_sol_dec - max_amount, 'f'),
+                            'base_balance': format(base_balance, 'f'),
+                            'base_source': base_source
+                        }
+                        check.warning(
+                            f"Posición será ajustada al máximo porcentual: {amount_sol} SOL -> {format(max_amount, 'f')} SOL",
+                            details
+                        )
+                    else:
+                        details = {
+                            'trader_wallet': trader_wallet,
+                            'amount': amount_sol,
+                            'max_allowed_pct': format(max_pct_dec, 'f'),
+                            'max_allowed_amount': format(max_amount, 'f'),
+                            'adjusted': False,
+                            'excess': format(amount_sol_dec - max_amount, 'f'),
+                            'base_balance': format(base_balance, 'f'),
+                            'base_source': base_source
+                        }
+                        check.fail(
+                            f"Posición por encima del máximo porcentual: {format(amount_sol_dec, 'f')} SOL > {format(max_amount, 'f')} SOL",
+                            details
+                        )
+                        return check
+
+            # Si llegamos aquí, la posición es válida porcentualmente
+            details = {
+                'trader_wallet': trader_wallet,
+                'amount': amount_sol,
+                'min_position_size_percentage': str(min_pct) if min_pct is not None else None,
+                'max_position_size_percentage': str(max_pct) if max_pct is not None else None,
+                'adjust_position_size': adjust_position_size,
+                'base_balance': format(base_balance, 'f'),
+                'base_source': base_source
+            }
+            check.passthrough(f"Tamaño de posición porcentual válido: {amount_sol} SOL", details)
+
+        except Exception as e:
+            self._logger.error(f"Error verificando tamaño de posición porcentual para {trader_wallet}: {e}")
+            check.fail("Error al verificar tamaño de posición porcentual", {'error': str(e), 'trader_wallet': trader_wallet})
 
         return check
 
@@ -1040,6 +1199,8 @@ class ValidationEngine:
                 'use_balanced_allocation_per_trader': 'use_balanced_allocation',
                 'min_position_size': 'min_position_size',
                 'max_position_size': 'max_position_size',
+                'min_position_size_percentage': 'min_position_size_percentage',
+                'max_position_size_percentage': 'max_position_size_percentage',
                 'adjust_position_size': 'adjust_position_size',
                 'max_daily_volume_sol_open': 'max_daily_volume_sol_open',
                 'min_trade_interval_seconds_per_trader': 'min_trade_interval_seconds'
@@ -1084,6 +1245,8 @@ class ValidationEngine:
                     'use_balanced_allocation_per_trader': 'use_balanced_allocation',
                     'min_position_size': 'min_position_size',
                     'max_position_size': 'max_position_size',
+                    'min_position_size_percentage': 'min_position_size_percentage',
+                    'max_position_size_percentage': 'max_position_size_percentage',
                     'adjust_position_size': 'adjust_position_size',
                     'max_daily_volume_sol_open': 'max_daily_volume_sol_open',
                     'min_trade_interval_seconds_per_trader': 'min_trade_interval_seconds'

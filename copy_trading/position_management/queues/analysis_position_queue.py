@@ -168,13 +168,13 @@ class AnalysisPositionQueue:
                 self._logger.warning(f"Posición {position.id} no tiene signature, no se puede manejar")
                 return
 
-            positions_removed = await self.remove_pending_position_by_signature([position.signature])
-            for position in positions_removed:
-                await self._notify_analysis_finished(position, ProcessedAnalysisResult(
-                    success=False,
-                    error_kind=cast(Optional[Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"]], error_kind),
-                    error_message=error_message
-                ))
+            self._logger.debug(f"Manejando posición erronea {position.id} con error {error_kind} y mensaje {error_message}")
+
+            await self._notify_analysis_finished(position, ProcessedAnalysisResult(
+                success=False,
+                error_kind=cast(Optional[Literal["slippage", "insufficient_tokens", "insufficient_lamports", "transaction_not_found", "insufficient_funds_for_rent", "unknown"]], error_kind),
+                error_message=error_message
+            ))
 
         except Exception as e:
             self._logger.error(f"Error manejando posición erronea {position.id}: {e}", exc_info=True)
@@ -202,6 +202,7 @@ class AnalysisPositionQueue:
                     error_kind=details.error_kind,
                     error_message=details.error_message
                 ))
+                self._logger.info(f"Resultado del análisis de posición {position.id} notificado")
         except Exception as e:
             self._logger.error(f"Error notificando resultado del análisis de posición {position.id}: {e}", exc_info=True)
 
@@ -451,6 +452,7 @@ class AnalysisPositionQueue:
         Remueve una posición de la cola de pendientes de análisis por signature.
         """
         try:
+            self._logger.debug(f"Intentando remover posiciones con signatures: {signatures} de la cola de pendientes de análisis")
             positions_removed: List[Position] = []
             async with self._lock:
                 # Crear una lista de posiciones a remover para evitar modificar durante la iteración
@@ -459,15 +461,18 @@ class AnalysisPositionQueue:
                     if position.signature in signatures:
                         positions_to_remove.append(position)
                         positions_removed.append(position)
+                        self._logger.debug(f"Marcada para remover posición {position.id} con signature {position.signature}")
 
                 # Remover las posiciones después de la iteración
                 for position in positions_to_remove:
                     try:
                         self._pending_analysis_queue.remove(position)
+                        self._logger.debug(f"Posición {position.id} removida de la cola de pendientes de análisis")
                     except ValueError:
                         # La posición ya fue removida por otro proceso
-                        pass
+                        self._logger.debug(f"La posición {position.id} ya fue removida por otro proceso")
 
+            self._logger.debug(f"Total de posiciones removidas: {len(positions_removed)}")
             return positions_removed
         except Exception as e:
             self._logger.error(f"Error removiendo posición de cola de pendientes de análisis: {e}")

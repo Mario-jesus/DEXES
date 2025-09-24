@@ -20,10 +20,11 @@ _logger = AppLogger(__name__)
 
 class AmountMode(Enum):
     """Modos de cálculo de montos para copy trading"""
-    EXACT = "exact"          # Replicar monto exacto
-    PERCENTAGE = "percentage" # Porcentaje del monto original
-    FIXED = "fixed"          # Monto fijo por operación
-    DISTRIBUTED = "distributed"    # Balance entre traders (Para esto ocupamos max_amount_to_invest, max_open_tokens, max_open_positions_per_token, use_balanced_allocation en True)
+    EXACT = "exact"                                  # Replicar monto exacto
+    PERCENTAGE = "percentage"                        # Porcentaje del monto original
+    PERCENTAGE_OF_BALANCE = "percentage_of_balance"  # Porcentaje de nuestro balance a invertir respecto al porcentaje que invirtió el trader de su balance
+    FIXED = "fixed"                                  # Monto fijo por operación
+    DISTRIBUTED = "distributed"                      # Balance entre traders (Para esto ocupamos max_amount_to_invest, max_open_tokens, max_open_positions_per_token, use_balanced_allocation en True)
 
 
 class TransactionType(Enum):
@@ -116,6 +117,8 @@ class TraderConfig:
     min_position_size: Optional[str] = None
     max_position_size: Optional[str] = None
     adjust_position_size: bool = True
+    min_position_size_percentage: Optional[str] = None
+    max_position_size_percentage: Optional[str] = None
     max_daily_volume_sol_open: Optional[str] = None
     min_open_trade_interval_seconds: Optional[int] = None
 
@@ -135,6 +138,8 @@ class TraderConfig:
             'use_balanced_allocation': self.use_balanced_allocation,
             'min_position_size': self.min_position_size,
             'max_position_size': self.max_position_size,
+            'min_position_size_percentage': self.min_position_size_percentage,
+            'max_position_size_percentage': self.max_position_size_percentage,
             'adjust_position_size': self.adjust_position_size,
             'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
             'min_open_trade_interval_seconds': self.min_open_trade_interval_seconds
@@ -154,6 +159,8 @@ class TraderConfig:
             use_balanced_allocation=data.get('use_balanced_allocation', False),
             min_position_size=data.get('min_position_size'),
             max_position_size=data.get('max_position_size'),
+            min_position_size_percentage=data.get('min_position_size_percentage'),
+            max_position_size_percentage=data.get('max_position_size_percentage'),
             adjust_position_size=data.get('adjust_position_size', True),
             max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
             min_open_trade_interval_seconds=data.get('min_open_trade_interval_seconds')
@@ -189,10 +196,12 @@ class CopyTradingConfig:
     use_balanced_allocation_per_trader: bool = False               # Si se usa la distribucion balanceada de la inversion, el balance para cada trader seria max_amount_to_invest_per_trader / max_open_tokens_per_trader
     min_position_size: Optional[str] = None                        # Minimo de SOL que puede tener una posicion
     max_position_size: Optional[str] = None                        # Maximo de SOL que puede tener una posicion
+    min_position_size_percentage: Optional[str] = None             # Minimo de SOL que puede tener una posicion en porcentaje (0-100) de nuestro balance
+    max_position_size_percentage: Optional[str] = None             # Maximo de SOL que puede tener una posicion en porcentaje (0-100) de nuestro balance
     adjust_position_size: bool = True                              # Si se ajusta el tamaño de la posicion automaticamente si esta activado en base a max_position_size y min_position_size
     max_daily_volume_sol_open: Optional[str] = None                # Maximo de SOL que puede tener un trader en un dia en posiciones abiertas
     min_open_trade_interval_seconds_per_trader: Optional[int] = None    # Minimo de segundos que debe esperar un trader para hacer un trade de apertura de posicion
-    min_global_available_balance_threshold_percent: Optional[str] = "1.0"    # Porcentaje (0-100) del presupuesto global por debajo del cual se bloquean BUY
+    min_global_available_balance_threshold_percent: Optional[str] = None    # Porcentaje (0-100) del presupuesto global por debajo del cual se bloquean BUY
 
     # Configuración de Transacciones
     transaction_type: TransactionType = TransactionType.LIGHTNING_TRADE
@@ -381,6 +390,8 @@ class CopyTradingConfig:
             'use_balanced_allocation_per_trader': self.use_balanced_allocation_per_trader,
             'min_position_size': self.min_position_size,
             'max_position_size': self.max_position_size,
+            'min_position_size_percentage': self.min_position_size_percentage,
+            'max_position_size_percentage': self.max_position_size_percentage,
             'adjust_position_size': self.adjust_position_size,
             'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
             'min_open_trade_interval_seconds_per_trader': self.min_open_trade_interval_seconds_per_trader,
@@ -465,6 +476,8 @@ class CopyTradingConfig:
             use_balanced_allocation_per_trader=data.get('use_balanced_allocation_per_trader', False),
             min_position_size=data.get('min_position_size'),
             max_position_size=data.get('max_position_size'),
+            min_position_size_percentage=data.get('min_position_size_percentage'),
+            max_position_size_percentage=data.get('max_position_size_percentage'),
             adjust_position_size=data.get('adjust_position_size', True),
             max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
             min_open_trade_interval_seconds_per_trader=data.get('min_open_trade_interval_seconds_per_trader'),

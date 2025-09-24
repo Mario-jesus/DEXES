@@ -105,8 +105,8 @@ class TransactionExecutor:
         result = await self.transactions_manager.execute_lightning_trade(
             action=trade_data.side,  # "buy" o "sell"
             mint=trade_data.token_address,
-            amount=trade_data.copy_amount_sol if trade_data.side == "buy" else trade_data.copy_amount_tokens,
-            denominated_in_sol=True if trade_data.side == "buy" else False,
+            amount=trade_data.copy_amount_sol if trade_data.denominate_in_sol else trade_data.copy_amount_tokens,
+            denominated_in_sol=trade_data.denominate_in_sol,
             slippage=str(self.config.slippage_tolerance),
             priority_fee=str(self.config.priority_fee_sol),
             pool=trade_data.pool,  # type: ignore
@@ -148,8 +148,8 @@ class TransactionExecutor:
             keypair=self.wallet_data.get_keypair(),
             action=trade_data.side,
             mint=trade_data.token_address,
-            amount=trade_data.copy_amount_sol if trade_data.side == "buy" else trade_data.copy_amount_tokens,
-            denominated_in_sol=True if trade_data.side == "buy" else False,
+            amount=trade_data.copy_amount_sol if trade_data.denominate_in_sol else trade_data.copy_amount_tokens,
+            denominated_in_sol=trade_data.denominate_in_sol,
             slippage=str(self.config.slippage_tolerance),
             priority_fee=str(self.config.priority_fee_sol),
             pool=trade_data.pool,  # type: ignore

@@ -14,12 +14,12 @@ sys.path.insert(0, str(project_root))
 
 from solana_manager.account_info import SolanaAccountInfo
 from pumpfun.transactions import PumpFunTransactions
-from pumpfun.api_client import PumpFunApiClient
+from pumpfun.api_client import PumpFunHttpApiClient
 from pumpfun.wallet_manager import PumpFunWalletStorage, WalletData
 
 # --- Configuración ---
 # Lee la ruta del archivo de la wallet desde las variables de entorno
-WALLET_FILE_PATH = "wallets/wallet_bot_E.json"
+WALLET_FILE_PATH = "wallets/wallet_bot_A_v2.json"
 # --- Fin de la Configuración ---
 
 
@@ -52,8 +52,8 @@ async def liquidate_all_tokens(wallet_address: str, keypair: Keypair = None, api
         print(f"  -> Mint: {pos['mint']}, Balance: {pos['balance']}")
 
     # 2. Crear tareas de venta
-    api_client = PumpFunApiClient(api_key=api_key)
-    async with PumpFunTransactions(api_client=api_client) as tx_manager:
+    api_client = PumpFunHttpApiClient(api_key=api_key)
+    async with PumpFunTransactions(api_client=api_client, api_key=api_key) as tx_manager:
         sell_tasks = []
         for position in positions_to_liquidate:
             mint_address = position['mint']
@@ -71,7 +71,7 @@ async def liquidate_all_tokens(wallet_address: str, keypair: Keypair = None, api
                     f"amount: 100%",
                     f"denominated_in_sol: True",
                     f"slippage: 20",
-                    f"priority_fee: 0.00005",
+                    f"priority_fee: 0.00005",  # Tarifa de prioridad (ajustar si es necesario)
                     sep="\n"
                 )
                 continue
@@ -83,8 +83,8 @@ async def liquidate_all_tokens(wallet_address: str, keypair: Keypair = None, api
                     mint=mint_address,
                     amount="100%",  # Vender la totalidad de los tokens
                     denominated_in_sol=True,
-                    slippage=20,  # Deslizamiento del 5% (ajustar si es necesario)
-                    priority_fee=0.00005,  # Tarifa de prioridad (ajustar si es necesario)
+                    slippage="20",  # Deslizamiento del 5% (ajustar si es necesario)
+                    priority_fee="0.00005",  # Tarifa de prioridad (ajustar si es necesario)
                 )
             elif api_key:
                 # Usar transacción Lightning de PumpFun
@@ -93,8 +93,8 @@ async def liquidate_all_tokens(wallet_address: str, keypair: Keypair = None, api
                     mint=mint_address,
                     amount="100%",
                     denominated_in_sol=True,
-                    slippage=20,
-                    priority_fee=0.00005,
+                    slippage="20",
+                    priority_fee="0.00005",  # Tarifa de prioridad (ajustar si es necesario)
                 )
 
             if task:
@@ -137,6 +137,7 @@ async def main():
             print(f"❌ No se pudieron cargar los datos de la wallet desde {WALLET_FILE_PATH}.")
             return
 
+        print(wallet_data.get_short_info())
         print("✅ Wallet cargada exitosamente.")
 
         # Obtener credenciales desde WalletData
@@ -152,7 +153,7 @@ async def main():
         print("🛑 Error: No se pudo determinar la clave pública de la wallet.")
         return
 
-    await liquidate_all_tokens(public_key, keypair=None, api_key=api_key, test_mode=False)
+    await liquidate_all_tokens(public_key, keypair=None, api_key=api_key, test_mode=False) # type: ignore
 
 
 if __name__ == "__main__":

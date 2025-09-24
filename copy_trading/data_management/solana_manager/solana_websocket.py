@@ -569,24 +569,19 @@ class SolanaWebsocketManager:
                 return
 
             # Confirmar solo cuando no hay error
-            if data.error is None:
-                subscription_data.status = 'confirmed'
-                subscription_data.confirmed_at = datetime.now()
+            subscription_data.status = 'confirmed'
+            subscription_data.confirmed_at = datetime.now()
 
-                self.total_signatures_processed += 1
+            self.total_signatures_processed += 1
 
-                self._logger.info(f"Firma {signature} confirmada")
+            self._logger.info(f"Firma {signature} confirmada")
 
-                # Llamar callback
-                if self.on_signature_confirmed:
-                    await self.on_signature_confirmed(signature, data)
+            # Llamar callback
+            if self.on_signature_confirmed:
+                await self.on_signature_confirmed(signature, data)
 
-                # Limpiar datos de suscripción (Solana ya canceló automáticamente)
-                await self._cleanup_confirmed_signature(signature)
-            else:
-                # En caso de error, limpiar y liberar semáforo igualmente
-                self._logger.warning(f"Firma {signature} con error reportado en notificación: {data.error}")
-                await self._cleanup_timeout_signature(signature)
+            # Limpiar datos de suscripción (Solana ya canceló automáticamente)
+            await self._cleanup_confirmed_signature(signature)
 
         except Exception as e:
             self._logger.error(f"Error manejando notificación de firma: {e}")

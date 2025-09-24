@@ -25,6 +25,7 @@ petname = "*"
 cachetools = "*"
 logfire = "*"
 pyee = "*"
+cachetools-async = "*"
 
 [dev-packages]
 
