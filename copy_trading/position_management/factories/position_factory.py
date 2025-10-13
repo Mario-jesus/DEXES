@@ -20,9 +20,11 @@ class PositionFactory:
         self._logger = AppLogger(self.__class__.__name__)
         self._logger.debug("PositionFactory inicializado")
 
-    def create_position_from_trade_data(self, 
-                                        position_trade_data: PositionTraderTradeData, 
-                                        signature: str) -> Optional[OpenPosition | ClosePosition]:
+    def create_position_from_trade_data(
+        self,
+        position_trade_data: PositionTraderTradeData, 
+        signature: str
+    ) -> Optional[OpenPosition | ClosePosition]:
         """
         Crea una posición (OpenPosition o ClosePosition) basada en los datos del trade.
         
@@ -58,8 +60,9 @@ class PositionFactory:
             return None
 
     def create_open_position(self, 
-                            position_trade_data: PositionTraderTradeData, 
-                            signature: str) -> OpenPosition:
+        position_trade_data: PositionTraderTradeData, 
+        signature: str
+    ) -> OpenPosition:
         """
         Crea un objeto OpenPosition desde los datos del trade.
         

@@ -325,9 +325,9 @@ class PositionNotificationCallback:
 
             # Calcular P&L acumulado específico por token
             pnl_sol_acc_token = trader_token_stats.total_pnl_sol
-            pnl_usd_acc_token = format(Decimal(pnl_sol_acc_token) * Decimal(sol_price_usd) if sol_price_usd else "0.0", "f")
+            pnl_usd_acc_token = format(Decimal(pnl_sol_acc_token) * Decimal(sol_price_usd or "0.0"), "f")
             pnl_sol_with_costs_acc_token = trader_token_stats.total_pnl_sol_with_costs
-            pnl_usd_with_costs_acc_token = format(Decimal(pnl_sol_with_costs_acc_token) * Decimal(sol_price_usd) if sol_price_usd else "0.0", "f")
+            pnl_usd_with_costs_acc_token = format(Decimal(pnl_sol_with_costs_acc_token) * Decimal(sol_price_usd or "0.0"), "f")
 
             self._logger.debug(f"P&L acumulado por token: pnl_sol_acc_token={pnl_sol_acc_token}, pnl_usd_acc={pnl_usd_acc_token}, pnl_sol_with_costs_acc_token={pnl_sol_with_costs_acc_token}, pnl_usd_with_costs_acc_token={pnl_usd_with_costs_acc_token}")
 
@@ -340,9 +340,9 @@ class PositionNotificationCallback:
             # También agregar estadísticas generales del trader para referencia
             trader_stats = await self.token_trader_manager.get_trader_stats(position.trader_wallet)
             pnl_sol_acc_total = trader_stats.total_pnl_sol
-            pnl_usd_acc_total = format(Decimal(pnl_sol_acc_total) * Decimal(sol_price_usd) if sol_price_usd else "0.0", "f")
+            pnl_usd_acc_total = format(Decimal(pnl_sol_acc_total) * Decimal(sol_price_usd or "0.0"), "f")
             pnl_sol_with_costs_acc_total = trader_stats.total_pnl_sol_with_costs
-            pnl_usd_with_costs_acc_total = format(Decimal(pnl_sol_with_costs_acc_total) * Decimal(sol_price_usd) if sol_price_usd else "0.0", "f")
+            pnl_usd_with_costs_acc_total = format(Decimal(pnl_sol_with_costs_acc_total) * Decimal(sol_price_usd or "0.0"), "f")
 
             position.add_metadata('pnl_sol_acc_total', pnl_sol_acc_total)
             position.add_metadata('pnl_usd_acc_total', pnl_usd_acc_total)
@@ -378,7 +378,7 @@ class PositionNotificationCallback:
             self._logger.debug(f"amount_sol: {amount_sol}, amount_tokens: {amount_tokens}, total_cost_sol: {position.total_cost_sol}, fee_sol: {position.fee_sol}")
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
 
             # Obtener información de porcentajes
             percentage_info = await self._get_percentage_info(position)
@@ -429,7 +429,7 @@ class PositionNotificationCallback:
             # Validar datos de la posición
             validation = self.validation_service.validate_position_data(position)
             if validation['has_issues']:
-                self._logger.warning(f"Position data issues: {validation['issues']}")
+                self._logger.info(f"Position data issues: {validation['issues']}")
 
             # Obtener precio del SOL en USD
             sol_price_usd = await self._get_sol_price_usd()
@@ -468,8 +468,8 @@ class PositionNotificationCallback:
             original_amount = position.amount_sol_executed
             original_amount_tokens = position.amount_tokens_executed
 
-            original_amount_usd = float(original_amount) * float(sol_price_usd) if sol_price_usd else 0.0
-            total_closed_sol_usd = float(total_closed_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+            original_amount_usd = float(original_amount) * float(sol_price_usd or "0.0")
+            total_closed_sol_usd = float(total_closed_sol) * float(sol_price_usd or "0.0")
 
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
@@ -545,7 +545,7 @@ class PositionNotificationCallback:
             error_message = position.message_error
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
 
             message = (
                 f"❌ <b>Trade Opening Failed</b>\n\n"
@@ -594,7 +594,7 @@ class PositionNotificationCallback:
             signature = close_position.signature
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
             self._logger.debug(f"Amount SOL USD: {amount_sol_usd}")
 
             if not close_position.is_liquidation:
@@ -653,7 +653,7 @@ class PositionNotificationCallback:
             signature = close_position.signature
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd) if sol_price_usd else 0.0
+            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
 
             if not close_position.is_liquidation:
                 trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
@@ -758,8 +758,8 @@ class PositionNotificationCallback:
 
             sol_price_usd = await self._get_sol_price_usd()
 
-            trader_balance_used_usd = float(trader_balance_used) * float(sol_price_usd) if sol_price_usd else 0.0
-            own_balance_used_usd = float(own_balance_used) * float(sol_price_usd) if sol_price_usd else 0.0
+            trader_balance_used_usd = float(trader_balance_used) * float(sol_price_usd or "0.0")
+            own_balance_used_usd = float(own_balance_used) * float(sol_price_usd or "0.0")
 
             applied_percentage = (
                 (Decimal(amount_sol) / Decimal(own_balance_used)) * Decimal("100")

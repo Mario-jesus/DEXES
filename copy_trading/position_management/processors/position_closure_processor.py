@@ -3,12 +3,12 @@
 Procesador de cierre de posiciones para Copy Trading.
 Maneja toda la lógica de cierre de posiciones abiertas.
 """
-import asyncio
+import asyncio, datetime
 from typing import Optional, Union, TYPE_CHECKING, Tuple, List
 from decimal import ROUND_DOWN, Decimal, getcontext
 
 from logging_system import AppLogger
-from ...events import PositionEventBus, PositionCloseExecutedEvent
+from ...events import PositionEventBus, PositionCloseExecutedEvent, PositionPartialClosedEvent
 from ..models import OpenPosition, ClosePosition, SubClosePosition, ClosePositionStatus
 from ..services import PositionCalculationService
 
@@ -138,11 +138,11 @@ class PositionClosureProcessor:
                     f"Cierre completo de open_position {open_position.id} con subcierre de "
                     f"{format(open_amount_tokens_remaining, 'f')} tokens"
                 )
-                close_position_partial = SubClosePosition(
+                close_position_partial = self._create_sub_close_position(
                     close_position=close_position,
-                    amount_sol_executed="0.0",
-                    amount_tokens_executed=format(open_amount_tokens_remaining, 'f'),
-                    status=ClosePositionStatus.SUCCESS
+                    amount_sol_executed=Decimal("0.0"),
+                    amount_tokens_executed=open_amount_tokens_remaining,
+                    open_position_id=open_position.id
                 )
 
                 open_position.add_close(close_position_partial)
@@ -163,11 +163,11 @@ class PositionClosureProcessor:
                     f"{format(close_amount_tokens_remaining, 'f')} tokens en open_position {open_position.id}"
                 )
                 close_position.status = ClosePositionStatus.SUCCESS
-                close_position_partial = SubClosePosition(
+                close_position_partial = self._create_sub_close_position(
                     close_position=close_position,
-                    amount_sol_executed="0.0",
-                    amount_tokens_executed=format(close_amount_tokens_remaining, 'f'),
-                    status=ClosePositionStatus.SUCCESS
+                    amount_sol_executed=Decimal("0.0"),
+                    amount_tokens_executed=close_amount_tokens_remaining,
+                    open_position_id=open_position.id
                 )
                 open_position.add_close(close_position_partial)
                 self.position_calculation_service.update_position_status_after_close(open_position)
@@ -216,14 +216,12 @@ class PositionClosureProcessor:
                 f"No se encontró la posición abierta para cerrar el resto de la posición."
                 f"Restante: {format(close_amount_tokens_remaining, 'f')} tokens para close_position {close_position.id}"
             )
-            close_position_partial = SubClosePosition(
+            close_position_partial = self._create_sub_close_position(
                 close_position=close_position,
-                amount_sol_executed="0.0",
-                amount_tokens_executed=format(close_amount_tokens_remaining, 'f'),
-                status=ClosePositionStatus.FAILED
-            )
-            close_position_partial.message_error = (
-                f"No se encontró la posición abierta para cerrar el resto de la posición."
+                amount_sol_executed=Decimal("0.0"),
+                amount_tokens_executed=close_amount_tokens_remaining,
+                status=ClosePositionStatus.FAILED,
+                message_error = f"No se encontró la posición abierta para cerrar el resto de la posición."
             )
             await self._notify_position(close_position_partial)
             return False, processed_open_position_ids, last_partial_closure
@@ -232,6 +230,48 @@ class PositionClosureProcessor:
             f"Cierre de posición {close_position.id} completado exitosamente. Posiciones procesadas: {processed_open_position_ids}"
         )
         return True, processed_open_position_ids, last_partial_closure
+
+    def _create_sub_close_position(
+        self,
+        close_position: ClosePosition,
+        amount_sol_executed: Decimal,
+        amount_tokens_executed: Decimal,
+        open_position_id: str = "",
+        status: ClosePositionStatus = ClosePositionStatus.SUCCESS,
+        message_error: str = ""
+    ) -> SubClosePosition:
+        """
+        Crea un objeto SubClosePosition para un cierre parcial.
+        """
+        self._logger.debug(f"Creando subcierre de posición {close_position.id} con amount_sol_executed {amount_sol_executed}, amount_tokens_executed {amount_tokens_executed}, open_position_id {open_position_id}, status {status}, message_error {message_error}")
+
+        sub_close_position = SubClosePosition(
+            close_position=close_position,
+            amount_sol_executed=format(amount_sol_executed, 'f'),
+            amount_tokens_executed=format(amount_tokens_executed, 'f'),
+            status=status,
+            message_error=message_error
+        )
+
+        if self.position_event_bus:
+            self._logger.debug(f"Emitiendo evento de cierre parcial {sub_close_position.id}")
+            self.position_event_bus.emit_position_partial_closed(
+                PositionPartialClosedEvent(
+                    position_id=sub_close_position.id,
+                    token_address=sub_close_position.token_address,
+                    trader_wallet=sub_close_position.trader_wallet,
+                    close_position_id=close_position.id,
+                    open_position_id=open_position_id,
+                    amount_sol=sub_close_position.amount_sol_executed,
+                    amount_tokens=sub_close_position.amount_tokens_executed,
+                    total_cost_sol=sub_close_position.total_cost_sol,
+                    message_error=message_error,
+                    status="success" if status == ClosePositionStatus.SUCCESS else "failed",
+                    timestamp=datetime.datetime.now(datetime.UTC)
+                )
+            )
+
+        return sub_close_position
 
     async def complete_position_closure(self, position: OpenPosition) -> bool:
         """

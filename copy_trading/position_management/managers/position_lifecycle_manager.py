@@ -6,8 +6,9 @@ Separa la lógica de coordinación de flujo de la gestión de colas.
 from typing import Union, TYPE_CHECKING
 
 from logging_system import AppLogger
-from ..models import PositionTraderTradeData, OpenPosition, ClosePosition, PositionStatus
+from ..models import PositionTraderTradeData, OpenPosition, ClosePosition
 from ..factories import PositionFactory
+from ...events import PositionEventBus, PositionTraderTradeDataEvent, PositionOpenedEvent, PositionClosedEvent
 
 if TYPE_CHECKING:
     from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue, ClosedPositionQueue
@@ -20,11 +21,13 @@ class PositionLifecycleManager:
     """
 
     def __init__(self,
-                    pending_queue: 'PendingPositionQueue',
-                    analysis_queue: 'AnalysisPositionQueue',
-                    open_queue: 'OpenPositionQueue',
-                    closed_queue: 'ClosedPositionQueue',
-                    position_factory: PositionFactory):
+        pending_queue: 'PendingPositionQueue',
+        analysis_queue: 'AnalysisPositionQueue',
+        open_queue: 'OpenPositionQueue',
+        closed_queue: 'ClosedPositionQueue',
+        position_factory: PositionFactory,
+        position_event_bus: PositionEventBus
+    ):
         self._logger = AppLogger(self.__class__.__name__)
 
         self.pending_queue = pending_queue
@@ -32,12 +35,14 @@ class PositionLifecycleManager:
         self.open_queue = open_queue
         self.closed_queue = closed_queue
         self.position_factory = position_factory
+        self.position_event_bus = position_event_bus
 
         self._logger.debug("PositionLifecycleManager inicializado")
 
     async def process_executed_position(self, 
-                                        position_trade_data: PositionTraderTradeData, 
-                                        signature: str) -> bool:
+        position_trade_data: PositionTraderTradeData, 
+        signature: str
+    ) -> bool:
         """
         Procesa una posición ejecutada coordinando su flujo a través del sistema.
         
@@ -51,6 +56,23 @@ class PositionLifecycleManager:
         try:
             self._logger.info(f"Iniciando procesamiento de posición ejecutada: {signature[:8]}...")
             self._logger.debug(f"Trader: {position_trade_data.trader_wallet[:8]}..., Token: {position_trade_data.token_address[:8]}..., Side: {position_trade_data.side}, Amount: {position_trade_data.copy_amount_sol} SOL")
+
+            if not position_trade_data.is_liquidation:
+                self._logger.debug(f"[process_executed_position] Emitting PositionTraderTradeDataEvent for position {position_trade_data.id}")
+                self.position_event_bus.emit_position_trader_trade_data(
+                    PositionTraderTradeDataEvent(
+                        position_id=position_trade_data.id,
+                        amount_sol=position_trade_data.trader_trade_data.amount_sol,
+                        token_amount=position_trade_data.trader_trade_data.token_amount,
+                        signature=signature,
+                        token_address=position_trade_data.token_address,
+                        trader_wallet=position_trade_data.trader_wallet,
+                        pool=position_trade_data.pool,
+                        bonding_curve_key=position_trade_data.trader_trade_data.bonding_curve_key,
+                        new_token_balance=position_trade_data.trader_trade_data.new_token_balance,
+                        timestamp=position_trade_data.created_at
+                    )
+                )
 
             # 1. Crear la posición usando el factory
             position = self.position_factory.create_position_from_trade_data(
@@ -134,6 +156,17 @@ class PositionLifecycleManager:
             else:
                 self._logger.warning(f"No se pudo agregar posición abierta {position.id}")
 
+            self._logger.debug(f"Emitiendo evento de posición abierta: {position.id}")
+            self.position_event_bus.emit_position_opened(
+                PositionOpenedEvent(
+                    position_id=position.id,
+                    token_address=position.token_address,
+                    trader_wallet=position.trader_wallet,
+                    amount_sol=position.amount_sol,
+                    timestamp=position.created_at
+                )
+            )
+
             return success
 
         except Exception as e:
@@ -158,6 +191,18 @@ class PositionLifecycleManager:
                 self._logger.debug(f"Posición de cierre {position.id} agregada exitosamente")
             else:
                 self._logger.warning(f"No se pudo agregar posición de cierre {position.id}")
+
+            self._logger.debug(f"Emitiendo evento de posición cerrada: {position.id}")
+            self.position_event_bus.emit_position_closed(
+                PositionClosedEvent(
+                    position_id=position.id,
+                    token_address=position.token_address,
+                    trader_wallet=position.trader_wallet,
+                    amount_sol=position.amount_sol,
+                    amount_tokens=position.amount_tokens,
+                    timestamp=position.created_at
+                )
+            )
 
             return success
 

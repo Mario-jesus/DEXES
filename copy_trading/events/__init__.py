@@ -6,6 +6,7 @@ Sistema de eventos desacoplado para posiciones del copy trading.
 from .position_events import (
     PositionEventBus,
     BasePositionEvent,
+    MintMetadataUpdatedEvent,
     PositionValidationFailedEvent,
     PositionCreatedEvent,
     PositionQueuedEvent,
@@ -19,11 +20,16 @@ from .position_events import (
     PositionCloseRequestedEvent,
     PositionCloseExecutedEvent,
     PositionClosedEvent,
+    PositionPartialClosedEvent,
+    PositionTraderTradeDataEvent,
+    PositionFailedEvent,
+    MintMetadataUpdatedEvent,
 )
 
 __all__ = [
     "PositionEventBus",
     "BasePositionEvent",
+    "MintMetadataUpdatedEvent",
     "PositionAnalysisEvent",
     "PositionValidationFailedEvent",
     "PositionCreatedEvent",
@@ -37,4 +43,8 @@ __all__ = [
     "PositionCloseRequestedEvent",
     "PositionCloseExecutedEvent",
     "PositionClosedEvent",
+    "PositionPartialClosedEvent",
+    "PositionTraderTradeDataEvent",
+    "PositionFailedEvent",
+    "MintMetadataUpdatedEvent",
 ]

@@ -71,25 +71,36 @@ class OpenPositionQueue:
             async with self._lock:
                 trader_token_queue = self.open_positions_queue[position.trader_wallet][position.token_address]
 
-                if any(p.id == position.id for p in trader_token_queue):
+                duplicate_id = any(p.id == position.id for p in trader_token_queue)
+                duplicate_signature = False
+                if not duplicate_id:
+                    duplicate_signature = any(p.signature == position.signature for p in trader_token_queue)
+                is_duplicate = duplicate_id or duplicate_signature
+
+                if not is_duplicate:
+                    position.status = PositionStatus.OPEN
+                    trader_token_queue.append(position)
+                    # Al encolar, marcar que no está drenado
+                    self._drained_event.clear()
+
+            if is_duplicate:
+                position.status = PositionStatus.FAILED
+                if duplicate_id:
+                    position.message_error = "El id de la posición ya existe dentro de la cola"
                     self._logger.warning(f"Posición {position.id} ya existe para el trader {position.trader_wallet} y token {position.token_address}.")
-                    return False
-
-                position.status = PositionStatus.OPEN
-                trader_token_queue.append(position)
-                # Al encolar, marcar que no está drenado
-                self._drained_event.clear()
-
-            # Registrar datos del token, trader y posiciones de apertura o cierre
-            await self._register_token_trader_data(position, trader_token_queue, True)
+                else:
+                    position.message_error = "El signature de la posición ya existe dentro de la cola"
+                    self._logger.warning(f"Posición {position.signature} ya existe para el trader {position.trader_wallet} y token {position.token_address}.")
+            else:
+                # Registrar datos del token, trader y posiciones de apertura o cierre
+                await self._register_token_trader_data(position, trader_token_queue, True)
+                # Guardar estado
+                await self._save_open()
 
             # Notificar posición
             await self._notify_position(position)
 
-            # Guardar estado
-            await self._save_open()
-
-            return True
+            return not is_duplicate
 
         except Exception as e:
             self._logger.error(f"Error agregando posición abierta {position.id}: {e}", exc_info=True)

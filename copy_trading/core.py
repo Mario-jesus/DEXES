@@ -4,6 +4,7 @@ Sistema principal de Copy Trading
 """
 from typing import Dict, Any, Optional
 from datetime import datetime
+from decimal import Decimal, ROUND_DOWN
 import asyncio
 
 from pumpfun.api_client import PumpFunHttpApiClient, PumpFunWebSocketApiClient
@@ -18,7 +19,7 @@ from .balance_management import BalanceManager
 from .callbacks import TradeProcessorCallback
 from .position_management import PositionQueueManager
 from .position_management.models import PositionTraderTradeData
-from .events import PositionEventBus, PositionExecutionFailedEvent
+from .events import PositionEventBus, PositionExecutionFailedEvent, PositionFailedEvent
 from .data_management import (
     TokenTraderManager, 
     TradingDataFetcher, 
@@ -32,6 +33,8 @@ from .notifications import (
     ConsoleStrategy
 )
 from .transactions_management import TransactionExecutor, CopyAmountCalculator, Liquidations
+from .persistence.repositories.trader_mint_repository import TraderMintRepository
+from .persistence.subscribers import attach_position_events_subscriber, attach_mint_events_subscriber
 
 
 class CopyTrading:
@@ -66,7 +69,8 @@ class CopyTrading:
         self.token_trader_manager = TokenTraderManager(
             config=config,
             trading_data_fetcher=self.trading_data_fetcher,
-            trading_data_store=self.trading_data_store
+            trading_data_store=self.trading_data_store,
+            position_event_bus=self.position_event_bus
         )
         self._logger.debug("TokenTraderManager inicializado")
 
@@ -271,7 +275,8 @@ class CopyTrading:
             self.transaction_executor = TransactionExecutor(
                 config=self.config,
                 transactions_manager=self.transactions_manager,
-                wallet_data=self.wallet_data
+                wallet_data=self.wallet_data,
+                position_event_bus=self.position_event_bus
             )
             self._logger.debug("TransactionExecutor inicializado")
 
@@ -297,6 +302,13 @@ class CopyTrading:
             self._logger.debug("Inicializando TokenTraderManager...")
             await self.token_trader_manager.initialize_system_trader_stats()
             self._logger.debug("TokenTraderManager inicializado")
+
+            # Inicializar suscriptores de eventos
+            attach_position_events_subscriber(self.position_event_bus)
+            attach_mint_events_subscriber(self.position_event_bus)
+
+            # Persistir entidades iniciales (traders/mints) provenientes de la configuración/cache
+            await self._persist_initial_config_entities()
 
             # Inicializar callback después de que las colas estén listas
             self._logger.debug("Inicializando TradeProcessorCallback...")
@@ -402,6 +414,8 @@ class CopyTrading:
                 await self.solana_websocket.__aexit__(None, None, None)
                 self._logger.debug("SolanaWebsocketManager cerrado")
 
+            total_pnl = await self._get_total_pnl()
+
             if self.balance_manager:
                 try:
                     self._logger.debug("Cerrando BalanceManager...")
@@ -433,11 +447,39 @@ class CopyTrading:
 
             # Enviar notificación de detención
             if self.notification_manager:
+                self._logger.info(f"Total P&L: {total_pnl['pnl_sol']} SOL = {total_pnl['pnl_usd']} USD ({total_pnl['pnl_percent']}%)")
+
+                # Construct P&L message
+                pnl_sol_val = Decimal(total_pnl['pnl_sol'])
+
+                # Determine if profit or loss
+                if pnl_sol_val >= 0:
+                    emoji_pnl = "📈"
+                    status_text = "PROFIT"
+                else:
+                    emoji_pnl = "📉"
+                    status_text = "LOSS"
+
+                pnl_msg = (
+                    f"{emoji_pnl} <b>Total P&L</b>\n\n"
+                    f"💰 <b>Balance Summary</b>\n"
+                    f"{'─'*12}\n"
+                    f"💼 <b>Initial:</b> {total_pnl['initial_balance_sol']} SOL (${total_pnl['initial_balance_usd']})\n"
+                    f"💎 <b>Current:</b> {total_pnl['current_balance_sol']} SOL (${total_pnl['current_balance_usd']})\n"
+                    f"💵 <b>SOL Price:</b> ${total_pnl['sol_price']}\n\n"
+                    f"{emoji_pnl} <b>{status_text}</b>\n"
+                    f"{'─'*12}\n"
+                    f"🔸 <b>SOL:</b> {total_pnl['pnl_sol']} SOL\n"
+                    f"💵 <b>USD:</b> ${total_pnl['pnl_usd']}\n"
+                    f"📊 <b>Return:</b> {total_pnl['pnl_percent']}%"
+                )
+                await self.notification_manager.notify_system(pnl_msg, "info")
+
                 stats_msg = (
-                    f"Sistema detenido\n"
-                    f"- Tiempo activo: ⏱️ {stats['system_metrics']['uptime_seconds']/3600:.1f}h\n"
-                    f"- Trades ejecutados: ✅ {stats['system_metrics']['trades_executed']}\n"
-                    f"- Volumen total: 💰 {stats['system_metrics']['total_volume_sol']:.6f} SOL"
+                    f"System stopped\n"
+                    f"- Uptime: ⏱️ {stats['system_metrics']['uptime_seconds']/3600:.1f}h\n"
+                    f"- Trades executed: ✅ {stats['system_metrics']['trades_executed']}\n"
+                    f"- Total volume: 💰 {stats['system_metrics']['total_volume_sol']:.6f} SOL"
                 )
                 await self.notification_manager.notify_system(stats_msg, "stopped")
 
@@ -594,15 +636,19 @@ class CopyTrading:
                 self._logger.debug(f"Métricas actualizadas: trades_executed={self.metrics['trades_executed']}, total_volume={self.metrics['total_volume_sol']}")
 
                 # Procesar posición ejecutada
-                await self.queue_manager.process_executed_position(trade_data, signature)
+                was_processed = await self.queue_manager.process_executed_position(trade_data, signature)
+                if not was_processed:
+                    self._logger.warning(f"No se pudo procesar posición ejecutada: {trade_data.id}")
             else:
+                error_message = error_message or 'Error desconocido'
                 self._logger.error(f"Error ejecutando trade: {error_message or 'Error desconocido'}")
-                self.position_event_bus.emit_position_execution_failed(
-                    PositionExecutionFailedEvent(
+                self.position_event_bus.emit_position_failed(
+                    PositionFailedEvent(
                         position_id=trade_data.id,
                         token_address=trade_data.token_address,
                         trader_wallet=trade_data.trader_wallet,
-                        error_message=error_message or "Error desconocido"
+                        position_type="open" if trade_data.side == "buy" else "close",
+                        error_message=error_message
                     )
                 )
 
@@ -702,3 +748,67 @@ class CopyTrading:
             self._logger.info("Métricas del cliente API reseteadas")
         else:
             self._logger.warning("No se pueden resetear métricas: cliente API no inicializado")
+
+    async def _get_total_pnl(self) -> Dict[str, str]:
+        """
+        Calcula el P&L (profit and loss) total, en SOL, USD y porcentaje.
+        Returns:
+            dict: {'initial_balance': str, 'current_balance': str, 'sol_price': str, 'pnl_sol': str, 'pnl_usd': str, 'pnl_percent': str}
+        """
+        sol_price = Decimal(await self.trading_data_fetcher.get_sol_price_usd() or "0.0")
+        initial_balance = Decimal(self.config.general_available_balance_to_invest or "0.0")
+        initial_balance_usd = initial_balance * sol_price
+        current_balance = Decimal(await self.balance_manager.get_sol_balance() or "0.0")
+        current_balance_usd = current_balance * sol_price
+        pnl_sol = current_balance - initial_balance
+        pnl_usd = pnl_sol * sol_price
+        # Calcular el P&L porcentual
+        if initial_balance != Decimal("0.0"):
+            pnl_percent = (pnl_sol / initial_balance) * Decimal("100.0")
+            pnl_percent_str = format(pnl_percent.quantize(Decimal("0.01"), rounding=ROUND_DOWN).normalize(), "f")
+        else:
+            pnl_percent_str = "0.00"
+        pnl_sol = format(pnl_sol.quantize(Decimal("0.000000001"), rounding=ROUND_DOWN).normalize(), "f")
+        pnl_usd = format(pnl_usd.quantize(Decimal("0.01"), rounding=ROUND_DOWN).normalize(), "f")
+        return {
+            "initial_balance_sol": format(initial_balance.quantize(Decimal("0.000000001"), rounding=ROUND_DOWN).normalize(), "f"),
+            "initial_balance_usd": format(initial_balance_usd.quantize(Decimal("0.01"), rounding=ROUND_DOWN).normalize(), "f"),
+            "current_balance_sol": format(current_balance.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN).normalize(), "f"),
+            "current_balance_usd": format(current_balance_usd.quantize(Decimal("0.01"), rounding=ROUND_DOWN).normalize(), "f"),
+            "sol_price": format(sol_price.quantize(Decimal("0.01"), rounding=ROUND_DOWN).normalize(), "f"),
+            "pnl_sol": pnl_sol,
+            "pnl_usd": pnl_usd,
+            "pnl_percent": pnl_percent_str
+        }
+
+    # ==================== Persistencia inicial ====================
+    async def _persist_initial_config_entities(self) -> None:
+        """
+        Guarda en base de datos los traders y mints iniciales.
+
+        - Traders: tomados de self.config.traders
+        - Mints: tomados del cache de tokens si hubiera datos disponibles
+        """
+        try:
+            repo = TraderMintRepository()
+
+            # Upsert de traders desde configuración
+            trader_items = []
+            for trader in self.config.traders:
+                nickname = None
+                try:
+                    nickname = trader.nickname if getattr(trader, 'nickname', None) else None
+                except Exception:
+                    nickname = None
+                trader_items.append((trader.wallet_address, nickname))
+
+            # Wallet system
+            if self.wallet_data:
+                trader_items.append((self.wallet_data.wallet_public_key, "System"))
+
+            if trader_items:
+                count = await repo.bulk_upsert_traders(trader_items)
+                self._logger.debug(f"Traders iniciales persistidos: {count}")
+
+        except Exception as e:
+            self._logger.warning(f"No se pudieron persistir entidades iniciales (traders/mints): {e}")

@@ -154,6 +154,7 @@ class TradeAnalysisProcessor:
                 return
 
             if self.position_event_bus:
+                self._logger.debug(f"Emitiendo evento de análisis para posición {position.id}")
                 self.position_event_bus.emit_position_analysis(PositionAnalysisEvent(
                     position_id=position.id,
                     token_address=position.token_address,
@@ -163,6 +164,8 @@ class TradeAnalysisProcessor:
                     mint_address=position.token_address,
                     signer_sol_delta=analysis_result.signer_sol_delta,
                     token_ui_delta=analysis_result.token_ui_delta,
+                    fee_sol=analysis_result.fee_sol,
+                    total_cost_sol=analysis_result.total_cost_sol,
                 ))
 
         except Exception as e:

@@ -83,17 +83,3 @@ __all__ = [
     "PositionCloseRequestedEvent",
     "PositionClosedEvent",
 ]
-
-# Mensaje de bienvenida
-print("🎯 Módulo Copy Trading cargado")
-print("   ✅ Integración directa con PumpFun")
-print("   ✅ Replicación automática de trades")
-print("   ✅ Gestión de posiciones FIFO")
-print("   ✅ Validaciones configurables")
-print("   ✅ Logging estructurado")
-print("   ✅ Soporte Lightning y Local Trade")
-print("   ✅ Sistema de notificaciones mejorado")
-print("   ✅ Herramientas de diagnóstico")
-print("   ✅ Diagnóstico de I/O de archivos")
-print("   ✅ TokenTraderManager optimizado")
-print("   ✅ Sistema de eventos desacoplado para posiciones")

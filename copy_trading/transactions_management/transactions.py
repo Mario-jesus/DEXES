@@ -10,6 +10,7 @@ from logging_system import AppLogger
 
 from ..config import CopyTradingConfig, TransactionType
 from ..position_management.models import PositionTraderTradeData
+from ..events import PositionEventBus, PositionExecutionFailedEvent, PositionCreatedEvent
 
 
 class TransactionExecutor:
@@ -19,7 +20,8 @@ class TransactionExecutor:
         self,
         config: CopyTradingConfig,
         transactions_manager: PumpFunTransactions,
-        wallet_data: WalletData
+        wallet_data: WalletData,
+        position_event_bus: PositionEventBus
     ):
         """
         Inicializa el ejecutor de transacciones
@@ -32,6 +34,7 @@ class TransactionExecutor:
         self.config = config
         self.transactions_manager = transactions_manager
         self.wallet_data = wallet_data
+        self.position_event_bus = position_event_bus
 
         self._logger = AppLogger(self.__class__.__name__)
         self._logger.debug("TransactionExecutor inicializado")
@@ -55,15 +58,46 @@ class TransactionExecutor:
             if signature:
                 self._logger.info(f"Trade ejecutado exitosamente ({self.config.transaction_type.value}): {signature}")
 
+                self.position_event_bus.emit_position_created(
+                    PositionCreatedEvent(
+                        position_id=trade_data.id,
+                        token_address=trade_data.token_address,
+                        trader_wallet=trade_data.trader_wallet,
+                        amount_sol=trade_data.copy_amount_sol,
+                        amount_tokens=trade_data.copy_amount_tokens,
+                        side=trade_data.side,
+                        signature=signature,
+                        is_liquidation=trade_data.is_liquidation,
+                        timestamp=trade_data.created_at
+                    )
+                )
+
                 return True, signature, None
             else:
                 error_msg = f"Error ejecutando trade ({self.config.transaction_type.value}): No se obtuvo signature"
                 self._logger.error(error_msg)
+
+                self.position_event_bus.emit_position_execution_failed(
+                    PositionExecutionFailedEvent(
+                        position_id=trade_data.id,
+                        token_address=trade_data.token_address,
+                        trader_wallet=trade_data.trader_wallet,
+                        error_message=error_msg
+                    )
+                )
                 return False, None, error_msg
 
         except Exception as e:
             error_msg = f"Error inesperado ejecutando trade ({self.config.transaction_type.value}): {e}"
             self._logger.error(error_msg, exc_info=True)
+            self.position_event_bus.emit_position_execution_failed(
+                PositionExecutionFailedEvent(
+                    position_id=trade_data.id,
+                    token_address=trade_data.token_address,
+                    trader_wallet=trade_data.trader_wallet,
+                    error_message=error_msg
+                )
+            )
             return False, None, error_msg
 
     async def _execute_transaction_by_type(self, trade_data: PositionTraderTradeData) -> Optional[str]:

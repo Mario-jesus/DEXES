@@ -12,7 +12,7 @@ import aiofiles
 class SolanaWalletManager:
     """Gestor de wallets para Solana - Crear, cargar y guardar wallets"""
 
-    def __init__(self, network: str = "devnet", rpc_url: str = None):
+    def __init__(self, network: str = "devnet", rpc_url: Optional[str] = None):
         """
         Inicializa el gestor de wallets
         network: "devnet", "testnet", "mainnet-beta"
@@ -62,7 +62,7 @@ class SolanaWalletManager:
             self.client = None
             print("🔌 Conexión a Solana cerrada.")
 
-    async def create_wallet_file(self, filename: str = None) -> str:
+    async def create_wallet_file(self, filename: Optional[str] = None) -> Optional[str]:
         """Crea una nueva wallet y la guarda en archivo"""
         try:
             # Crear nuevo keypair

@@ -2,6 +2,7 @@
 import asyncio
 import aiohttp
 import struct
+from time import time
 from typing import Dict, Any, Optional, TypedDict
 from decimal import Decimal, getcontext
 from solders.pubkey import Pubkey as PublicKey
@@ -25,7 +26,7 @@ class TradingDataFetcher:
     Compatible con async with y optimizado para copy trading.
     """
     DEXSCREENER_BASE_URL = "https://api.dexscreener.com/latest/dex"
-    JUPITER_LITE_API = "https://lite-api.jup.ag/price/v2"
+    JUPITER_LITE_API = "https://lite-api.jup.ag"
     SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
 
     # Constantes para Pump.fun fallback
@@ -59,7 +60,8 @@ class TradingDataFetcher:
             if self._own_session:
                 # Configurar timeout más agresivo para trading
                 timeout = aiohttp.ClientTimeout(total=3, connect=1, sock_read=2)
-                self.session = aiohttp.ClientSession(timeout=timeout)
+                headers = {'Accept': 'application/json'}
+                self.session = aiohttp.ClientSession(timeout=timeout, headers=headers)
             else:
                 self.session = self._session
 
@@ -269,8 +271,8 @@ class TradingDataFetcher:
         Returns:
             Optional[str]: El precio de SOL como string, o None si no se puede obtener.
         """
-        import time
-        current_time = time.time()
+        ENDPOINT_PRICE = "/price/v3"
+        current_time = time()
 
         # Verificar cache
         if (self._sol_price_cache and 
@@ -279,7 +281,7 @@ class TradingDataFetcher:
             return self._sol_price_cache
 
         try:
-            url = f"{self.JUPITER_LITE_API}?ids={self.SOL_MINT_ADDRESS}"
+            url = f"{self.JUPITER_LITE_API}{ENDPOINT_PRICE}?ids={self.SOL_MINT_ADDRESS}"
             self._logger.debug("Obteniendo precio de SOL desde Jupiter Lite API")
 
             if self.session is None:
@@ -288,7 +290,7 @@ class TradingDataFetcher:
             async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
                 if response.status == 200:
                     data = await response.json()
-                    price = Decimal(str(data['data'][self.SOL_MINT_ADDRESS]['price']))
+                    price = Decimal(str(data.get(self.SOL_MINT_ADDRESS, {}).get('usdPrice', 0)))
                     price_str = format(price, 'f')
                     # Actualizar cache
                     self._sol_price_cache = price_str
@@ -390,8 +392,6 @@ class TradingDataFetcher:
 
 # Ejemplo de uso para verificar la funcionalidad
 async def main():
-    from time import time
-
     # Usar async with para gestión automática de recursos
     async with TradingDataFetcher() as fetcher:
         try:

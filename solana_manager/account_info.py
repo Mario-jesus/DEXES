@@ -54,7 +54,7 @@ class SolanaAccountInfo:
         try:
             # Obtener balance SOL y precio en paralelo
             sol_balance_task = self.get_sol_balance(public_key)
-            sol_price_task = self._get_sol_price()
+            sol_price_task = self.get_sol_price()
             
             sol_balance, sol_price = await asyncio.gather(sol_balance_task, sol_price_task)
             
@@ -91,15 +91,18 @@ class SolanaAccountInfo:
         finally:
             await self.close_http_session()
 
-    async def _get_sol_price(self) -> float:
+    async def get_sol_price(self) -> float:
         """Obtiene precio SOL usando Jupiter 2025 de forma asíncrona"""
         session = await self._get_http_session()
+        SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
+        JUPITER_LITE_API = "https://lite-api.jup.ag/price/v3"
+        ENDPOINT_PRICE = "/price/v3"
         try:
-            url = "https://lite-api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112"
-            async with session.get(url, timeout=5) as response:
+            url = f"{JUPITER_LITE_API}{ENDPOINT_PRICE}?ids={SOL_MINT_ADDRESS}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
                 if response.status == 200:
                     data = await response.json()
-                    price = float(data['data']['So11111111111111111111111111111111111111112']['price'])
+                    price = float(data.get(SOL_MINT_ADDRESS, {}).get('usdPrice', 0))
                     return price
                 else:
                     return 140.0
@@ -179,62 +182,74 @@ class SolanaAccountInfo:
             return {}
 
     async def get_token_accounts(self, public_key: str) -> List[Dict[str, Any]]:
-        """Obtiene todas las cuentas de tokens SPL de una wallet de forma asíncrona"""
-        if not self.client:
-            print("❌ Cliente no conectado. Usa 'async with SolanaAccountInfo() as account_info:' para conectar.")
-            return []
+        """Obtiene todas las cuentas de tokens SPL de una wallet (via RPC jsonParsed)."""
         try:
-            decoded = base58.b58decode(public_key)
-            if len(decoded) != 32:
-                print("❌ Dirección inválida")
+            # Validación básica de la dirección (opcional, solo para feedback temprano)
+            try:
+                decoded = base58.b58decode(public_key)
+                if len(decoded) != 32:
+                    print("❌ Dirección inválida")
+                    return []
+            except Exception:
+                # Si la decodificación falla, el RPC igual puede devolver error entendible
+                pass
+
+            session = await self._get_http_session()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    public_key,
+                    {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+                    {"commitment": "finalized", "encoding": "jsonParsed"},
+                ],
+            }
+
+            async with session.post(
+                self.rpc_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                response.raise_for_status()
+                # Evitar pasar None como content_type para mantener tipos estrictos
+                data = await response.json()
+
+            if "error" in data and data["error"]:
+                err = data["error"]
+                print(f"❌ Error RPC getTokenAccountsByOwner: {err.get('message', 'Unknown error')}")
                 return []
 
-            pubkey = PublicKey.from_bytes(decoded)
-            token_program_id = PublicKey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-            
-            from solana.rpc.types import TokenAccountOpts
-            opts = TokenAccountOpts(program_id=token_program_id)
-            response = await self.client.get_token_accounts_by_owner(pubkey, opts)
+            result = data.get("result", {})
+            value = result.get("value", []) or []
 
             token_accounts: List[Dict[str, Any]] = []
+            for entry in value:
+                try:
+                    account = (entry or {}).get("account", {})
+                    parsed = (account.get("data", {}) or {}).get("parsed", {})
+                    info = parsed.get("info", {})
+                    token_amount = info.get("tokenAmount", {}) or {}
 
-            if response.value:
-                print(f"🪙 Encontradas {len(response.value)} cuentas de tokens")
+                    pubkey = (entry or {}).get("pubkey", "")
+                    mint = info.get("mint", "")
+                    decimals = token_amount.get("decimals", 0) or 0
+                    ui_amount = token_amount.get("uiAmount", 0.0) or 0.0
+                    amount_raw = token_amount.get("amount", "0") or "0"
 
-                balance_tasks = []
-                for account in response.value:
-                    mint_address = 'N/A'
-                    try:
-                        if account.account.data and len(account.account.data) >= 32:
-                            mint_bytes = bytes(account.account.data[:32])
-                            mint_address = base58.b58encode(mint_bytes).decode('utf-8')
-                    except Exception as e:
-                        print(f"⚠️  Error extrayendo mint: {e}")
-                    
-                    account_info = {
-                        'account_address': str(account.pubkey),
-                        'mint': mint_address,
-                    }
-                    token_accounts.append(account_info)
-                    balance_tasks.append(self.client.get_token_account_balance(account.pubkey))
+                    token_accounts.append({
+                        'account_address': str(pubkey),
+                        'mint': str(mint),
+                        'balance': float(ui_amount),
+                        'decimals': int(decimals),
+                        'raw_amount': str(amount_raw),
+                    })
+                except Exception as e:
+                    print(f"⚠️ Error parseando token account: {e}")
+                    continue
 
-                # Obtener balances en paralelo
-                balances = await asyncio.gather(*balance_tasks, return_exceptions=True)
-
-                for i, result in enumerate(balances):
-                    if isinstance(result, Exception):
-                        print(f"⚠️ Error obteniendo balance para cuenta {token_accounts[i]['account_address']}: {result}")
-                        token_accounts[i].update({'balance': 0, 'decimals': 0, 'raw_amount': '0'})
-                    else:
-                        token_accounts[i].update({
-                            'balance': float(result.value.ui_amount or 0),
-                            'decimals': result.value.decimals,
-                            'raw_amount': result.value.amount
-                        })
-                    
-                    #print(f"   {i+1}. Mint: {token_accounts[i]['mint']}")
-                    #print(f"      Balance: {token_accounts[i]['balance']} tokens ({token_accounts[i]['decimals']} decimales)")
-                    #print(f"      Cuenta: {token_accounts[i]['account_address']}")
+            if token_accounts:
+                print(f"🪙 Encontradas {len(token_accounts)} cuentas de tokens")
 
             return token_accounts
 
@@ -242,30 +257,29 @@ class SolanaAccountInfo:
             print(f"❌ Error obteniendo cuentas de tokens: {e}")
             return []
 
-    async def get_token_balance(self, mint_address: str, owner_address: str = None) -> float:
-        """Obtiene el balance de un token específico por su mint address de forma asíncrona"""
+    async def get_token_balance(self, mint_address: str, owner_address: Optional[str] = None) -> float:
+        """Obtiene el balance total de un token por mint sin depender de solana_rcp"""
         try:
             if not owner_address:
-                # This part of the original code relied on self.wallet_manager.keypair
-                # which is no longer available. Assuming a default or that this
-                # function will be refactored to accept a keypair directly.
-                # For now, we'll just print a warning and return 0.
                 print("⚠️ No owner_address provided, cannot determine token balance.")
                 return 0.0
-            
-            print(f"🔍 Buscando token {mint_address} en wallet {owner_address[:20]}...")
-            
+
             token_accounts = await self.get_token_accounts(owner_address)
-            
-            for account in token_accounts:
-                if account['mint'] == mint_address:
-                    balance = float(account['balance'])
-                    print(f"✅ Token encontrado! Balance: {balance} tokens")
-                    return balance
-            
-            print(f"❌ Token {mint_address} no encontrado en la wallet")
-            return 0.0
-            
+            total_balance = 0.0
+            for acc in token_accounts:
+                try:
+                    if acc.get('mint') == mint_address:
+                        total_balance += float(acc.get('balance', 0.0) or 0.0)
+                except Exception:
+                    continue
+
+            if total_balance > 0.0:
+                print(f"✅ Token encontrado! Balance total: {total_balance} tokens")
+            else:
+                print(f"❌ Token {mint_address} no encontrado en la wallet")
+
+            return total_balance
+
         except Exception as e:
             print(f"❌ Error obteniendo balance del token: {e}")
             return 0.0

@@ -68,6 +68,9 @@ class PositionQueueManager:
         # Manager de ciclo de vida
         self.lifecycle_manager: Optional[PositionLifecycleManager] = None
 
+        # Event bus
+        self.position_event_bus: PositionEventBus = position_event_bus
+
         # Estado de inicialización
         self._initialized = False
         self._lock = asyncio.Lock()
@@ -116,6 +119,10 @@ class PositionQueueManager:
                     self._logger.error("Componentes requeridos no están inicializados para lifecycle manager")
                     raise Exception("Required components not initialized")
 
+                if not self.position_event_bus:
+                    self._logger.error("PositionEventBus no está inicializado")
+                    raise Exception("PositionEventBus no está inicializado")
+
                 # Crear el lifecycle manager
                 self._logger.debug("Creando PositionLifecycleManager")
                 self.lifecycle_manager = PositionLifecycleManager(
@@ -123,7 +130,8 @@ class PositionQueueManager:
                     analysis_queue=self.analysis_queue,
                     open_queue=self.open_queue,
                     closed_queue=self.closed_queue,
-                    position_factory=self.position_factory
+                    position_factory=self.position_factory,
+                    position_event_bus=self.position_event_bus
                 )
 
                 self._initialized = True

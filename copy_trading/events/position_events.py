@@ -33,6 +33,10 @@ PositionEventName = Literal[
     "position.close.requested",
     "position.close.executed",
     "position.closed",
+    "position.partial_closed",
+    "position.trader_trade_data",
+    "position.failed",
+    "mint.metadata.updated",
 ]
 
 
@@ -60,6 +64,9 @@ class PositionValidationFailedEvent(BasePositionEvent):
 class PositionCreatedEvent(BasePositionEvent):
     amount_sol: str = ""
     amount_tokens: str = ""
+    side: Literal["buy", "sell"] = "buy"
+    signature: str = ""
+    is_liquidation: bool = False
 
 
 @dataclass(slots=True)
@@ -98,6 +105,8 @@ class PositionAnalysisEvent(BasePositionEvent):
     mint_address: Optional[str] = None
     signer_sol_delta: Optional[str] = None
     token_ui_delta: Optional[str] = None
+    fee_sol: Optional[str] = None
+    total_cost_sol: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -110,7 +119,7 @@ class PositionAnalysisFinishedEvent(BasePositionEvent):
 
 @dataclass(slots=True)
 class PositionOpenedEvent(BasePositionEvent):
-    pass
+    amount_sol: str = ""
 
 
 @dataclass(slots=True)
@@ -131,9 +140,45 @@ class PositionCloseExecutedEvent(BasePositionEvent):
 
 @dataclass(slots=True)
 class PositionClosedEvent(BasePositionEvent):
-    exit_price: str = ""
-    pnl_sol: str = ""
-    signature: Optional[str] = None
+    amount_sol: str = ""
+    amount_tokens: str = ""
+
+
+@dataclass(slots=True)
+class PositionPartialClosedEvent(BasePositionEvent):
+    close_position_id: str = ""
+    open_position_id: str = ""
+    amount_sol: str = ""
+    amount_tokens: str = ""
+    total_cost_sol: str = ""
+    message_error: str = ""
+    status: Literal["success", "failed"] = "success"
+
+
+@dataclass(slots=True)
+class PositionTraderTradeDataEvent(BasePositionEvent):
+    amount_sol: str = ""
+    signature: str = ""
+    token_amount: str = ""
+    new_token_balance: str = ""
+    pool: str = ""
+    bonding_curve_key: str = ""
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass(slots=True)
+class PositionFailedEvent(BasePositionEvent):
+    position_type: Literal["open", "close"] = "open"
+    error_message: str = ""
+
+
+@dataclass(slots=True)
+class MintMetadataUpdatedEvent:
+    """Evento para actualizar metadatos básicos del mint."""
+    mint_address: str
+    name: Optional[str] = None
+    symbol: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 # Handlers tipados
@@ -166,6 +211,10 @@ class PositionEventBus:
     EVT_CLOSE_REQUESTED: Final[PositionEventName] = "position.close.requested"
     EVT_CLOSE_EXECUTED: Final[PositionEventName] = "position.close.executed"
     EVT_CLOSED: Final[PositionEventName] = "position.closed"
+    EVT_PARTIAL_CLOSED: Final[PositionEventName] = "position.partial_closed"
+    EVT_TRADER_TRADE_DATA: Final[PositionEventName] = "position.trader_trade_data"
+    EVT_FAILED: Final[PositionEventName] = "position.failed"
+    EVT_MINT_METADATA_UPDATED: Final[PositionEventName] = "mint.metadata.updated"
 
     def __init__(self, emitter: Optional[AsyncIOEventEmitter] = None, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
@@ -211,6 +260,19 @@ class PositionEventBus:
     def on_position_closed(self, handler: AsyncEventHandler[PositionClosedEvent]) -> None:
         self._emitter.on(self.EVT_CLOSED, handler)
 
+    def on_position_partial_closed(self, handler: AsyncEventHandler[PositionPartialClosedEvent]) -> None:
+        self._emitter.on(self.EVT_PARTIAL_CLOSED, handler)
+
+    def on_position_trader_trade_data(self, handler: AsyncEventHandler[PositionTraderTradeDataEvent]) -> None:
+        self._emitter.on(self.EVT_TRADER_TRADE_DATA, handler)
+
+    def on_position_failed(self, handler: AsyncEventHandler[PositionFailedEvent]) -> None:
+        self._emitter.on(self.EVT_FAILED, handler)
+
+    # Mint metadata events
+    def on_mint_metadata_updated(self, handler: Callable[[MintMetadataUpdatedEvent], Any]) -> None:
+        self._emitter.on(self.EVT_MINT_METADATA_UPDATED, handler)
+
     # Emisores
     def emit_position_validation_failed(self, event: PositionValidationFailedEvent) -> None:
         self._emitter.emit(self.EVT_VALIDATION_FAILED, event)
@@ -250,6 +312,18 @@ class PositionEventBus:
 
     def emit_position_closed(self, event: PositionClosedEvent) -> None:
         self._emitter.emit(self.EVT_CLOSED, event)
+
+    def emit_position_partial_closed(self, event: PositionPartialClosedEvent) -> None:
+        self._emitter.emit(self.EVT_PARTIAL_CLOSED, event)
+
+    def emit_position_trader_trade_data(self, event: PositionTraderTradeDataEvent) -> None:
+        self._emitter.emit(self.EVT_TRADER_TRADE_DATA, event)
+
+    def emit_position_failed(self, event: PositionFailedEvent) -> None:
+        self._emitter.emit(self.EVT_FAILED, event)
+
+    def emit_mint_metadata_updated(self, event: MintMetadataUpdatedEvent) -> None:
+        self._emitter.emit(self.EVT_MINT_METADATA_UPDATED, event)
 
     # Utilidades
     def off(self, event_name: PositionEventName, handler: Callable[..., Any]) -> None:

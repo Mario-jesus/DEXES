@@ -26,6 +26,10 @@ cachetools = "*"
 logfire = "*"
 pyee = "*"
 cachetools-async = "*"
+sqlalchemy = "*"
+alembic = "*"
+asyncpg = "*"
+psycopg2-binary = "*"
 
 [dev-packages]
 

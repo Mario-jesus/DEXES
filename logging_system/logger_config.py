@@ -110,6 +110,7 @@ def setup_logging(
         'httpcore.connection',
         'websockets.client',
         'httpx',
+        'sqlalchemy.engine.Engine'
     ]
 
     for lib in libs:

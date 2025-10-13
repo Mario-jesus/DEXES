@@ -1,4 +1,46 @@
 services:
+  postgres:
+    image: postgres:16-alpine3.22
+    container_name: postgres-db
+    environment:
+      POSTGRES_DB: ${PGDATABASE}
+      POSTGRES_USER: ${PGUSER}
+      POSTGRES_PASSWORD: ${PGPASSWORD}
+    ports:
+      - "4432:5432"
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - trading_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER} -d ${PGDATABASE}"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  migration:
+    image: copy-trading-bot:1.0.0
+    container_name: alembic-migration
+    command: alembic upgrade head
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - trading_network
+    restart: no
+
   COPY_TRADING_BOT_A:
     image: copy-trading-bot:1.0.0
     build:
@@ -9,7 +51,22 @@ services:
       - "7778:8888"
     environment:
       - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-A.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
     restart: unless-stopped
+
   COPY_TRADING_BOT_B:
     image: copy-trading-bot:1.0.0
     container_name: COPY_TRADING_BOT_B
@@ -17,7 +74,22 @@ services:
       - "7779:8888"
     environment:
       - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-B.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
     restart: unless-stopped
+
   COPY_TRADING_BOT_C:
     image: copy-trading-bot:1.0.0
     container_name: COPY_TRADING_BOT_C
@@ -25,7 +97,22 @@ services:
       - "7780:8888"
     environment:
       - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-C.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
     restart: unless-stopped
+
   COPY_TRADING_BOT_D:
     image: copy-trading-bot:1.0.0
     container_name: COPY_TRADING_BOT_D
@@ -33,7 +120,22 @@ services:
       - "7781:8888"
     environment:
       - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-D.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
     restart: unless-stopped
+
   COPY_TRADING_BOT_E:
     image: copy-trading-bot:1.0.0
     container_name: COPY_TRADING_BOT_E
@@ -41,4 +143,25 @@ services:
       - "7782:8888"
     environment:
       - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-E.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
     restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  trading_network:
+    driver: bridge

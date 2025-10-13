@@ -9,6 +9,7 @@ from datetime import datetime
 from logging_system import AppLogger
 
 from ..config import CopyTradingConfig
+from ..events import PositionEventBus, MintMetadataUpdatedEvent
 from .models import TokenInfo, TraderStats, TraderTokenStats
 from .services import TraderStatsSyncService
 from .fetch_data import TradingDataFetcher
@@ -22,8 +23,10 @@ class TokenTraderManager:
     """
 
     def __init__(self, config: CopyTradingConfig,
-                    trading_data_fetcher: Optional[TradingDataFetcher] = None, 
-                    trading_data_store: Optional[TradingDataStore] = None):
+        trading_data_fetcher: Optional[TradingDataFetcher] = None, 
+        trading_data_store: Optional[TradingDataStore] = None,
+        position_event_bus: Optional[PositionEventBus] = None
+    ):
         """
         Inicializa el gestor que delega a data_management.
         
@@ -31,9 +34,11 @@ class TokenTraderManager:
             config: Configuración del sistema
             trading_data_fetcher: Cliente para obtener datos de trading (opcional)
             trading_data_store: Gestor de datos de trading
+            position_event_bus: Bus de eventos de posiciones
         """
         try:
             self.config = config
+            self.position_event_bus = position_event_bus
 
             self._logger = AppLogger(self.__class__.__name__)
 
@@ -1025,8 +1030,8 @@ class TokenTraderManager:
                 fresh_symbol = token_data.get('symbol', '').strip()
 
                 # Considerar valores genéricos como inválidos
-                is_fresh_name_valid = fresh_name and fresh_name not in ('Unknown', '')
-                is_fresh_symbol_valid = fresh_symbol and fresh_symbol not in ('UNK', '')
+                is_fresh_name_valid = fresh_name.strip() and fresh_name.strip() not in ('Unknown', '')
+                is_fresh_symbol_valid = fresh_symbol.strip() and fresh_symbol.strip() not in ('UNK', '')
 
                 # Usar valores existentes si están disponibles y son válidos
                 existing_name_valid = (existing_info and 
@@ -1056,6 +1061,13 @@ class TokenTraderManager:
                     symbol=final_symbol,
                     traders=existing_traders.copy()
                 )
+
+                if self.position_event_bus and (is_fresh_name_valid or is_fresh_symbol_valid):
+                    self.position_event_bus.emit_mint_metadata_updated(MintMetadataUpdatedEvent(
+                        mint_address=token_address,
+                        name=final_name if is_fresh_name_valid else None,
+                        symbol=final_symbol if is_fresh_symbol_valid else None
+                    ))
 
                 self._logger.debug(f"Información del token {token_address} actualizada desde fuente externa")
                 return token_info
