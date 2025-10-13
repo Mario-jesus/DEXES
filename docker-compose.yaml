@@ -25,7 +25,7 @@ services:
   migration:
     image: copy-trading-bot:1.0.0
     container_name: alembic-migration
-    command: alembic upgrade head
+    command: pipenv run alembic upgrade head
     environment:
       - PGHOST=postgres
       - PGPORT=5432
