@@ -16,7 +16,7 @@ from logging_system import AppLogger
 from .config import CopyTradingConfig
 from .validation import ValidationEngine
 from .balance_management import BalanceManager
-from .callbacks import TradeProcessorCallback
+from .callbacks import TradeProcessorCallback, MinimumBalanceHandler
 from .position_management import PositionQueueManager
 from .position_management.models import PositionTraderTradeData
 from .events import PositionEventBus, PositionExecutionFailedEvent, PositionFailedEvent
@@ -137,6 +137,9 @@ class CopyTrading:
 
         # Callback (se inicializará después de que las colas estén listas)
         self.trade_processor_callback: Optional[TradeProcessorCallback] = None
+
+        # Minimum balance handler
+        self.minimum_balance_handler: Optional[MinimumBalanceHandler] = None
 
         # Estado
         self.is_running = False
@@ -322,6 +325,19 @@ class CopyTrading:
                 open_position_queue=self.queue_manager.open_queue
             )
             self._logger.debug("TradeProcessorCallback inicializado")
+
+            # Inicializar MinimumBalanceHandler
+            self._logger.debug("Inicializando MinimumBalanceHandler...")
+            self.minimum_balance_handler = MinimumBalanceHandler(
+                system_wallet_address=self.wallet_data.wallet_public_key,
+                transaction_executor=self.transaction_executor,
+                position_queue_manager=self.queue_manager
+            )
+            self._logger.debug("MinimumBalanceHandler inicializado")
+
+            # Establecer callback de errores en WebSocket
+            self.ws_client.set_error_callback(self.minimum_balance_handler)
+            self._logger.debug("Callback de errores en WebSocket registrado")
 
             # Suscribirse a trades de los traders
             trader_addresses = [trader.wallet_address for trader in self.config.traders]

@@ -3,7 +3,7 @@
 Servicio especializado para cálculos de P&L (Profit & Loss) de posiciones de trading.
 Separa la lógica de cálculos financieros de otros análisis.
 """
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Union
 from decimal import Decimal, getcontext
 
 from logging_system import AppLogger
@@ -167,6 +167,52 @@ class PnLCalculationService:
         return format(pnl_sol, "f"), format(pnl_usd, "f")
 
     @classmethod
+    def calculate_realized_pnl_for_partial_close(cls, sub_close_position: Union[SubClosePosition, ClosePosition], sol_price_usd: str, include_transaction_costs: bool = False) -> Tuple[str, str]:
+        """
+        Calcula el P&L realizado para un cierre parcial.
+        
+        Args:
+            sub_close_position: Objeto SubClosePosition
+            sol_price_usd: Precio de SOL en USD
+            include_transaction_costs: Si incluir costos de transacción en el cálculo
+
+        Returns:
+            Tuple de (pnl_sol, pnl_usd) como strings
+        """
+        try:
+            _logger.debug(f"Calculando P&L realizado para cierre parcial {sub_close_position.id}, incluir_costos={include_transaction_costs}")
+
+            open_position_amount_sol_executed = sub_close_position.get_metadata("open_position_amount_sol_executed")
+            open_position_total_cost_sol = sub_close_position.get_metadata("open_position_total_cost_sol")
+            _logger.debug(f"Open position amount sol executed: {open_position_amount_sol_executed}")
+            _logger.debug(f"Open position total cost sol: {open_position_total_cost_sol}")
+
+            entry_value = Decimal(open_position_amount_sol_executed or '0')
+            total_exit_value = Decimal(sub_close_position.amount_sol_executed or '0')
+            close_cost = abs(Decimal(sub_close_position.total_cost_sol or '0'))
+            _logger.debug(f"Costos de cierre: {close_cost}")
+
+            pnl_sol_base = total_exit_value - entry_value
+            _logger.debug(f"P&L base (sin costos): {pnl_sol_base} SOL")
+
+            total_exit_costs = close_cost + abs(Decimal(open_position_total_cost_sol or '0'))
+
+            if include_transaction_costs:
+                pnl_sol = pnl_sol_base - total_exit_costs
+                _logger.debug(f"P&L con costos: {pnl_sol} SOL (restados {total_exit_costs} SOL de costos)")
+            else:
+                pnl_sol = pnl_sol_base
+                _logger.debug(f"P&L sin costos: {pnl_sol} SOL")
+
+            pnl_usd = pnl_sol * Decimal(sol_price_usd or '0')
+            _logger.debug(f"P&L final: {pnl_sol} SOL = {pnl_usd} USD (precio SOL: {sol_price_usd})")
+
+            return format(pnl_sol, "f"), format(pnl_usd, "f")
+        except Exception as e:
+            _logger.error(f"Error al calcular P&L para cierre parcial {sub_close_position.id}: {e}")
+            return "0.0", "0.0"
+
+    @classmethod
     def calculate_realized_pnl_with_costs_breakdown(cls, position: OpenPosition, sol_price_usd: str) -> Tuple[str, str, str, str]:
         """
         Calcula el P&L realizado tanto con costos de transacción como sin ellos.
@@ -189,6 +235,29 @@ class PnLCalculationService:
         pnl_sol_with_costs, pnl_usd_with_costs = cls.calculate_realized_pnl(position, sol_price_usd, include_transaction_costs=True)
 
         _logger.info(f"P&L calculado para posición {position.id}: sin_costos={pnl_sol_without_costs} SOL, con_costos={pnl_sol_with_costs} SOL")
+
+        return pnl_sol_without_costs, pnl_usd_without_costs, pnl_sol_with_costs, pnl_usd_with_costs
+
+    @classmethod
+    def calculate_realized_pnl_for_partial_close_with_costs_breakdown(cls, sub_close_position: Union[SubClosePosition, ClosePosition], sol_price_usd: str) -> Tuple[str, str, str, str]:
+        """
+        Calcula el P&L realizado para un cierre parcial tanto con costos de transacción como sin ellos.
+        
+        Args:
+            sub_close_position: Objeto SubClosePosition
+            sol_price_usd: Precio de SOL en USD
+        """
+        _logger.info(f"Iniciando cálculo de P&L con desglose de costos para cierre parcial {sub_close_position.id}")
+
+        # Calcular P&L sin costos de transacción
+        _logger.debug("Calculando P&L sin costos de transacción")
+        pnl_sol_without_costs, pnl_usd_without_costs = cls.calculate_realized_pnl_for_partial_close(sub_close_position, sol_price_usd, include_transaction_costs=False)
+
+        # Calcular P&L con costos de transacción
+        _logger.debug("Calculando P&L con costos de transacción")
+        pnl_sol_with_costs, pnl_usd_with_costs = cls.calculate_realized_pnl_for_partial_close(sub_close_position, sol_price_usd, include_transaction_costs=True)
+
+        _logger.info(f"P&L calculado para cierre parcial {sub_close_position.id}: sin_costos={pnl_sol_without_costs} SOL, con_costos={pnl_sol_with_costs} SOL")
 
         return pnl_sol_without_costs, pnl_usd_without_costs, pnl_sol_with_costs, pnl_usd_with_costs
 

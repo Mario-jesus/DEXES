@@ -19,7 +19,7 @@ from pumpfun.wallet_manager import PumpFunWalletStorage, WalletData
 
 # --- Configuración ---
 # Lee la ruta del archivo de la wallet desde las variables de entorno
-WALLET_FILE_PATH = "wallets/wallet_bot_A_v2.json"
+WALLET_FILE_PATH = "wallets/wallet_bot_C.json"
 # --- Fin de la Configuración ---
 
 
@@ -153,7 +153,7 @@ async def main():
         print("🛑 Error: No se pudo determinar la clave pública de la wallet.")
         return
 
-    await liquidate_all_tokens(public_key, keypair=None, api_key=api_key, test_mode=False) # type: ignore
+    await liquidate_all_tokens(public_key, keypair=None, api_key=api_key, test_mode=True) # type: ignore
 
 
 if __name__ == "__main__":

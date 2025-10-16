@@ -1219,7 +1219,9 @@ class SolanaTxAnalyzer:
                 if pubkey not in exclude_pubkeys:
                     pre = int(pre_balances[index]) if index < len(pre_balances) else 0
                     post = int(post_balances[index]) if index < len(post_balances) else 0
-                    running_delta += post - pre
+                    change = post - pre
+                    if change != 0 and pre != 0 and post != 0:
+                        running_delta += change
 
             return fee + running_delta
         except Exception as e:

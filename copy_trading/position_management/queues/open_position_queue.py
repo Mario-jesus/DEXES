@@ -169,6 +169,79 @@ class OpenPositionQueue:
             self._logger.error(f"Error obteniendo primera posición: {e}")
             return None
 
+    async def get_oldest_position(self, trader_address: Optional[str] = None, token_address: Optional[str] = None) -> Optional[OpenPosition]:
+        """
+        Obtiene la posición más antigua de la cola basándose en el campo created_at.
+        Como son colas FIFO, solo analiza las cabezas de cada cola (las más antiguas).
+        
+        Args:
+            trader_address: Wallet del trader (opcional)
+            token_address: Dirección del token (opcional)
+            
+        Returns:
+            La posición más antigua de la cola o None si está vacía
+        """
+        try:
+            self._logger.debug(f"Buscando posición más antigua - trader: {trader_address}, token: {token_address}")
+            async with self._lock:
+                oldest_position: Optional[OpenPosition] = None
+
+                if trader_address and token_address:
+                    # Buscar en un trader y token específicos - solo la cabeza
+                    queue = self.open_positions_queue.get(trader_address, {}).get(token_address, deque())
+                    self._logger.debug(f"Buscando posición más antigua para trader {trader_address} y token {token_address}. Tamaño de la cola: {len(queue)}")
+
+                    # Solo obtener la cabeza (primera posición) de la cola FIFO
+                    if queue:
+                        oldest_position = next(iter(queue), None)
+
+                elif trader_address:
+                    # Buscar en todos los tokens de un trader específico - solo cabezas
+                    trader_tokens = self.open_positions_queue.get(trader_address, {})
+                    self._logger.debug(f"Buscando posición más antigua para trader {trader_address} en todos los tokens. Tokens: {list(trader_tokens.keys())}")
+
+                    # Comparar solo las cabezas de cada cola de token
+                    for token, token_queue in trader_tokens.items():
+                        if token_queue:
+                            head = next(iter(token_queue), None)
+                            if head and (oldest_position is None or head.created_at < oldest_position.created_at):
+                                oldest_position = head
+
+                elif token_address:
+                    # Buscar en un token específico de todos los traders - solo cabezas
+                    self._logger.debug(f"Buscando posición más antigua para token {token_address} en todos los traders.")
+
+                    # Comparar solo las cabezas de cada cola de trader
+                    for trader, trader_tokens in self.open_positions_queue.items():
+                        queue = trader_tokens.get(token_address)
+                        if queue:
+                            head = next(iter(queue), None)
+                            if head and (oldest_position is None or head.created_at < oldest_position.created_at):
+                                oldest_position = head
+
+                else:
+                    # Buscar en toda la cola global - solo cabezas
+                    self._logger.debug("Buscando posición más antigua en toda la cola global.")
+
+                    # Comparar solo las cabezas de todas las colas
+                    for trader, trader_tokens in self.open_positions_queue.items():
+                        for token, token_queue in trader_tokens.items():
+                            if token_queue:
+                                head = next(iter(token_queue), None)
+                                if head and (oldest_position is None or head.created_at < oldest_position.created_at):
+                                    oldest_position = head
+
+                if oldest_position:
+                    self._logger.debug(f"Posición más antigua encontrada: {oldest_position.id} (created_at: {oldest_position.created_at})")
+                else:
+                    self._logger.debug("No se encontró ninguna posición en la cola.")
+
+                return oldest_position
+
+        except Exception as e:
+            self._logger.error(f"Error obteniendo posición más antigua: {e}", exc_info=True)
+            return None
+
     async def remove_position(self, position: OpenPosition, register_data: bool = True) -> bool:
         try:
             was_removed = False

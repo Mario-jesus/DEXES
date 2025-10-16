@@ -212,7 +212,10 @@ class PositionNotificationCallback:
         # Fallback: intentar extraer desde metadata solo si no se pudo obtener del manager
         if not token_info:
             self._logger.debug(f"No se pudo obtener token_info del manager, intentando desde metadata")
-            token_info = position.metadata.get('token_info')
+            if isinstance(position, SubClosePosition):
+                token_info = position.close_position.get_metadata('token_info')
+            else:
+                token_info = position.get_metadata('token_info')
             self._logger.debug(f"token_info desde metadata: {token_info.name if token_info else 'None'}")
 
         # Actualizar metadata con la información más fresca obtenida
@@ -236,7 +239,10 @@ class PositionNotificationCallback:
         """
         Extrae información del trader desde metadata o usa fallbacks.
         """
-        trader_nickname = position.metadata.get("trader_nickname")
+        if isinstance(position, SubClosePosition):
+            trader_nickname = position.close_position.get_metadata("trader_nickname")
+        else:
+            trader_nickname = position.get_metadata("trader_nickname")
         self._logger.debug(f"Trader nickname from metadata: {trader_nickname}")
 
         if not trader_nickname and self.token_trader_manager:
@@ -268,22 +274,68 @@ class PositionNotificationCallback:
 
         return self.sol_price_usd_cache["sol_price_usd"]
 
-    async def _calculate_pnl_and_register_trader_stats(self, position: OpenPosition) -> Dict[str, str]:
-        """Calcula el P&L de una posición
+    async def _calculate_pnl(self, position: Union[OpenPosition, ClosePosition, SubClosePosition], sol_price_usd: Optional[str]) -> Dict[str, str]:
+        """Calcula el P&L de una posición sin registrarlo."""
+        try:
+            position_id = position.id
+            self._logger.debug(f"Calculando P&L para la posición: {position_id}")
+
+            pnl_sol = "0.0"
+            pnl_usd = "0.0"
+            pnl_sol_with_costs = "0.0"
+            pnl_usd_with_costs = "0.0"
+
+            if sol_price_usd:
+                if isinstance(position, OpenPosition):
+                    pnl_sol, pnl_usd, pnl_sol_with_costs, pnl_usd_with_costs = self.pnl_calculation_service.calculate_realized_pnl_with_costs_breakdown(position, sol_price_usd)
+                elif isinstance(position, (ClosePosition, SubClosePosition)):
+                    pnl_sol, pnl_usd, pnl_sol_with_costs, pnl_usd_with_costs = self.pnl_calculation_service.calculate_realized_pnl_for_partial_close_with_costs_breakdown(position, sol_price_usd)
+                else:
+                    self._logger.error(f"Tipo de posición desconocido: {type(position)}")
+                    return {
+                        "pnl_sol": pnl_sol,
+                        "pnl_usd": pnl_usd,
+                        "pnl_sol_with_costs": pnl_sol_with_costs,
+                        "pnl_usd_with_costs": pnl_usd_with_costs,
+                    }
+
+                self._logger.debug(f"P&L calculado: pnl_sol={pnl_sol}, pnl_usd={pnl_usd}, pnl_sol_with_costs={pnl_sol_with_costs}, pnl_usd_with_costs={pnl_usd_with_costs}")
+
+                # Agregar P&L a la posición
+                position.add_metadata('pnl_sol', pnl_sol)
+                position.add_metadata('pnl_usd', pnl_usd)
+                position.add_metadata('pnl_sol_with_costs', pnl_sol_with_costs)
+                position.add_metadata('pnl_usd_with_costs', pnl_usd_with_costs)
+
+            return {
+                "pnl_sol": pnl_sol,
+                "pnl_usd": pnl_usd,
+                "pnl_sol_with_costs": pnl_sol_with_costs,
+                "pnl_usd_with_costs": pnl_usd_with_costs,
+            }
+        except Exception as e:
+            self._logger.error(f"Error al calcular P&L: {e}")
+            return {
+                "pnl_sol": "0.0",
+                "pnl_usd": "0.0",
+                "pnl_sol_with_costs": "0.0",
+                "pnl_usd_with_costs": "0.0",
+            }
+
+    async def _register_trader_stats(self, position: OpenPosition, pnl_sol: str, pnl_sol_with_costs: str, sol_price_usd: Optional[str]) -> Dict[str, str]:
+        """Registra las estadísticas del trader en el token_trader_manager.
 
         Args:
-            position: Posición a calcular el P&L
+            position: Posición para registrar estadísticas
+            pnl_sol: P&L en SOL sin costos
+            pnl_sol_with_costs: P&L en SOL con costos
+            sol_price_usd: Precio de SOL en USD
 
         Returns:
-            Dict con el P&L en SOL, USD, P&L acumulado en SOL, USD
+            Dict con las estadísticas acumuladas por token y totales
         """
         position_id = position.id
-        self._logger.debug(f"Iniciando cálculo de P&L para la posición: {position_id}")
-
-        pnl_sol = "0.0"
-        pnl_usd = "0.0"
-        pnl_sol_with_costs = "0.0"
-        pnl_usd_with_costs = "0.0"
+        self._logger.debug(f"Registrando estadísticas del trader para la posición: {position_id}")
 
         pnl_sol_acc_token = "0.0"
         pnl_usd_acc_token = "0.0"
@@ -295,30 +347,16 @@ class PositionNotificationCallback:
         pnl_sol_with_costs_acc_total = "0.0"
         pnl_usd_with_costs_acc_total = "0.0"
 
-        sol_price_usd = await self._get_sol_price_usd()
-        self._logger.debug(f"Precio SOL/USD obtenido: {sol_price_usd}")
-
-        if sol_price_usd:
-            pnl_sol, pnl_usd, pnl_sol_with_costs, pnl_usd_with_costs = self.pnl_calculation_service.calculate_realized_pnl_with_costs_breakdown(position, sol_price_usd)
-            self._logger.debug(f"P&L calculado: pnl_sol={pnl_sol}, pnl_usd={pnl_usd}, pnl_sol_with_costs={pnl_sol_with_costs}, pnl_usd_with_costs={pnl_usd_with_costs}")
-
-            # Agregar P&L a la posición
-            position.add_metadata('pnl_sol', pnl_sol)
-            position.add_metadata('pnl_usd', pnl_usd)
-            position.add_metadata('pnl_sol_with_costs', pnl_sol_with_costs)
-            position.add_metadata('pnl_usd_with_costs', pnl_usd_with_costs)
-
-            if self.token_trader_manager:
-                self._logger.debug(f"Registrando P&L en token_trader_manager para wallet: {position.trader_wallet[:8]}... y token: {position.token_address[:8]}... | pnl_sol={pnl_sol}, pnl_sol_with_costs={pnl_sol_with_costs}")
-                # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
-                await self.token_trader_manager.register_trader_token_pnl(
-                    position.trader_wallet, 
-                    position.token_address, 
-                    pnl_sol, 
-                    pnl_sol_with_costs
-                )
-
         if self.token_trader_manager:
+            self._logger.debug(f"Registrando P&L en token_trader_manager para wallet: {position.trader_wallet[:8]}... y token: {position.token_address[:8]}... | pnl_sol={pnl_sol}, pnl_sol_with_costs={pnl_sol_with_costs}")
+            # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
+            await self.token_trader_manager.register_trader_token_pnl(
+                position.trader_wallet, 
+                position.token_address, 
+                pnl_sol, 
+                pnl_sol_with_costs
+            )
+
             # Obtener estadísticas específicas del trader para este token
             trader_token_stats = await self.token_trader_manager.get_trader_token_stats(position.trader_wallet, position.token_address)
             self._logger.debug(f"Trader token stats obtenidas para {position.token_address[:8]}... | pnl_sol={pnl_sol_acc_token}, pnl_sol_with_costs={pnl_sol_with_costs_acc_token}")
@@ -349,11 +387,7 @@ class PositionNotificationCallback:
             position.add_metadata('pnl_sol_with_costs_acc_total', pnl_sol_with_costs_acc_total)
             position.add_metadata('pnl_usd_with_costs_acc_total', pnl_usd_with_costs_acc_total)
 
-        resultado = {
-            "pnl_sol": pnl_sol,
-            "pnl_usd": pnl_usd,
-            "pnl_sol_with_costs": pnl_sol_with_costs,
-            "pnl_usd_with_costs": pnl_usd_with_costs,
+        return {
             "pnl_sol_acc_token": pnl_sol_acc_token,
             "pnl_usd_acc_token": pnl_usd_acc_token,
             "pnl_sol_with_costs_acc_token": pnl_sol_with_costs_acc_token,
@@ -363,7 +397,37 @@ class PositionNotificationCallback:
             "pnl_sol_with_costs_acc_total": pnl_sol_with_costs_acc_total,
             "pnl_usd_with_costs_acc_total": pnl_usd_with_costs_acc_total
         }
-        self._logger.debug(f"Cálculo de P&L completado para posición: {position_id}")
+
+    async def _calculate_pnl_and_register_trader_stats(self, position: OpenPosition) -> Dict[str, str]:
+        """Método general que calcula el P&L y registra las estadísticas del trader.
+
+        Args:
+            position: Posición a calcular el P&L y registrar estadísticas
+
+        Returns:
+            Dict con el P&L en SOL, USD, P&L acumulado en SOL, USD
+        """
+        position_id = position.id
+        self._logger.debug(f"Iniciando cálculo de P&L y registro de estadísticas para la posición: {position_id}")
+
+        # Obtener precio de SOL en USD
+        sol_price_usd = await self._get_sol_price_usd()
+        self._logger.debug(f"Precio SOL/USD obtenido: {sol_price_usd}")
+
+        # 1. Calcular P&L
+        pnl_data = await self._calculate_pnl(position, sol_price_usd)
+
+        # 2. Registrar estadísticas del trader
+        trader_stats_data = await self._register_trader_stats(
+            position,
+            pnl_data['pnl_sol'],
+            pnl_data['pnl_sol_with_costs'],
+            sol_price_usd
+        )
+
+        # Combinar resultados
+        resultado = {**pnl_data, **trader_stats_data}
+        self._logger.debug(f"Cálculo de P&L y registro de estadísticas completado para posición: {position_id}")
         return resultado
 
     async def _notify_position_opened(self, position: OpenPosition, token_info: Dict[str, str], trader_info: Dict[str, str]) -> None:
@@ -378,7 +442,7 @@ class PositionNotificationCallback:
             self._logger.debug(f"amount_sol: {amount_sol}, amount_tokens: {amount_tokens}, total_cost_sol: {position.total_cost_sol}, fee_sol: {position.fee_sol}")
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
+            amount_sol_usd = float(amount_sol or "0.0") * float(sol_price_usd or "0.0")
 
             # Obtener información de porcentajes
             percentage_info = await self._get_percentage_info(position)
@@ -468,8 +532,8 @@ class PositionNotificationCallback:
             original_amount = position.amount_sol_executed
             original_amount_tokens = position.amount_tokens_executed
 
-            original_amount_usd = float(original_amount) * float(sol_price_usd or "0.0")
-            total_closed_sol_usd = float(total_closed_sol) * float(sol_price_usd or "0.0")
+            original_amount_usd = float(original_amount or "0.0") * float(sol_price_usd or "0.0")
+            total_closed_sol_usd = float(total_closed_sol or "0.0") * float(sol_price_usd or "0.0")
 
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
@@ -545,7 +609,7 @@ class PositionNotificationCallback:
             error_message = position.message_error
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
+            amount_sol_usd = float(amount_sol or "0.0") * float(sol_price_usd or "0.0")
 
             message = (
                 f"❌ <b>Trade Opening Failed</b>\n\n"
@@ -594,8 +658,19 @@ class PositionNotificationCallback:
             signature = close_position.signature
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
+            amount_sol_usd = float(amount_sol or "0.0") * float(sol_price_usd or "0.0")
             self._logger.debug(f"Amount SOL USD: {amount_sol_usd}")
+
+            # Calcular P&L para el cierre parcial
+            pnl_data = await self._calculate_pnl(close_position, sol_price_usd)
+            total_pnl_sol = Decimal(pnl_data['pnl_sol'])
+            total_pnl_usd = Decimal(pnl_data['pnl_usd'])
+            total_pnl_sol_with_costs = Decimal(pnl_data['pnl_sol_with_costs'])
+            total_pnl_usd_with_costs = Decimal(pnl_data['pnl_usd_with_costs'])
+
+            # Preparar indicadores de P&L
+            pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
+            pnl_with_costs_indicator = '🟢' if total_pnl_sol_with_costs > 0 else '🔴'
 
             if not close_position.is_liquidation:
                 trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
@@ -622,6 +697,16 @@ class PositionNotificationCallback:
                 f"🔑 <b>ID:</b> {position_id[:8]}...\n"
                 f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n\n"
+
+                f"📈 <b>P&L Without Costs</b>\n"
+                f"{'─'*12}\n"
+                f"{pnl_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol)} SOL\n"
+                f"{pnl_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd)} USD\n\n"
+
+                f"💹 <b>P&L With Costs</b>\n"
+                f"{'─'*12}\n"
+                f"{pnl_with_costs_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol_with_costs)} SOL\n"
+                f"{pnl_with_costs_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd_with_costs)} USD\n\n"
 
                 f"{percentage_info}"
                 f"⏰ <b>Time:</b> {executed_at.strftime('%Y-%m-%d %H:%M:%S') if executed_at else 'N/A'}"
@@ -653,7 +738,18 @@ class PositionNotificationCallback:
             signature = close_position.signature
 
             sol_price_usd = await self._get_sol_price_usd()
-            amount_sol_usd = float(amount_sol) * float(sol_price_usd or "0.0")
+            amount_sol_usd = float(amount_sol or "0.0") * float(sol_price_usd or "0.0")
+
+            # Calcular P&L para el cierre parcial fallido (si aplica)
+            pnl_data = await self._calculate_pnl(close_position, sol_price_usd)
+            total_pnl_sol = Decimal(pnl_data['pnl_sol'])
+            total_pnl_usd = Decimal(pnl_data['pnl_usd'])
+            total_pnl_sol_with_costs = Decimal(pnl_data['pnl_sol_with_costs'])
+            total_pnl_usd_with_costs = Decimal(pnl_data['pnl_usd_with_costs'])
+
+            # Preparar indicadores de P&L
+            pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
+            pnl_with_costs_indicator = '🟢' if total_pnl_sol_with_costs > 0 else '🔴'
 
             if not close_position.is_liquidation:
                 trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
@@ -678,6 +774,16 @@ class PositionNotificationCallback:
                 f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
+
+                f"📈 <b>P&L Without Costs</b>\n"
+                f"{'─'*12}\n"
+                f"{pnl_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol)} SOL\n"
+                f"{pnl_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd)} USD\n\n"
+
+                f"💹 <b>P&L With Costs</b>\n"
+                f"{'─'*12}\n"
+                f"{pnl_with_costs_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol_with_costs)} SOL\n"
+                f"{pnl_with_costs_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd_with_costs)} USD\n\n"
 
                 f"⏰ <b>Time:</b> {executed_at.strftime('%Y-%m-%d %H:%M:%S') if executed_at else 'N/A'}"
             )
@@ -758,22 +864,22 @@ class PositionNotificationCallback:
 
             sol_price_usd = await self._get_sol_price_usd()
 
-            trader_balance_used_usd = float(trader_balance_used) * float(sol_price_usd or "0.0")
-            own_balance_used_usd = float(own_balance_used) * float(sol_price_usd or "0.0")
+            trader_balance_used_usd = float(trader_balance_used or "0.0") * float(sol_price_usd or "0.0")
+            own_balance_used_usd = float(own_balance_used or "0.0") * float(sol_price_usd or "0.0")
 
             applied_percentage = (
-                (Decimal(amount_sol) / Decimal(own_balance_used)) * Decimal("100")
+                (Decimal(amount_sol or "0.0") / Decimal(own_balance_used or "0.0")) * Decimal("100")
             ).quantize(Decimal("0.000001"), rounding=ROUND_DOWN).normalize()
 
             original_percentage = (
-                Decimal(original_percentage) * Decimal("100")
+                Decimal(original_percentage or "0.0") * Decimal("100")
             ).quantize(Decimal("0.000001"), rounding=ROUND_DOWN).normalize()
 
             return (
                 f"📈 <b>Percentage Info</b>\n"
                 f"{'─'*12}\n"
-                f"🎯 <b>Trader balance:</b> {float(trader_balance_used):.6f} SOL ({trader_balance_used_usd:.2f} USD)\n"
-                f"💼 <b>Own balance:</b> {float(own_balance_used):.6f} SOL ({own_balance_used_usd:.2f} USD)\n"
+                f"🎯 <b>Trader balance:</b> {float(trader_balance_used or "0.0"):.6f} SOL ({trader_balance_used_usd:.2f} USD)\n"
+                f"💼 <b>Own balance:</b> {float(own_balance_used or "0.0"):.6f} SOL ({own_balance_used_usd:.2f} USD)\n"
                 f"🔢 <b>Original pct:</b> {original_percentage}%\n"
                 f"⚡ <b>Applied pct:</b> {format(applied_percentage, "f")}%\n\n"
             )

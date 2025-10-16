@@ -942,9 +942,11 @@ class PumpFunWebSocketApiClient():
                 self._logger.info(f"Mensaje del servidor: {data['message']}")
                 return
 
-            try:
+            if 'txType' in data:
                 event_type = data['txType']
-            except KeyError:
+            elif 'errors' in data:
+                event_type = 'error'
+            else:
                 self._logger.error(f"Mensaje no válido: {data}")
                 return
 
@@ -960,6 +962,13 @@ class PumpFunWebSocketApiClient():
                 self._update_trade_metrics()
             elif event_type == 'migrate':
                 callback = self._websocket_callbacks.get('subscribeMigration')
+            elif event_type == 'error':
+                # Manejar errores con callback específico
+                callback = self._websocket_callbacks.get('on_error')
+                if callback:
+                    self._logger.debug(f"Ejecutando callback de error para: {data}")
+                else:
+                    self._logger.error(f"No se encontró callback para errores")
 
             # Ejecutar callback principal
             if callback:
@@ -971,7 +980,8 @@ class PumpFunWebSocketApiClient():
                 if default_cb:
                     await self._execute_callback(default_cb, data, "callback por defecto")
                 else:
-                    self._logger.warning(f"Evento no manejado o sin callback para txType '{event_type}'")
+                    if event_type != 'error':  # Ya logueamos los errores arriba
+                        self._logger.warning(f"Evento no manejado o sin callback para txType '{event_type}'")
 
             # Callback genérico para todos los mensajes (si existe)
             on_message_cb = self._websocket_callbacks.get('on_message')
@@ -1141,6 +1151,27 @@ class PumpFunWebSocketApiClient():
     def set_method_callback(self, method: str, callback: Callable[[Any], Any]):
         """Establece callback específico para un método WebSocket"""
         self._websocket_callbacks[method] = callback
+
+    def set_error_callback(self, callback: Callable[[Any], Any]):
+        """
+        Establece callback específico para mensajes de error del WebSocket.
+        
+        Este callback se ejecutará cuando se reciba un mensaje con el campo 'errors',
+        por ejemplo: {'errors': 'Minimum balance not met for PumpSwap websocket data.'}
+        
+        Args:
+            callback: Función callback que recibe el mensaje de error como dict.
+                    Puede ser síncrona o asíncrona.
+        
+        Ejemplo:
+            async def on_error(error_data: dict):
+                if 'Minimum balance' in str(error_data.get('errors', '')):
+                    await handle_minimum_balance_error(error_data)
+            
+            ws_client.set_error_callback(on_error)
+        """
+        self._websocket_callbacks['on_error'] = callback
+        self._logger.info("Callback de errores registrado")
 
     async def unsubscribe_all(self):
         """

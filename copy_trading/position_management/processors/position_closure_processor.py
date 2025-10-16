@@ -142,7 +142,9 @@ class PositionClosureProcessor:
                     close_position=close_position,
                     amount_sol_executed=Decimal("0.0"),
                     amount_tokens_executed=open_amount_tokens_remaining,
-                    open_position_id=open_position.id
+                    open_position_id=open_position.id,
+                    open_position_amount_sol_executed=open_position.amount_sol_executed,
+                    open_position_total_cost_sol=open_position.total_cost_sol
                 )
 
                 open_position.add_close(close_position_partial)
@@ -167,7 +169,9 @@ class PositionClosureProcessor:
                     close_position=close_position,
                     amount_sol_executed=Decimal("0.0"),
                     amount_tokens_executed=close_amount_tokens_remaining,
-                    open_position_id=open_position.id
+                    open_position_id=open_position.id,
+                    open_position_amount_sol_executed=open_position.amount_sol_executed,
+                    open_position_total_cost_sol=open_position.total_cost_sol
                 )
                 open_position.add_close(close_position_partial)
                 self.position_calculation_service.update_position_status_after_close(open_position)
@@ -179,6 +183,8 @@ class PositionClosureProcessor:
                     f"por {format(close_amount_tokens_remaining, 'f')} tokens"
                 )
                 close_position.status = ClosePositionStatus.SUCCESS
+                close_position.add_metadata("open_position_amount_sol_executed", open_position.amount_sol_executed)
+                close_position.add_metadata("open_position_total_cost_sol", open_position.total_cost_sol)
                 open_position.add_close(close_position)
                 self.position_calculation_service.update_position_status_after_close(open_position)
                 processed_open_position_ids.append(open_position.id)
@@ -238,7 +244,8 @@ class PositionClosureProcessor:
         amount_tokens_executed: Decimal,
         open_position_id: str = "",
         status: ClosePositionStatus = ClosePositionStatus.SUCCESS,
-        message_error: str = ""
+        message_error: str = "",
+        **kwargs: str
     ) -> SubClosePosition:
         """
         Crea un objeto SubClosePosition para un cierre parcial.
@@ -252,6 +259,9 @@ class PositionClosureProcessor:
             status=status,
             message_error=message_error
         )
+
+        sub_close_position.add_metadata("open_position_amount_sol_executed", kwargs.get("open_position_amount_sol_executed", ""))
+        sub_close_position.add_metadata("open_position_total_cost_sol", kwargs.get("open_position_total_cost_sol", ""))
 
         if self.position_event_bus:
             self._logger.debug(f"Emitiendo evento de cierre parcial {sub_close_position.id}")

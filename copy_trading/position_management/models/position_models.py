@@ -70,6 +70,7 @@ class SubClosePosition:
     status: ClosePositionStatus = ClosePositionStatus.PENDING
     message_error: str = ""
     created_at: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not isinstance(self.close_position, ClosePosition):
@@ -89,12 +90,20 @@ class SubClosePosition:
         return self.close_position.execution_signature
 
     @property
-    def metadata(self) -> Dict[str, Any]:
-        return self.close_position.metadata
-
-    @property
     def is_liquidation(self) -> bool:
         return self.close_position.is_liquidation
+
+    def get_metadata(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+        return self.metadata.get(key, default)
+
+    def add_metadata(self, key: str, value: Any, max_metadata_size: int = 1000) -> None:
+        if len(self.metadata) >= max_metadata_size:
+            # Eliminar las claves más antiguas (primeras 10)
+            keys_to_remove = list(self.metadata.keys())[:10]
+            for key_to_remove in keys_to_remove:
+                del self.metadata[key_to_remove]
+
+        self.metadata[key] = value
 
     def calculate_proportional_total_cost(self) -> str:
         """
