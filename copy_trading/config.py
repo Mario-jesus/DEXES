@@ -210,8 +210,9 @@ class CopyTradingConfig:
     jito_only: bool = False  # Solo para lightning_trade
 
     # Parámetros de trading
-    slippage_tolerance: float = 0.01  # 1%
-    priority_fee_sol: float = 0.0005  # 0.0005 SOL
+    slippage_tolerance_for_buy: str = "15.0"  # 15%
+    slippage_tolerance_for_sell: str = "100.0"  # 100%
+    priority_fee_sol: str = "0.0005"  # 0.0005 SOL
     max_execution_delay_seconds: int = 30
 
     # Logging
@@ -307,8 +308,9 @@ class CopyTradingConfig:
 
     def get_transaction_params(self) -> Dict[str, Any]:
         """Obtiene parámetros comunes para transacciones"""
-        params = {
-            'slippage': self.slippage_tolerance,
+        params: Dict[str, Any] = {
+            'slippage_for_buy': self.slippage_tolerance_for_buy,
+            'slippage_for_sell': self.slippage_tolerance_for_sell,
             'priority_fee': self.priority_fee_sol,
             'pool': self.pool_type,
         }
@@ -400,7 +402,8 @@ class CopyTradingConfig:
             'pool_type': self.pool_type,
             'skip_preflight': self.skip_preflight,
             'jito_only': self.jito_only,
-            'slippage_tolerance': self.slippage_tolerance,
+            'slippage_tolerance_for_buy': self.slippage_tolerance_for_buy,
+            'slippage_tolerance_for_sell': self.slippage_tolerance_for_sell,
             'priority_fee_sol': self.priority_fee_sol,
             'max_execution_delay_seconds': self.max_execution_delay_seconds,
             'logging_level': self.logging_level,
@@ -490,8 +493,9 @@ class CopyTradingConfig:
             jito_only=data.get('jito_only', False),
 
             # Parámetros de trading
-            slippage_tolerance=data.get('slippage_tolerance', 0.01),
-            priority_fee_sol=data.get('priority_fee_sol', 0.0005),
+            slippage_tolerance_for_buy=data.get('slippage_tolerance_for_buy', "15.0"),
+            slippage_tolerance_for_sell=data.get('slippage_tolerance_for_sell', "100.0"),
+            priority_fee_sol=data.get('priority_fee_sol', "0.000005"),
             max_execution_delay_seconds=data.get('max_execution_delay_seconds', 30),
 
             # Logging

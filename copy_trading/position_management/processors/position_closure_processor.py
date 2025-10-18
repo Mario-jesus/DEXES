@@ -124,11 +124,15 @@ class PositionClosureProcessor:
                 break
 
             amounts = self.position_calculation_service.calculate_remaining_amounts(open_position, exact=True)
+            open_amount_sol_remaining = Decimal(amounts[0])
             open_amount_tokens_remaining = Decimal(amounts[1])
+            open_total_cost_sol_remaining = Decimal(amounts[2])
 
             self._logger.debug(
                 f"Procesando open_position {open_position.id} - "
                 f"Disponible para cerrar: {format(open_amount_tokens_remaining, 'f')} tokens. "
+                f"Disponible amount_sol: {format(open_amount_sol_remaining, 'f')} SOL. "
+                f"Disponible total_cost_sol: {format(open_total_cost_sol_remaining, 'f')} SOL. "
                 f"Restante por cerrar: {format(close_amount_tokens_remaining, 'f')} tokens"
             )
 
@@ -140,11 +144,11 @@ class PositionClosureProcessor:
                 )
                 close_position_partial = self._create_sub_close_position(
                     close_position=close_position,
-                    amount_sol_executed=Decimal("0.0"),
-                    amount_tokens_executed=open_amount_tokens_remaining,
+                    amount_tokens_executed=format(open_amount_tokens_remaining, 'f'),
                     open_position_id=open_position.id,
-                    open_position_amount_sol_executed=open_position.amount_sol_executed,
-                    open_position_total_cost_sol=open_position.total_cost_sol
+                    open_position_amount_tokens_executed=format(open_amount_tokens_remaining, 'f'),
+                    open_position_amount_sol_executed=format(open_amount_sol_remaining, 'f'),
+                    open_position_total_cost_sol=format(open_total_cost_sol_remaining, 'f'),
                 )
 
                 open_position.add_close(close_position_partial)
@@ -159,36 +163,42 @@ class PositionClosureProcessor:
                 close_position.status = ClosePositionStatus.PARTIAL
                 continue
 
+            close_to_notify = None
             if close_position.status == ClosePositionStatus.PARTIAL:
                 self._logger.debug(
                     f"Finalizando cierre parcial con subcierre de "
                     f"{format(close_amount_tokens_remaining, 'f')} tokens en open_position {open_position.id}"
                 )
+                self._logger.debug(f"open_position: {open_position}")
                 close_position.status = ClosePositionStatus.SUCCESS
                 close_position_partial = self._create_sub_close_position(
                     close_position=close_position,
-                    amount_sol_executed=Decimal("0.0"),
-                    amount_tokens_executed=close_amount_tokens_remaining,
+                    amount_tokens_executed=format(close_amount_tokens_remaining, 'f'),
                     open_position_id=open_position.id,
-                    open_position_amount_sol_executed=open_position.amount_sol_executed,
-                    open_position_total_cost_sol=open_position.total_cost_sol
+                    open_position_amount_tokens_executed=format(open_amount_tokens_remaining, 'f'),
+                    open_position_amount_sol_executed=format(open_amount_sol_remaining, 'f'),
+                    open_position_total_cost_sol=format(open_total_cost_sol_remaining, 'f'),
                 )
                 open_position.add_close(close_position_partial)
                 self.position_calculation_service.update_position_status_after_close(open_position)
                 processed_open_position_ids.append(open_position.id)
                 last_partial_closure = True
+                close_to_notify = close_position_partial
             else:
                 self._logger.debug(
                     f"Cierre total de open_position {open_position.id} con close_position {close_position.id} "
                     f"por {format(close_amount_tokens_remaining, 'f')} tokens"
                 )
                 close_position.status = ClosePositionStatus.SUCCESS
-                close_position.add_metadata("open_position_amount_sol_executed", open_position.amount_sol_executed)
-                close_position.add_metadata("open_position_total_cost_sol", open_position.total_cost_sol)
+                open_position_proportional_amount_sol_executed = self._calculate_proportional_amount(open_position.amount_tokens_executed, close_position.amount_tokens_executed, format(open_amount_sol_remaining, 'f'))
+                open_position_proportional_total_cost_sol = self._calculate_proportional_amount(open_position.amount_tokens_executed, close_position.amount_tokens_executed, format(open_total_cost_sol_remaining, 'f'))
+                close_position.add_metadata("open_position_proportional_amount_sol_executed", open_position_proportional_amount_sol_executed)
+                close_position.add_metadata("open_position_proportional_total_cost_sol", open_position_proportional_total_cost_sol)
                 open_position.add_close(close_position)
                 self.position_calculation_service.update_position_status_after_close(open_position)
                 processed_open_position_ids.append(open_position.id)
                 last_partial_closure = True
+                close_to_notify = close_position
 
             if close_amount_tokens_remaining == open_amount_tokens_remaining:
                 self._logger.debug(
@@ -202,7 +212,7 @@ class PositionClosureProcessor:
                 self._logger.debug(
                     f"Se notifica cierre parcial para close_position {close_position.id} (aún quedan posiciones por cerrar)"
                 )
-                await self._notify_position(close_position)
+                await self._notify_position(close_to_notify)
 
             close_amount_tokens_remaining -= open_amount_tokens_remaining
 
@@ -224,8 +234,7 @@ class PositionClosureProcessor:
             )
             close_position_partial = self._create_sub_close_position(
                 close_position=close_position,
-                amount_sol_executed=Decimal("0.0"),
-                amount_tokens_executed=close_amount_tokens_remaining,
+                amount_tokens_executed=format(close_amount_tokens_remaining, 'f'),
                 status=ClosePositionStatus.FAILED,
                 message_error = f"No se encontró la posición abierta para cerrar el resto de la posición."
             )
@@ -240,8 +249,7 @@ class PositionClosureProcessor:
     def _create_sub_close_position(
         self,
         close_position: ClosePosition,
-        amount_sol_executed: Decimal,
-        amount_tokens_executed: Decimal,
+        amount_tokens_executed: str,
         open_position_id: str = "",
         status: ClosePositionStatus = ClosePositionStatus.SUCCESS,
         message_error: str = "",
@@ -250,18 +258,31 @@ class PositionClosureProcessor:
         """
         Crea un objeto SubClosePosition para un cierre parcial.
         """
-        self._logger.debug(f"Creando subcierre de posición {close_position.id} con amount_sol_executed {amount_sol_executed}, amount_tokens_executed {amount_tokens_executed}, open_position_id {open_position_id}, status {status}, message_error {message_error}")
+        self._logger.debug(f"Creando subcierre de posición {close_position.id} con amount_tokens_executed {amount_tokens_executed}, open_position_id {open_position_id}, status {status}, message_error {message_error}")
+
+        # Calculate the proportional amount of SOL and total cost of the close position
+        amount_sol_executed = self._calculate_proportional_amount(close_position.amount_tokens_executed, amount_tokens_executed, close_position.amount_sol_executed)
+        total_cost_sol = self._calculate_proportional_amount(close_position.amount_tokens_executed, amount_tokens_executed, close_position.total_cost_sol)
 
         sub_close_position = SubClosePosition(
             close_position=close_position,
-            amount_sol_executed=format(amount_sol_executed, 'f'),
-            amount_tokens_executed=format(amount_tokens_executed, 'f'),
+            amount_sol_executed=amount_sol_executed,
+            amount_tokens_executed=amount_tokens_executed,
+            total_cost_sol=total_cost_sol,
             status=status,
             message_error=message_error
         )
 
-        sub_close_position.add_metadata("open_position_amount_sol_executed", kwargs.get("open_position_amount_sol_executed", ""))
-        sub_close_position.add_metadata("open_position_total_cost_sol", kwargs.get("open_position_total_cost_sol", ""))
+        open_position_amount_tokens_executed = kwargs.get("open_position_amount_tokens_executed", "")
+        open_position_amount_sol_executed = kwargs.get("open_position_amount_sol_executed", "")
+        open_position_total_cost_sol = kwargs.get("open_position_total_cost_sol", "")
+
+        # Calculate the proportional amount of SOL and total cost of the open position
+        open_position_proportional_amount_sol_executed = self._calculate_proportional_amount(open_position_amount_tokens_executed, amount_tokens_executed, open_position_amount_sol_executed)
+        open_position_proportional_total_cost_sol = self._calculate_proportional_amount(open_position_amount_tokens_executed, amount_tokens_executed, open_position_total_cost_sol)
+
+        sub_close_position.add_metadata("open_position_proportional_amount_sol_executed", open_position_proportional_amount_sol_executed)
+        sub_close_position.add_metadata("open_position_proportional_total_cost_sol", open_position_proportional_total_cost_sol)
 
         if self.position_event_bus:
             self._logger.debug(f"Emitiendo evento de cierre parcial {sub_close_position.id}")
@@ -300,6 +321,36 @@ class PositionClosureProcessor:
         except Exception as e:
             self._logger.error(f"Error completando cierre de posición {position.id}: {e}")
             return False
+
+    @staticmethod
+    def _get_percentage_of_tokens(parent_tokens: str, sub_tokens: str) -> str:
+        """
+        Obtiene el porcentaje de tokens que representa este SubClosePosition del ClosePosition padre.
+        """
+        try:
+            parent_tokens_dec = Decimal(parent_tokens or '0')
+            sub_tokens_dec = Decimal(sub_tokens or '0')
+            if parent_tokens_dec > 0 and sub_tokens_dec > 0:
+                percentage = sub_tokens_dec / parent_tokens_dec
+                return format(percentage, 'f')
+            else:
+                return "0.0"
+        except (ValueError, ZeroDivisionError, TypeError):
+            return "0.0"
+
+    @classmethod
+    def _calculate_proportional_amount(cls, parent_tokens: str, sub_tokens: str, amount: str) -> str:
+        """
+        Calcula el monto proporcional basado en el porcentaje de tokens
+        que representa este SubClosePosition del ClosePosition padre.
+        """
+        try:
+            percentage_dec = Decimal(cls._get_percentage_of_tokens(parent_tokens, sub_tokens))
+            amount_dec = Decimal(amount or '0')
+            proportional_amount = amount_dec * percentage_dec
+            return format(proportional_amount.quantize(Decimal("0.000000001"), rounding=ROUND_DOWN).normalize(), 'f')
+        except Exception:
+            return "0.0"
 
     async def _notify_position(self, position: Union[ClosePosition, SubClosePosition]) -> None:
         """

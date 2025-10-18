@@ -182,12 +182,10 @@ class PnLCalculationService:
         try:
             _logger.debug(f"Calculando P&L realizado para cierre parcial {sub_close_position.id}, incluir_costos={include_transaction_costs}")
 
-            open_position_amount_sol_executed = sub_close_position.get_metadata("open_position_amount_sol_executed")
-            open_position_total_cost_sol = sub_close_position.get_metadata("open_position_total_cost_sol")
-            _logger.debug(f"Open position amount sol executed: {open_position_amount_sol_executed}")
-            _logger.debug(f"Open position total cost sol: {open_position_total_cost_sol}")
+            open_position_proportional_amount_sol_executed = sub_close_position.get_metadata("open_position_proportional_amount_sol_executed")
+            open_position_proportional_total_cost_sol = sub_close_position.get_metadata("open_position_proportional_total_cost_sol")
 
-            entry_value = Decimal(open_position_amount_sol_executed or '0')
+            entry_value = Decimal(open_position_proportional_amount_sol_executed or '0')
             total_exit_value = Decimal(sub_close_position.amount_sol_executed or '0')
             close_cost = abs(Decimal(sub_close_position.total_cost_sol or '0'))
             _logger.debug(f"Costos de cierre: {close_cost}")
@@ -195,7 +193,7 @@ class PnLCalculationService:
             pnl_sol_base = total_exit_value - entry_value
             _logger.debug(f"P&L base (sin costos): {pnl_sol_base} SOL")
 
-            total_exit_costs = close_cost + abs(Decimal(open_position_total_cost_sol or '0'))
+            total_exit_costs = close_cost + abs(Decimal(open_position_proportional_total_cost_sol or '0'))
 
             if include_transaction_costs:
                 pnl_sol = pnl_sol_base - total_exit_costs

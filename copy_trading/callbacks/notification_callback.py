@@ -444,6 +444,9 @@ class PositionNotificationCallback:
             sol_price_usd = await self._get_sol_price_usd()
             amount_sol_usd = float(amount_sol or "0.0") * float(sol_price_usd or "0.0")
 
+            fee_sol = position.total_cost_sol
+            fee_sol_usd = float(fee_sol or "0.0") * float(sol_price_usd or "0.0")
+
             # Obtener información de porcentajes
             percentage_info = await self._get_percentage_info(position)
 
@@ -464,7 +467,7 @@ class PositionNotificationCallback:
                 f"🔑 <b>ID:</b> {position.id[:8]}...\n"
                 f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
-                f"🧾 <b>Fee:</b> {self._format_amount(position.total_cost_sol)} SOL\n\n"
+                f"🧾 <b>Fee:</b> {self._format_amount(fee_sol)} SOL ({self._format_amount(fee_sol_usd)} USD)\n\n"
 
                 f"{percentage_info}"
                 f"⏰ <b>Time:</b> {position.executed_at.strftime('%Y-%m-%d %H:%M:%S') if position.executed_at else 'N/A'}"
@@ -499,7 +502,7 @@ class PositionNotificationCallback:
             sol_price_usd = await self._get_sol_price_usd()
 
             # Calcular métricas usando el servicio de cálculo de posición
-            total_closed_sol, total_closed_tokens = self.position_calculation_service.calculate_total_closed_amounts(position)
+            total_closed_sol, total_closed_tokens, _ = self.position_calculation_service.calculate_total_closed_amounts(position)
 
             # Calcular P&L total usando las claves correctas con manejo de errores
             total_pnl_sol = Decimal('0')
@@ -558,10 +561,10 @@ class PositionNotificationCallback:
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
                 f"🔑 <b>ID:</b> {position.id[:8]}...\n"
-                f"📥 <b>Original SOL:</b> {self._format_amount(original_amount)} SOL ({self._format_amount(original_amount_usd)} USD)\n"
+                f"📥 <b>Sent SOL:</b> {self._format_amount(original_amount)} SOL ({self._format_amount(original_amount_usd)} USD)\n"
                 f"📤 <b>Received SOL:</b> {self._format_amount(total_closed_sol)} SOL ({self._format_amount(total_closed_sol_usd)} USD)\n"
-                f"🪙 <b>Original Tokens:</b> {self._format_amount(original_amount_tokens)} Tokens\n"
-                f"🪙 <b>Received Tokens:</b> {self._format_amount(total_closed_tokens)} Tokens\n\n"
+                f"🪙 <b>Received Tokens:</b> {self._format_amount(original_amount_tokens)} Tokens\n"
+                f"🪙 <b>Sent Tokens:</b> {self._format_amount(total_closed_tokens)} Tokens\n\n"
 
                 f"📈 <b>P&L Without Costs</b>\n"
                 f"{'─'*12}\n"

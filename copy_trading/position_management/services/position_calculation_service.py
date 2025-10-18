@@ -47,7 +47,7 @@ class PositionCalculationService:
         return isinstance(close_item, 'SubClosePosition')
 
     @classmethod
-    def _get_close_amounts(cls, close_item: Union['SubClosePosition', 'ClosePosition']) -> Tuple[str, str]:
+    def _get_close_amounts(cls, close_item: Union['SubClosePosition', 'ClosePosition']) -> Tuple[str, str, str]:
         """
         Obtiene los montos de SOL y tokens de un item del historial.
         
@@ -55,9 +55,9 @@ class PositionCalculationService:
             close_item: Item del historial
             
         Returns:
-            Tuple de (amount_sol, amount_tokens)
+            Tuple de (amount_sol, amount_tokens, total_cost_sol)
         """
-        return close_item.amount_sol_executed, close_item.amount_tokens_executed
+        return close_item.amount_sol_executed, close_item.amount_tokens_executed, close_item.total_cost_sol
 
     @classmethod
     def get_last_close_data(cls, position: 'OpenPosition') -> Dict[str, Any]:
@@ -91,7 +91,7 @@ class PositionCalculationService:
         }
 
     @classmethod
-    def calculate_total_closed_amounts(cls, position: 'OpenPosition') -> Tuple[str, str]:
+    def calculate_total_closed_amounts(cls, position: 'OpenPosition') -> Tuple[str, str, str]:
         """
         Calcula los totales acumulados de cierres.
         
@@ -99,19 +99,22 @@ class PositionCalculationService:
             position: Objeto OpenPosition
             
         Returns:
-            Tuple de (total_sol, total_tokens) como strings
+            Tuple de (total_sol, total_tokens, total_cost_sol)
         """
         total_sol = Decimal('0')
         total_tokens = Decimal('0')
+        total_cost_sol = Decimal('0')
 
         for close_item in position.close_history:
-            amount_sol_executed, amount_tokens_executed = cls._get_close_amounts(close_item)
+            amount_sol_executed, amount_tokens_executed, close_total_cost_sol = cls._get_close_amounts(close_item)
             if amount_sol_executed:
                 total_sol += Decimal(amount_sol_executed if amount_sol_executed else "0.0")
             if amount_tokens_executed:
                 total_tokens += Decimal(amount_tokens_executed if amount_tokens_executed else "0.0")
+            if total_cost_sol:
+                total_cost_sol += Decimal(close_total_cost_sol if close_total_cost_sol else "0.0")
 
-        return format(total_sol, "f"), format(total_tokens, "f")
+        return format(total_sol, "f"), format(total_tokens, "f"), format(total_cost_sol, "f")
 
     @classmethod
     def calculate_remaining_tokens(cls, position: 'OpenPosition', exact: bool = False) -> str:
@@ -124,7 +127,7 @@ class PositionCalculationService:
         Returns:
             Cantidad de tokens restantes como string
         """
-        _, total_closed_tokens = cls.calculate_total_closed_amounts(position)
+        _, total_closed_tokens, _ = cls.calculate_total_closed_amounts(position)
         total_original = Decimal(position.amount_tokens_executed if position.amount_tokens_executed else "0.0")
         remaining = max(Decimal('0'), total_original - Decimal(total_closed_tokens))
         if exact:
@@ -132,7 +135,7 @@ class PositionCalculationService:
         return format(remaining.quantize(Decimal("0.0001"), rounding=ROUND_DOWN).normalize(), "f")
 
     @classmethod
-    def calculate_remaining_amounts(cls, position: 'OpenPosition', exact: bool = False) -> Tuple[str, str]:
+    def calculate_remaining_amounts(cls, position: 'OpenPosition', exact: bool = False) -> Tuple[str, str, str]:
         """
         Calcula la cantidad de tokens y SOL restantes.
         
@@ -140,21 +143,27 @@ class PositionCalculationService:
             position: Objeto OpenPosition
             
         Returns:
-            Tuple de (remaining_sol, remaining_tokens) como strings
+            Tuple de (remaining_sol, remaining_tokens, remaining_total_cost_sol)
         """
-        total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
+        total_closed_sol, total_closed_tokens, total_closed_cost_sol = cls.calculate_total_closed_amounts(position)
+
         total_original_tokens = Decimal(position.amount_tokens_executed if position.amount_tokens_executed else "0.0")
         total_original_sol = Decimal(position.amount_sol_executed if position.amount_sol_executed else "0.0")
+        total_original_cost_sol = Decimal(position.total_cost_sol if position.total_cost_sol else "0.0")
+
         remaining_sol = max(Decimal('0'), total_original_sol - Decimal(total_closed_sol))
         remaining_tokens = max(Decimal('0'), total_original_tokens - Decimal(total_closed_tokens))
+        remaining_cost_sol = max(Decimal('0'), total_original_cost_sol - Decimal(total_closed_cost_sol))
         if exact:
             return (
                 format(remaining_sol, "f"), 
-                format(remaining_tokens, "f")
+                format(remaining_tokens, "f"),
+                format(remaining_cost_sol, "f")
             )
         return (
             format(remaining_sol.quantize(Decimal("0.0000001"), rounding=ROUND_DOWN).normalize(), "f"), 
-            format(remaining_tokens.quantize(Decimal("0.0001"), rounding=ROUND_DOWN).normalize(), "f")
+            format(remaining_tokens.quantize(Decimal("0.0001"), rounding=ROUND_DOWN).normalize(), "f"),
+            format(remaining_cost_sol.quantize(Decimal("0.0000001"), rounding=ROUND_DOWN).normalize(), "f")
         )
 
     @classmethod
@@ -165,7 +174,7 @@ class PositionCalculationService:
         Args:
             position: Objeto OpenPosition
         """
-        remaining_tokens, remaining_sol = cls.calculate_remaining_amounts(position)
+        remaining_tokens, remaining_sol, _ = cls.calculate_remaining_amounts(position)
 
         if remaining_tokens == '0' or remaining_sol == '0':
             position.status = PositionStatus.CLOSED
@@ -188,7 +197,7 @@ class PositionCalculationService:
         
         slippage_data = SlippageAnalysisService.calculate_total_slippage_impact(position)
         last_close_data = cls.get_last_close_data(position)
-        total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
+        total_closed_sol, total_closed_tokens, total_closed_cost_sol = cls.calculate_total_closed_amounts(position)
         remaining_tokens = cls.calculate_remaining_tokens(position)
 
         return {
@@ -196,7 +205,7 @@ class PositionCalculationService:
             'close_amount_tokens': last_close_data['amount_tokens'],
             'close_execution_price': last_close_data['execution_price'],
             'close_fee_sol': position.fee_sol,
-            'close_total_cost_sol': total_closed_sol,
+            'close_total_cost_sol': total_closed_cost_sol,
             'close_signature': last_close_data['signature'],
             'total_closed_amount_sol': total_closed_sol,
             'total_closed_tokens': total_closed_tokens,
@@ -220,8 +229,8 @@ class PositionCalculationService:
         Returns:
             Diccionario con métricas calculadas
         """
-        total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
-        remaining_sol, remaining_tokens = cls.calculate_remaining_amounts(position)
+        total_closed_sol, total_closed_tokens, total_closed_cost_sol = cls.calculate_total_closed_amounts(position)
+        remaining_sol, remaining_tokens, _ = cls.calculate_remaining_amounts(position)
         last_close_data = cls.get_last_close_data(position)
 
         return {
@@ -239,7 +248,7 @@ class PositionCalculationService:
             'last_close_execution_price': last_close_data['execution_price'],
             'execution_price': position.execution_price,
             'fee_sol': position.fee_sol,
-            'total_cost_sol': position.total_cost_sol
+            'total_cost_sol': total_closed_cost_sol
         }
 
     @classmethod
@@ -273,7 +282,7 @@ class PositionCalculationService:
         }
 
         # Cálculos básicos
-        total_closed_sol, total_closed_tokens = cls.calculate_total_closed_amounts(position)
+        total_closed_sol, total_closed_tokens, _ = cls.calculate_total_closed_amounts(position)
         remaining_tokens = cls.calculate_remaining_tokens(position)
 
         metrics.update({

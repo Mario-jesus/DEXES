@@ -6,12 +6,14 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Any, List, Union, Tuple, Optional
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, getcontext
 
 from ...data_management.models.data_models import TokenInfo
 from .base_models import Position, TraderTradeData
 from .enums import PositionStatus, ClosePositionStatus
 from .serialization import serialize_for_json
+
+getcontext().prec = 26
 
 
 @dataclass(slots=True)
@@ -72,11 +74,6 @@ class SubClosePosition:
     created_at: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        if not isinstance(self.close_position, ClosePosition):
-            raise ValueError("close_position must be an instance of ClosePosition")
-        self.total_cost_sol = self.calculate_proportional_total_cost()
-
     @property
     def trader_wallet(self) -> str:
         return self.close_position.trader_wallet
@@ -104,38 +101,6 @@ class SubClosePosition:
                 del self.metadata[key_to_remove]
 
         self.metadata[key] = value
-
-    def calculate_proportional_total_cost(self) -> str:
-        """
-        Calcula el total_cost_sol proporcional basado en el porcentaje de tokens
-        que representa este SubClosePosition del ClosePosition padre.
-        
-        Returns:
-            total_cost_sol proporcional como string
-        """
-        try:
-            # Obtener los montos de tokens del ClosePosition padre
-            parent_tokens = Decimal(self.close_position.amount_tokens_executed) if self.close_position.amount_tokens_executed else Decimal('0')
-            parent_total_cost = Decimal(self.close_position.total_cost_sol) if self.close_position.total_cost_sol else Decimal('0')
-
-            # Obtener los montos de tokens de este SubClosePosition
-            sub_tokens = Decimal(self.amount_tokens_executed) if self.amount_tokens_executed else Decimal('0')
-
-            # Validar que los datos sean válidos
-            if parent_tokens <= 0 or sub_tokens <= 0:
-                return "0"
-
-            # Calcular el porcentaje que representa este SubClosePosition
-            percentage = sub_tokens / parent_tokens
-
-            # Calcular el total_cost proporcional
-            proportional_cost = parent_total_cost * percentage
-
-            return format(proportional_cost, 'f')
-
-        except (ValueError, ZeroDivisionError, TypeError):
-            # En caso de error, retornar 0
-            return "0"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convierte a diccionario"""

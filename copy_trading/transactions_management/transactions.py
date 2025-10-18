@@ -141,8 +141,8 @@ class TransactionExecutor:
             mint=trade_data.token_address,
             amount=trade_data.copy_amount_sol if trade_data.denominate_in_sol else trade_data.copy_amount_tokens,
             denominated_in_sol=trade_data.denominate_in_sol,
-            slippage=str(self.config.slippage_tolerance),
-            priority_fee=str(self.config.priority_fee_sol),
+            slippage=self.config.slippage_tolerance_for_buy if trade_data.side == "buy" else self.config.slippage_tolerance_for_sell,
+            priority_fee=self.config.priority_fee_sol,
             pool=trade_data.pool,  # type: ignore
             skip_preflight=True
         )
@@ -184,8 +184,8 @@ class TransactionExecutor:
             mint=trade_data.token_address,
             amount=trade_data.copy_amount_sol if trade_data.denominate_in_sol else trade_data.copy_amount_tokens,
             denominated_in_sol=trade_data.denominate_in_sol,
-            slippage=str(self.config.slippage_tolerance),
-            priority_fee=str(self.config.priority_fee_sol),
+            slippage=self.config.slippage_tolerance_for_buy if trade_data.side == "buy" else self.config.slippage_tolerance_for_sell,
+            priority_fee=self.config.priority_fee_sol,
             pool=trade_data.pool,  # type: ignore
             rpc_endpoint=self.config.rpc_url
         )
@@ -203,7 +203,8 @@ class TransactionExecutor:
         """
         return {
             'transaction_type': self.config.transaction_type.value,
-            'slippage_tolerance': str(self.config.slippage_tolerance),
-            'priority_fee_sol': str(self.config.priority_fee_sol),
+            'slippage_tolerance_for_buy': self.config.slippage_tolerance_for_buy,
+            'slippage_tolerance_for_sell': self.config.slippage_tolerance_for_sell,
+            'priority_fee_sol': self.config.priority_fee_sol,
             'rpc_url': self.config.rpc_url
         }
