@@ -62,6 +62,7 @@ class PositionValidationFailedEvent(BasePositionEvent):
 
 @dataclass(slots=True)
 class PositionCreatedEvent(BasePositionEvent):
+    run_id: Optional[uuid.UUID] = None
     amount_sol: str = ""
     amount_tokens: str = ""
     side: Literal["buy", "sell"] = "buy"
@@ -163,6 +164,9 @@ class PositionTraderTradeDataEvent(BasePositionEvent):
     new_token_balance: str = ""
     pool: str = ""
     bonding_curve_key: str = ""
+    v_sol_in_bonding_curve: str = ""
+    v_tokens_in_bonding_curve: str = ""
+    market_cap_sol: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -175,6 +179,7 @@ class PositionFailedEvent(BasePositionEvent):
 @dataclass(slots=True)
 class MintMetadataUpdatedEvent:
     """Evento para actualizar metadatos básicos del mint."""
+    run_id: uuid.UUID
     mint_address: str
     name: Optional[str] = None
     symbol: Optional[str] = None

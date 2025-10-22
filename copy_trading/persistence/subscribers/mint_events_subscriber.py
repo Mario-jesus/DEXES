@@ -13,13 +13,14 @@ def attach_mint_events_subscriber(bus: PositionEventBus) -> None:
 async def _on_mint_metadata_updated(event: MintMetadataUpdatedEvent) -> None:
     try:
         repo = TraderMintRepository()
-        await repo.upsert_mint(
+        await repo.add_mint_to_run(
+            run_id=event.run_id,
             mint_address=event.mint_address,
-            name=event.name,
-            symbol=event.symbol,
+            name=event.name if event.name else None,
+            symbol=event.symbol if event.symbol else None,
         )
         _logger.debug(
-            f"Mint metadata upserted: {event.mint_address} name={event.name!r} symbol={event.symbol!r}"
+            f"Mint metadata added to run: {event.mint_address} name={event.name!r} symbol={event.symbol!r}"
         )
     except Exception as e:
-        _logger.error(f"Error upsert mint metadata for {event.mint_address}: {e}")
+        _logger.error(f"Error adding mint metadata to run {event.run_id} for {event.mint_address}: {e}")

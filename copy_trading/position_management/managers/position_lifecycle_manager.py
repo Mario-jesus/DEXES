@@ -70,6 +70,9 @@ class PositionLifecycleManager:
                         pool=position_trade_data.pool,
                         bonding_curve_key=position_trade_data.trader_trade_data.bonding_curve_key,
                         new_token_balance=position_trade_data.trader_trade_data.new_token_balance,
+                        v_sol_in_bonding_curve=position_trade_data.trader_trade_data.v_sol_in_bonding_curve,
+                        v_tokens_in_bonding_curve=position_trade_data.trader_trade_data.v_tokens_in_bonding_curve,
+                        market_cap_sol=position_trade_data.trader_trade_data.market_cap_sol,
                         timestamp=position_trade_data.created_at
                     )
                 )

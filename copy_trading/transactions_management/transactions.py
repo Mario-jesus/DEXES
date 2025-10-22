@@ -63,6 +63,7 @@ class TransactionExecutor:
                         position_id=trade_data.id,
                         token_address=trade_data.token_address,
                         trader_wallet=trade_data.trader_wallet,
+                        run_id=self.config.system_run_id,
                         amount_sol=trade_data.copy_amount_sol,
                         amount_tokens=trade_data.copy_amount_tokens,
                         side=trade_data.side,

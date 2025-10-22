@@ -2,7 +2,7 @@
 """
 Configuración del sistema Copy Trading
 """
-import json, random
+import json, random, uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Literal
 from enum import Enum
@@ -170,6 +170,11 @@ class TraderConfig:
 @dataclass
 class CopyTradingConfig:
     """Configuración principal del sistema de copy trading"""
+    # id de correr la instancia del sistema (el usuario no lo puede establecer, modificar ni acceder)
+    system_run_id: uuid.UUID = field(default_factory=lambda: uuid.uuid4(), init=False, repr=False)
+
+    # nombre del sistema (el usuario puede establecerlo)
+    system_name: str = field(default_factory=lambda: "Copy Trading System")
 
     # Traders a seguir
     traders: List[TraderInfo] = field(default_factory=list)
@@ -377,6 +382,7 @@ class CopyTradingConfig:
         return {
             'traders': [trader.to_dict() for trader in self.traders],
             'trader_configs': {k: v.to_dict() for k, v in self.trader_configs.items()},
+            'system_name': self.system_name,
             'wallet_file': self.wallet_file,
             'rpc_url': self.rpc_url,
             'websocket_url': self.websocket_url,
@@ -458,6 +464,9 @@ class CopyTradingConfig:
             # Traders a seguir
             traders=traders,
             trader_configs=trader_configs,
+
+            # Nombre del sistema
+            system_name=data.get('system_name', "Copy Trading System"),
 
             # Wallet y Red
             wallet_file=data.get('wallet_file', 'wallets/wallet_pumpportal.json'),

@@ -33,7 +33,7 @@ from .notifications import (
     ConsoleStrategy
 )
 from .transactions_management import TransactionExecutor, CopyAmountCalculator, Liquidations
-from .persistence.repositories.trader_mint_repository import TraderMintRepository
+from .persistence.repositories import TraderMintRepository, CopyTradingBotRepository, RunRepository
 from .persistence.subscribers import attach_position_events_subscriber, attach_mint_events_subscriber
 
 
@@ -517,6 +517,16 @@ class CopyTrading:
                 finally:
                     self._pending_task = None
 
+            # Setear ended en el run
+            run_repo = RunRepository()
+            run = await run_repo.get(self.config.system_run_id)
+            if not run:
+                msg = "No se pudo obtener el run"
+                self._logger.error(msg)
+                raise RuntimeError(msg)
+
+            await run_repo.set_ended(run.id)
+
             self._logger.warning("Sistema detenido correctamente")
 
         except Exception as e:
@@ -806,7 +816,25 @@ class CopyTrading:
         - Mints: tomados del cache de tokens si hubiera datos disponibles
         """
         try:
-            repo = TraderMintRepository()
+            copy_trading_bot_repo = CopyTradingBotRepository()
+            run_repo = RunRepository()
+            trader_mint_repo = TraderMintRepository()
+
+            if not self.wallet_data:
+                raise ValueError("WalletData no inicializado")
+
+            # Upsert del copy trading bot
+            copy_trading_bot = await copy_trading_bot_repo.upsert_bot(self.wallet_data.wallet_public_key, self.config.system_name)
+
+            # Upsert del run
+            run = await run_repo.create(self.config.system_run_id, copy_trading_bot.system_wallet_address, self.config.dry_run)
+            if not run:
+                msg = "No se pudo crear el run"
+                self._logger.error(msg)
+                raise RuntimeError(msg)
+
+            # Setear started en el run
+            await run_repo.set_started(run.id)
 
             # Upsert de traders desde configuración
             trader_items = []
@@ -818,13 +846,9 @@ class CopyTrading:
                     nickname = None
                 trader_items.append((trader.wallet_address, nickname))
 
-            # Wallet system
-            if self.wallet_data:
-                trader_items.append((self.wallet_data.wallet_public_key, "System"))
-
             if trader_items:
-                count = await repo.bulk_upsert_traders(trader_items)
-                self._logger.debug(f"Traders iniciales persistidos: {count}")
+                count = await trader_mint_repo.bulk_add_traders_to_run(run.id, trader_items)
+                self._logger.debug(f"RunTraders iniciales persistidos: {count}")
 
         except Exception as e:
             self._logger.warning(f"No se pudieron persistir entidades iniciales (traders/mints): {e}")

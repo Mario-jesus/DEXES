@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
+import uuid
 from typing import List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from .base import AsyncRepository
-from ..orm.models import Trader, Mint
+from ..orm.models import Trader, Mint, RunTrader, RunMint
 
 
 class TraderMintRepository(AsyncRepository):
@@ -93,3 +95,75 @@ class TraderMintRepository(AsyncRepository):
         session.add(mint)
         await session.flush()
         return mint
+
+    # ==================== RELACIONES RUN-TRADER / RUN-MINT ====================
+
+    async def add_trader_to_run(self, run_id: uuid.UUID, wallet_address: str, nickname: Optional[str] = None) -> None:
+        """Asegura el Trader y crea (si falta) la relación RunTrader."""
+        async with (await self._get_session()) as session:
+            await self._upsert_trader(session, wallet_address, nickname)
+
+            exists = await session.execute(
+                select(RunTrader).where(
+                    RunTrader.runs_id == run_id,
+                    RunTrader.traders_id == wallet_address,
+                )
+            )
+            if not exists.scalars().first():
+                session.add(RunTrader(runs_id=run_id, traders_id=wallet_address))
+
+            await self._commit(session)
+
+    async def bulk_add_traders_to_run(self, run_id: uuid.UUID, items: List[Tuple[str, Optional[str]]]) -> int:
+        if not items:
+            return 0
+        async with (await self._get_session()) as session:
+            for wallet_address, nickname in items:
+                await self._upsert_trader(session, wallet_address, nickname)
+
+                exists = await session.execute(
+                    select(RunTrader).where(
+                        RunTrader.runs_id == run_id,
+                        RunTrader.traders_id == wallet_address,
+                    )
+                )
+                if not exists.scalars().first():
+                    session.add(RunTrader(runs_id=run_id, traders_id=wallet_address))
+
+            await self._commit(session)
+            return len(items)
+
+    async def add_mint_to_run(self, run_id: uuid.UUID, mint_address: str, name: Optional[str] = None, symbol: Optional[str] = None) -> None:
+        """Asegura el Mint y crea (si falta) la relación RunMint."""
+        async with (await self._get_session()) as session:
+            await self._upsert_mint(session, mint_address, name, symbol)
+
+            exists = await session.execute(
+                select(RunMint).where(
+                    RunMint.runs_id == run_id,
+                    RunMint.mints_id == mint_address,
+                )
+            )
+            if not exists.scalars().first():
+                session.add(RunMint(runs_id=run_id, mints_id=mint_address))
+
+            await self._commit(session)
+
+    async def bulk_add_mints_to_run(self, run_id: uuid.UUID, items: List[Tuple[str, Optional[str], Optional[str]]]) -> int:
+        if not items:
+            return 0
+        async with (await self._get_session()) as session:
+            for mint_address, name, symbol in items:
+                await self._upsert_mint(session, mint_address, name, symbol)
+
+                exists = await session.execute(
+                    select(RunMint).where(
+                        RunMint.runs_id == run_id,
+                        RunMint.mints_id == mint_address,
+                    )
+                )
+                if not exists.scalars().first():
+                    session.add(RunMint(runs_id=run_id, mints_id=mint_address))
+
+            await self._commit(session)
+            return len(items)

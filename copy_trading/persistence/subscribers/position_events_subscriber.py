@@ -41,6 +41,7 @@ class PositionEventsSubscriber:
         bus.on_position_failed(self._on_failed)
 
     async def _process_position_created_and_flush_children(self, event: PositionCreatedEvent) -> None:
+        self._logger.debug(f"Procesando PositionCreatedEvent para posición {event.position_id}")
         await self._on_created(event)
 
         # Mover eventos pendientes fuera del candado para procesarlos sin bloquear
@@ -50,6 +51,9 @@ class PositionEventsSubscriber:
             if key in self._event_cache:
                 pending_events = {k: v for k, v in self._event_cache[key].items() if k != "has_parent"}
                 self._event_cache[key]["has_parent"] = True
+                self._logger.debug(
+                    f"Eventos pendientes encontrados para posición {event.position_id}: {list(pending_events.keys())}"
+                )
             else:
                 self._event_cache[key] = {"has_parent": True}
 
@@ -61,19 +65,32 @@ class PositionEventsSubscriber:
             elif isinstance(evnt, PositionClosedEvent):
                 await self._process_position_closed_and_flush_children(evnt)
             else:
-                self._logger.warning(f"Evento {event_id} no soportado")
+                self._logger.warning(f"Evento {event_id} no soportado para position_id={event.position_id}")
 
     async def _buffer_or_dispatch_position_event(self, event: BasePositionEvent) -> None:
+        self._logger.debug(
+            f"Recibido evento {event.__class__.__name__} para posición {event.position_id} (event_id={event.event_id})"
+        )
         async with self._lock:
             key = (event.position_id, "position")
             has_parent: bool = self._event_cache.get(key, {}).get("has_parent", False)
+            self._logger.debug(
+                f"key={key}, has_parent={has_parent}, event_id={event.event_id}"
+            )
             if key not in self._event_cache:
+                self._logger.debug(
+                    f"No existe key en _event_cache, guardando evento temporalmente para posición {event.position_id} (event_id={event.event_id})"
+                )
                 self._event_cache[key] = {event.event_id: event}
                 return
             elif not has_parent:
+                self._logger.debug(
+                    f"Key existe pero no tiene padre, agregando evento {event.event_id} a _event_cache[position_id={event.position_id}]"
+                )
                 self._event_cache[key][event.event_id] = event
                 return
 
+        self._logger.debug(f"Procesando evento {event.__class__.__name__} para posición {event.position_id} inmediatamente")
         if isinstance(event, PositionTraderTradeDataEvent):
             await self._on_trader_trade_data(event)
         elif isinstance(event, PositionOpenedEvent):
@@ -142,7 +159,10 @@ class PositionEventsSubscriber:
                 f"Creando TraderTradeData con: "
                 f"sol_amount={event.amount_sol}, token_amount={event.token_amount}, "
                 f"new_token_balance={event.new_token_balance}, signature={event.signature}, "
-                f"pool={event.pool}, bonding_curve_key={event.bonding_curve_key}"
+                f"pool={event.pool}, bonding_curve_key={event.bonding_curve_key}, "
+                f"v_sol_in_bonding_curve={event.v_sol_in_bonding_curve}, "
+                f"v_tokens_in_bonding_curve={event.v_tokens_in_bonding_curve}, "
+                f"market_cap_sol={event.market_cap_sol}"
             )
             trader_trade_data = TraderTradeData(
                 positions_id=uuid.UUID(event.position_id),
@@ -151,7 +171,10 @@ class PositionEventsSubscriber:
                 new_token_balance=Decimal(event.new_token_balance),
                 signature=event.signature,
                 pool=event.pool,
-                bonding_curve_key=event.bonding_curve_key
+                bonding_curve_key=event.bonding_curve_key,
+                v_sol_in_bonding_curve=Decimal(event.v_sol_in_bonding_curve),
+                v_tokens_in_bonding_curve=Decimal(event.v_tokens_in_bonding_curve),
+                market_cap_sol=Decimal(event.market_cap_sol)
             )
             s.add(trader_trade_data)
             try:
@@ -161,12 +184,17 @@ class PositionEventsSubscriber:
                 self._logger.error(f"Error committing session: {e}", exc_info=True)
 
     async def _on_created(self, event: PositionCreatedEvent) -> None:
+        if not event.run_id:
+            self._logger.warning(f"Run ID is required for position created event: {event}")
+            return
+
         async with (await self._get_session()) as s:
             mint = await s.get(Mint, event.token_address)
             if not mint:
                 self._logger.debug(f"Mint {event.token_address} no existe, creando registro")
                 repo = self._trader_mint_repository_cls()
-                await repo.upsert_mint(
+                await repo.add_mint_to_run(
+                    run_id=event.run_id,
                     mint_address=event.token_address,
                     name=None,
                     symbol=None,
@@ -175,13 +203,18 @@ class PositionEventsSubscriber:
             self._logger.info(f"Creando posición {event.position_id} para trader {event.trader_wallet}")
             position = Position(
                 id=uuid.UUID(event.position_id),
-                traders_id=event.trader_wallet,
                 mints_id=event.token_address,
                 side=Side(event.side),
-                is_liquidation=event.is_liquidation
+                is_liquidation=event.is_liquidation,
+                runs_id=event.run_id
             )
+
             if event.signature.strip() != "":
                 position.signature = event.signature
+            # Solo se setea el trader si no es una liquidación
+            if event.trader_wallet.strip() != "" and not event.is_liquidation:
+                position.traders_id = event.trader_wallet
+
             s.add(position)
 
             try:

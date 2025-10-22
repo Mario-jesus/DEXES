@@ -1064,6 +1064,7 @@ class TokenTraderManager:
 
                 if self.position_event_bus and (is_fresh_name_valid or is_fresh_symbol_valid):
                     self.position_event_bus.emit_mint_metadata_updated(MintMetadataUpdatedEvent(
+                        run_id=self.config.system_run_id,
                         mint_address=token_address,
                         name=final_name if is_fresh_name_valid else None,
                         symbol=final_symbol if is_fresh_symbol_valid else None
