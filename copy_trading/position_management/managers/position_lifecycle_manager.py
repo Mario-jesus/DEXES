@@ -86,24 +86,18 @@ class PositionLifecycleManager:
                 self._logger.error(f"No se pudo crear posición para trade {signature[:8]}...")
                 return False
 
-            # 2. Agregar a cola de análisis
-            analysis_success = await self.analysis_queue.add_position(position)
-
-            if not analysis_success:
-                self._logger.warning(f"No se pudo agregar posición {position.id} a análisis")
-            else:
-                self._logger.debug(f"Posición {position.id} agregada a cola de análisis")
-
-            self._logger.debug(f"Posición creada exitosamente: {position.id}")
-
-            # 3. Enrutar la posición según su tipo
+            # 2. Enrutar la posición según su tipo
             success = await self._route_position_to_appropriate_queue(position)
 
             if not success:
                 self._logger.error(f"Error enrutando posición {position.id} a cola apropiada")
                 return False
 
-            self._logger.debug(f"Posición {position.id} enrutada correctamente")
+            # 3. Agregar a cola de análisis
+            analysis_success = await self.analysis_queue.add_position(position)
+
+            if not analysis_success:
+                self._logger.warning(f"No se pudo agregar posición {position.id} a análisis")
 
             self._logger.info(f"Procesamiento de posición {position.id} completado exitosamente")
 
@@ -154,11 +148,11 @@ class PositionLifecycleManager:
             self._logger.debug(f"Manejando posición abierta: {position.id}")
             success = await self.open_queue.add_open_position(position)
 
-            if success:
-                self._logger.debug(f"Posición abierta {position.id} agregada exitosamente")
-            else:
+            if not success:
                 self._logger.warning(f"No se pudo agregar posición abierta {position.id}")
+                return False
 
+            self._logger.debug(f"Posición abierta {position.id} agregada exitosamente")
             self._logger.debug(f"Emitiendo evento de posición abierta: {position.id}")
             self.position_event_bus.emit_position_opened(
                 PositionOpenedEvent(
@@ -170,7 +164,7 @@ class PositionLifecycleManager:
                 )
             )
 
-            return success
+            return True
 
         except Exception as e:
             self._logger.error(f"Error manejando posición abierta {position.id}: {e}")
@@ -190,11 +184,11 @@ class PositionLifecycleManager:
             self._logger.debug(f"Manejando posición de cierre: {position.id}")
             success = await self.closed_queue.add_closed_position(position)
 
-            if success:
-                self._logger.debug(f"Posición de cierre {position.id} agregada exitosamente")
-            else:
+            if not success:
                 self._logger.warning(f"No se pudo agregar posición de cierre {position.id}")
+                return False
 
+            self._logger.debug(f"Posición de cierre {position.id} agregada exitosamente")
             self._logger.debug(f"Emitiendo evento de posición cerrada: {position.id}")
             self.position_event_bus.emit_position_closed(
                 PositionClosedEvent(
@@ -207,7 +201,7 @@ class PositionLifecycleManager:
                 )
             )
 
-            return success
+            return True
 
         except Exception as e:
             self._logger.error(f"Error manejando posición de cierre {position.id}: {e}")
