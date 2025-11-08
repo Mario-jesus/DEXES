@@ -3,7 +3,7 @@
 Solana client for analyzing transactions.
 """
 import asyncio
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 from decimal import Decimal, getcontext, ROUND_DOWN
 import aiohttp
 import re
@@ -18,6 +18,9 @@ from ..models import (
     SignatureStatusesResponse,
     SignaturesWithStatuses
 )
+
+if TYPE_CHECKING:
+    from ...position_management.queues import OpenPositionQueue
 
 getcontext().prec = 26
 
@@ -65,7 +68,7 @@ class SolanaTxAnalyzer:
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.stop()
 
     # ================ METODOS PÚBLICOS ================
@@ -81,6 +84,13 @@ class SolanaTxAnalyzer:
             await self._session.close()
             self._session = None
             self._logger.debug("HTTP session closed")
+
+    def set_open_position_queue(self, open_position_queue: 'OpenPositionQueue') -> None:
+        self._open_position_queue = open_position_queue
+
+    def set_system_wallet_address(self, system_wallet_address: str) -> None:
+        self._system_wallet_address = system_wallet_address
+        self._logger.debug(f"System wallet address seteado: {system_wallet_address}")
 
     async def get_token_balances(
         self,

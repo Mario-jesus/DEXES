@@ -243,6 +243,11 @@ class CopyTradingConfig:
     position_tracking_interval: int = 60  # segundos
     max_queue_size: Optional[int] = None
 
+    # Timeout de posiciones
+    position_timeout_enabled: bool = False  # Habilitar cierre automático por timeout
+    max_position_age_seconds: Optional[int] = None  # Tiempo máximo en segundos antes de cerrar automáticamente
+    position_timeout_check_interval: int = 300  # Intervalo de verificación en segundos (default: 5 minutos)
+
     # Persistencia
     data_path: str = "copy_trading/data"
     save_interval_seconds: int = 300  # 5 minutos
@@ -250,6 +255,13 @@ class CopyTradingConfig:
     # WebSocket
     websocket_reconnect_delay: int = 5
     websocket_max_retries: int = 10
+
+    # Redis bridge para PumpFun WebSocket compartido
+    use_pumpfun_redis_bridge: bool = True
+    pumpfun_redis_url: Optional[str] = None
+    pumpfun_redis_namespace: str = "pumpfun"
+    pumpfun_redis_client_id: Optional[str] = None
+    pumpfun_redis_ack_timeout_seconds: int = 10
 
     # Notificaciones
     notifications_enabled: bool = False
@@ -424,10 +436,18 @@ class CopyTradingConfig:
             'auto_close_positions': self.auto_close_positions,
             'position_tracking_interval': self.position_tracking_interval,
             'max_queue_size': self.max_queue_size,
+            'position_timeout_enabled': self.position_timeout_enabled,
+            'max_position_age_seconds': self.max_position_age_seconds,
+            'position_timeout_check_interval': self.position_timeout_check_interval,
             'data_path': self.data_path,
             'save_interval_seconds': self.save_interval_seconds,
             'websocket_reconnect_delay': self.websocket_reconnect_delay,
             'websocket_max_retries': self.websocket_max_retries,
+            'use_pumpfun_redis_bridge': self.use_pumpfun_redis_bridge,
+            'pumpfun_redis_url': self.pumpfun_redis_url,
+            'pumpfun_redis_namespace': self.pumpfun_redis_namespace,
+            'pumpfun_redis_client_id': self.pumpfun_redis_client_id,
+            'pumpfun_redis_ack_timeout_seconds': self.pumpfun_redis_ack_timeout_seconds,
             'notifications_enabled': self.notifications_enabled,
             'telegram_bot_token': self.telegram_bot_token,
             'telegram_chat_id': self.telegram_chat_id,
@@ -529,12 +549,20 @@ class CopyTradingConfig:
             auto_close_positions=data.get('auto_close_positions', True),
             position_tracking_interval=data.get('position_tracking_interval', 60),
             max_queue_size=data.get('max_queue_size'),
+            position_timeout_enabled=data.get('position_timeout_enabled', False),
+            max_position_age_seconds=data.get('max_position_age_seconds'),
+            position_timeout_check_interval=data.get('position_timeout_check_interval', 300),
             data_path=data.get('data_path', 'copy_trading/data'),
             save_interval_seconds=data.get('save_interval_seconds', 300),
 
             # WebSocket
             websocket_reconnect_delay=data.get('websocket_reconnect_delay', 5),
             websocket_max_retries=data.get('websocket_max_retries', 10),
+            use_pumpfun_redis_bridge=data.get('use_pumpfun_redis_bridge', True),
+            pumpfun_redis_url=data.get('pumpfun_redis_url'),
+            pumpfun_redis_namespace=data.get('pumpfun_redis_namespace', 'pumpfun'),
+            pumpfun_redis_client_id=data.get('pumpfun_redis_client_id'),
+            pumpfun_redis_ack_timeout_seconds=data.get('pumpfun_redis_ack_timeout_seconds', 10),
 
             # Notificaciones
             notifications_enabled=data.get('notifications_enabled', False),

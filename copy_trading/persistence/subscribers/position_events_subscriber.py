@@ -204,7 +204,7 @@ class PositionEventsSubscriber:
             position = Position(
                 id=uuid.UUID(event.position_id),
                 mints_id=event.token_address,
-                side=Side(event.side),
+                side=Side(event.side.upper()),
                 is_liquidation=event.is_liquidation,
                 runs_id=event.run_id
             )
@@ -270,7 +270,7 @@ class PositionEventsSubscriber:
                 self._logger.warning(f"Close order {event.position_id} not found")
                 return
 
-            close_status = CloseOrderStatus.SUCCESS if event.status == "success" else CloseOrderStatus.FAILED
+            close_status = CloseOrderStatus(event.status.upper())
             close_order.status = close_status
             self._logger.debug(f"Ejecutando cierre de posición {event.position_id} con estado {event.status}")
 
@@ -321,7 +321,7 @@ class PositionEventsSubscriber:
             partial_close_order = PartialCloseOrder(
                 id=uuid.UUID(event.position_id),
                 close_orders_id=uuid.UUID(event.close_position_id),
-                status=PartialCloseOrderStatus(event.status),
+                status=PartialCloseOrderStatus(event.status.upper()),
             )
             if event.open_position_id.strip() != "":
                 partial_close_order.open_positions_id = uuid.UUID(event.open_position_id)
@@ -390,10 +390,10 @@ class PositionEventsSubscriber:
                     self._logger.warning(f"Open position {event.position_id} not found")
                     return
 
-                sol_amount_executed = Decimal(event.signer_sol_delta) if event.signer_sol_delta else Decimal(0)
-                open_position.sol_amount_executed = abs(sol_amount_executed) if event.signer_sol_delta else None
-                token_amount_executed = Decimal(event.token_ui_delta) if event.token_ui_delta else Decimal(0)
-                open_position.token_amount_received = abs(token_amount_executed) if event.token_ui_delta else None
+                sol_amount_executed = Decimal(event.amount_sol_executed) if event.amount_sol_executed else Decimal(0)
+                open_position.sol_amount_executed = abs(sol_amount_executed) if event.amount_sol_executed else None
+                token_amount_executed = Decimal(event.amount_tokens_executed) if event.amount_tokens_executed else Decimal(0)
+                open_position.token_amount_received = abs(token_amount_executed) if event.amount_tokens_executed else None
                 open_position.status = OpenPositionStatus.FAILED if not event.success else OpenPositionStatus.OPEN
                 self._logger.debug(
                     f"Open position {event.position_id} updated: sol_amount_executed={open_position.sol_amount_executed}, token_amount_received={open_position.token_amount_received}, status={open_position.status}"
@@ -404,10 +404,10 @@ class PositionEventsSubscriber:
                     self._logger.warning(f"Close order {event.position_id} not found")
                     return
 
-                token_amount_sent = Decimal(event.token_ui_delta) if event.token_ui_delta else Decimal(0)
-                close_order.token_amount_sent = abs(token_amount_sent) if event.token_ui_delta else None
-                sol_amount_received = Decimal(event.signer_sol_delta) if event.signer_sol_delta else Decimal(0)
-                close_order.sol_amount_received = abs(sol_amount_received) if event.signer_sol_delta else None
+                token_amount_sent = Decimal(event.amount_tokens_executed) if event.amount_tokens_executed else Decimal(0)
+                close_order.token_amount_sent = abs(token_amount_sent) if event.amount_tokens_executed else None
+                sol_amount_received = Decimal(event.amount_sol_executed) if event.amount_sol_executed else Decimal(0)
+                close_order.sol_amount_received = abs(sol_amount_received) if event.amount_sol_executed else None
                 close_order.status = CloseOrderStatus.FAILED if not event.success else CloseOrderStatus.SUCCESS
                 self._logger.debug(
                     f"Close order {event.position_id} updated: token_amount_sent={close_order.token_amount_sent}, sol_amount_received={close_order.sol_amount_received}, status={close_order.status}"

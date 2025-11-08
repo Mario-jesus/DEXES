@@ -10,7 +10,7 @@ from logging_system import AppLogger
 
 from ...config import CopyTradingConfig
 from ...callbacks.notification_callback import PositionNotificationCallback
-from ...data_management import TradingDataFetcher, TokenTraderManager, SolanaTxAnalyzer, SolanaWebsocketManager
+from ...data_management import TradingDataFetcher, TokenTraderManager
 from ...notifications import NotificationManager
 from ...balance_management import BalanceManager
 from ...events import PositionEventBus
@@ -21,8 +21,9 @@ from ..queues import (
     ClosedPositionQueue,
     PositionNotificationQueue
 )
-from ..processors import PositionClosureProcessor, TradeAnalysisProcessor
-
+from ..processors import PositionClosureProcessor, TradeAnalysisProcessor, AnalysisProcessorProtocol, DryRunAnalysisProcessor
+from copy_trading.protocols import SolanaTxAnalyzerProtocol, SolanaWebsocketProtocol
+from copy_trading.persistence.repositories import PNLRepository
 
 class QueueInitializationManagerComponents(TypedDict):
     pending_queue: 'PendingPositionQueue'
@@ -31,7 +32,7 @@ class QueueInitializationManagerComponents(TypedDict):
     closed_queue: 'ClosedPositionQueue'
     notification_queue: 'PositionNotificationQueue'
     closure_processor: PositionClosureProcessor
-    analysis_processor: TradeAnalysisProcessor
+    analysis_processor: AnalysisProcessorProtocol
     notification_callback: PositionNotificationCallback
 
 
@@ -43,19 +44,22 @@ class QueueInitializationManager:
 
     def __init__(self, 
                     config: CopyTradingConfig,
-                    solana_analyzer: SolanaTxAnalyzer,
-                    solana_websocket: SolanaWebsocketManager,
+                    solana_analyzer: SolanaTxAnalyzerProtocol,
+                    solana_websocket: SolanaWebsocketProtocol,
                     trading_data_fetcher: TradingDataFetcher,
                     token_trader_manager: TokenTraderManager,
                     balance_manager: BalanceManager,
+                    pnl_repository: PNLRepository,
                     position_event_bus: Optional[PositionEventBus] = None,
                     notification_manager: Optional[NotificationManager] = None):
         self._logger = AppLogger(self.__class__.__name__)
+        self._config = config
         self.solana_analyzer = solana_analyzer
         self.solana_websocket = solana_websocket
         self.trading_data_fetcher = trading_data_fetcher
         self.token_trader_manager = token_trader_manager
         self.balance_manager = balance_manager
+        self.pnl_repository = pnl_repository
         self.position_event_bus = position_event_bus
         self.notification_manager = notification_manager
 
@@ -72,7 +76,7 @@ class QueueInitializationManager:
 
         # Referencias a managers y procesadores
         self.closure_processor: Optional[PositionClosureProcessor] = None
-        self.analysis_processor: Optional[TradeAnalysisProcessor] = None
+        self.analysis_processor: Optional[AnalysisProcessorProtocol] = None
         self.notification_callback: Optional[PositionNotificationCallback] = None
 
         # Estado de inicialización
@@ -153,9 +157,11 @@ class QueueInitializationManager:
             self._logger.debug("Inicializando callback de notificaciones")
             if self.notification_manager:
                 self.notification_callback = PositionNotificationCallback(
+                    run_id=self._config.system_run_id,
                     notification_manager=self.notification_manager,
                     trading_data_fetcher=self.trading_data_fetcher,
-                    token_trader_manager=self.token_trader_manager
+                    token_trader_manager=self.token_trader_manager,
+                    pnl_repository=self.pnl_repository
                 )
                 self._logger.debug("Callback de notificaciones inicializado")
             else:
@@ -231,6 +237,9 @@ class QueueInitializationManager:
             )
             await self.open_queue.__aenter__()
 
+            if self._config.dry_run:
+                self.solana_analyzer.set_open_position_queue(self.open_queue)
+
             self._logger.debug("Cola de posiciones abiertas inicializada")
             return True
         except Exception as e:
@@ -278,11 +287,17 @@ class QueueInitializationManager:
                 position_event_bus=self.position_event_bus
             )
 
-            self.analysis_processor = TradeAnalysisProcessor(
-                solana_analyzer=self.solana_analyzer,
-                token_trader_manager=self.token_trader_manager,
-                position_event_bus=self.position_event_bus
-            )
+            if self._config.dry_run:
+                self.analysis_processor = DryRunAnalysisProcessor(
+                    position_event_bus=self.position_event_bus,
+                    analyzer=self.solana_analyzer
+                )
+            else:
+                self.analysis_processor = TradeAnalysisProcessor(
+                    solana_analyzer=self.solana_analyzer,
+                    token_trader_manager=self.token_trader_manager,
+                    position_event_bus=self.position_event_bus
+                )
 
             # Inyectar closure_processor a closed_queue ahora que existe
             try:

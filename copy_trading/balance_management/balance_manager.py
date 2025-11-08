@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, getcontext
 
 from logging_system import AppLogger
-from copy_trading.data_management import SolanaTxAnalyzer
+from copy_trading.protocols import SolanaTxAnalyzerProtocol
 
 from ..config import CopyTradingConfig, AmountMode
 from ..events import PositionEventBus, PositionAnalysisEvent, PositionAnalysisFinishedEvent, PositionQueuedEvent
@@ -47,12 +47,12 @@ class BalanceManager:
     Gestor de balances asíncrono, cacheado y consistente con eventos del sistema.
     """
 
-    def __init__(self, config: CopyTradingConfig, solana_analyzer: SolanaTxAnalyzer, position_event_bus: PositionEventBus):
+    def __init__(self, config: CopyTradingConfig, solana_analyzer: SolanaTxAnalyzerProtocol, position_event_bus: PositionEventBus):
         self.config = config
         self._logger = AppLogger(self.__class__.__name__)
 
         # Cliente on-chain (inicializado asíncronamente)
-        self._solana_analyzer: SolanaTxAnalyzer = solana_analyzer
+        self._solana_analyzer: SolanaTxAnalyzerProtocol = solana_analyzer
 
         # Event bus
         self.position_event_bus = position_event_bus
@@ -92,20 +92,20 @@ class BalanceManager:
 
     # ==================== API PÚBLICA: LECTURAS ====================
 
-    async def get_sol_balance(self, only_in_memory: bool = False) -> str:
+    async def get_sol_balance(self, only_in_memory: bool = False, force_onchain: bool = False) -> str:
         """Retorna el balance SOL del wallet del sistema."""
         async with self._lock:
             wallet = self._require_system_wallet()
             # Si hay análisis pendientes de cualquier token, preferimos on-chain para SOL también
-            if not only_in_memory and self._has_pending_analysis_any():
+            if not only_in_memory and (self._has_pending_analysis_any() or force_onchain):
                 return await self._get_onchain_sol_balance(wallet)
             return self._balances_by_trader.get(wallet, TraderBalances()).sol
 
-    async def get_token_balance(self, mint_addresses: List[str], only_in_memory: bool = False) -> Dict[str, str]:
+    async def get_token_balance(self, mint_addresses: List[str], only_in_memory: bool = False, force_onchain: bool = False) -> Dict[str, str]:
         """Retorna el balance de un token del wallet del sistema."""
         async with self._lock:
             wallet = self._require_system_wallet()
-            if not only_in_memory and self._has_pending_analysis(mint_addresses):
+            if not only_in_memory and (self._has_pending_analysis(mint_addresses) or force_onchain):
                 return await self._get_onchain_token_balance(wallet, mint_addresses)
             tb = self._balances_by_trader.get(wallet, TraderBalances())
             return {mint_address: tb.tokens.get(mint_address, "0.0") for mint_address in mint_addresses}

@@ -11,7 +11,10 @@ from logging_system import AppLogger
 
 from ..position_management.models import TraderTradeData, PositionTraderTradeData, OpenPosition
 from ..transactions_management import TransactionExecutor
-from ..position_management.managers import PositionQueueManager
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..position_management.managers import PositionQueueManager
 
 
 class MinimumBalanceHandler:
@@ -24,7 +27,7 @@ class MinimumBalanceHandler:
         self,
         system_wallet_address: str,
         transaction_executor: TransactionExecutor,
-        position_queue_manager: PositionQueueManager,
+        position_queue_manager: "PositionQueueManager",
         cooldown_seconds: int = 60
     ):
         """

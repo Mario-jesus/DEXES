@@ -12,11 +12,14 @@ from dataclasses import dataclass, field
 from ..config import CopyTradingConfig
 from ..position_management.models import TraderTradeData, PositionTraderTradeData
 from ..position_management.queues import PendingPositionQueue, OpenPositionQueue
-from ..validation import ValidationEngine
 from ..transactions_management import CopyAmountCalculator
 from ..data_management import TokenTraderManager
 from ..events import PositionEventBus, PositionValidationFailedEvent
 from logging_system import AppLogger
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..validation import ValidationEngine
 
 # Configurar precisión decimal según preferencias del usuario
 getcontext().prec = 26
@@ -52,7 +55,7 @@ class TradeProcessorCallback:
     def __init__(self, 
                     config: CopyTradingConfig,
                     pending_position_queue: PendingPositionQueue,
-                    validation_engine: ValidationEngine,
+                    validation_engine: "ValidationEngine",
                     token_trader_manager: TokenTraderManager,
                     amount_calculator: CopyAmountCalculator,
                     position_event_bus: PositionEventBus,

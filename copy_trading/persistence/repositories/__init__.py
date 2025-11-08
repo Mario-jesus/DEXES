@@ -6,10 +6,12 @@ from .base import AsyncRepository
 from .copy_trading_bot_repository import CopyTradingBotRepository
 from .run_repository import RunRepository
 from .trader_mint_repository import TraderMintRepository
+from .pnl_repository import PNLRepository
 
 __all__ = [
     "AsyncRepository",
     "CopyTradingBotRepository",
     "RunRepository",
-    "TraderMintRepository"
+    "TraderMintRepository",
+    "PNLRepository",
 ]

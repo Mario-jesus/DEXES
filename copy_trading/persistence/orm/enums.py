@@ -2,26 +2,26 @@
 from enum import Enum
 
 class OpenPositionStatus(str, Enum):
-    PENDING = "pending"
-    OPEN = "open"
-    PARTIALLY_CLOSED = "partially_closed"
-    CLOSED = "closed"
-    FAILED = "failed"
+    PENDING = "PENDING"
+    OPEN = "OPEN"
+    PARTIALLY_CLOSED = "PARTIALLY_CLOSED"
+    CLOSED = "CLOSED"
+    FAILED = "FAILED"
 
 
 class CloseOrderStatus(str, Enum):
-    PENDING = "pending"
-    PARTIAL = "partial"
-    SUCCESS = "success"
-    FAILED = "failed"
+    PENDING = "PENDING"
+    PARTIAL = "PARTIAL"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
 
 
 class PartialCloseOrderStatus(str, Enum):
-    PENDING = "pending"
-    SUCCESS = "success"
-    FAILED = "failed"
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
 
 
 class Side(str, Enum):
-    BUY = "buy"
-    SELL = "sell"
+    BUY = "BUY"
+    SELL = "SELL"

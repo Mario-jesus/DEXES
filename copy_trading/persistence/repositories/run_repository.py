@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import uuid
 from typing import Optional
+from decimal import Decimal
 from sqlalchemy import func
 
 from .base import AsyncRepository
@@ -34,6 +35,26 @@ class RunRepository(AsyncRepository):
             if not run:
                 return None
             run.ended_at = func.now()
+            await session.flush()
+            await self._commit(session)
+            return run
+
+    async def set_initial_capital_sol(self, run_id: uuid.UUID, initial_capital_sol: Decimal) -> Optional[Run]:
+        async with (await self._get_session()) as session:
+            run = await session.get(Run, run_id)
+            if not run:
+                return None
+            run.initial_capital_sol = initial_capital_sol
+            await session.flush()
+            await self._commit(session)
+            return run
+
+    async def set_final_capital_sol(self, run_id: uuid.UUID, final_capital_sol: Decimal) -> Optional[Run]:
+        async with (await self._get_session()) as session:
+            run = await session.get(Run, run_id)
+            if not run:
+                return None
+            run.final_capital_sol = final_capital_sol
             await session.flush()
             await self._commit(session)
             return run

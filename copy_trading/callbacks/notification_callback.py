@@ -4,6 +4,7 @@ Callback especializado para notificaciones de posiciones en Copy Trading.
 Integra con NotificationManager para procesar diferentes tipos de eventos.
 """
 import re
+import uuid
 from typing import Optional, Union, Dict, Any
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
@@ -25,6 +26,7 @@ from ..position_management.services import (
     PnLCalculationService, 
     PositionCalculationService
 )
+from ..persistence.repositories import PNLRepository
 
 
 
@@ -36,21 +38,27 @@ class PositionNotificationCallback:
 
     def __init__(
         self,
+        run_id: uuid.UUID,
         notification_manager: Optional[NotificationManager] = None,
         trading_data_fetcher: Optional[TradingDataFetcher] = None,
-        token_trader_manager: Optional[TokenTraderManager] = None
+        token_trader_manager: Optional[TokenTraderManager] = None,
+        pnl_repository: Optional[PNLRepository] = None
     ):
         """
         Inicializa el callback de notificaciones.
         
         Args:
+            run_id: ID del run al que pertenecen las posiciones
             notification_manager: Manager de notificaciones
             trading_data_fetcher: Fetcher de datos de trading
             token_trader_manager: Manager de traders y tokens
+            pnl_repository: Repositorio para almacenar PNL realizado
         """
+        self.run_id = run_id
         self.notification_manager = notification_manager
         self.trading_data_fetcher = trading_data_fetcher
         self.token_trader_manager = token_trader_manager
+        self.pnl_repository = pnl_repository or PNLRepository()
         self._logger = AppLogger(self.__class__.__name__)
 
         # Instanciar servicios
@@ -347,6 +355,11 @@ class PositionNotificationCallback:
         pnl_sol_with_costs_acc_total = "0.0"
         pnl_usd_with_costs_acc_total = "0.0"
 
+        total_volume_sol_open_token = "0.0"
+        total_volume_sol_closed_token = "0.0"
+        total_volume_sol_open_total = "0.0"
+        total_volume_sol_closed_total = "0.0"
+
         if self.token_trader_manager:
             self._logger.debug(f"Registrando P&L en token_trader_manager para wallet: {position.trader_wallet[:8]}... y token: {position.token_address[:8]}... | pnl_sol={pnl_sol}, pnl_sol_with_costs={pnl_sol_with_costs}")
             # Usar el nuevo método que actualiza TraderStats y TraderTokenStats simultáneamente
@@ -366,6 +379,9 @@ class PositionNotificationCallback:
             pnl_usd_acc_token = format(Decimal(pnl_sol_acc_token) * Decimal(sol_price_usd or "0.0"), "f")
             pnl_sol_with_costs_acc_token = trader_token_stats.total_pnl_sol_with_costs
             pnl_usd_with_costs_acc_token = format(Decimal(pnl_sol_with_costs_acc_token) * Decimal(sol_price_usd or "0.0"), "f")
+
+            total_volume_sol_open_token = trader_token_stats.total_volume_sol_open
+            total_volume_sol_closed_token = trader_token_stats.total_volume_sol_closed
 
             self._logger.debug(f"P&L acumulado por token: pnl_sol_acc_token={pnl_sol_acc_token}, pnl_usd_acc={pnl_usd_acc_token}, pnl_sol_with_costs_acc_token={pnl_sol_with_costs_acc_token}, pnl_usd_with_costs_acc_token={pnl_usd_with_costs_acc_token}")
 
@@ -387,6 +403,9 @@ class PositionNotificationCallback:
             position.add_metadata('pnl_sol_with_costs_acc_total', pnl_sol_with_costs_acc_total)
             position.add_metadata('pnl_usd_with_costs_acc_total', pnl_usd_with_costs_acc_total)
 
+            total_volume_sol_open_total = trader_stats.total_volume_sol_open
+            total_volume_sol_closed_total = trader_stats.total_volume_sol_closed
+
         return {
             "pnl_sol_acc_token": pnl_sol_acc_token,
             "pnl_usd_acc_token": pnl_usd_acc_token,
@@ -395,7 +414,11 @@ class PositionNotificationCallback:
             "pnl_sol_acc_total": pnl_sol_acc_total,
             "pnl_usd_acc_total": pnl_usd_acc_total,
             "pnl_sol_with_costs_acc_total": pnl_sol_with_costs_acc_total,
-            "pnl_usd_with_costs_acc_total": pnl_usd_with_costs_acc_total
+            "pnl_usd_with_costs_acc_total": pnl_usd_with_costs_acc_total,
+            "total_volume_sol_open_token": total_volume_sol_open_token,
+            "total_volume_sol_closed_token": total_volume_sol_closed_token,
+            "total_volume_sol_open_total": total_volume_sol_open_total,
+            "total_volume_sol_closed_total": total_volume_sol_closed_total
         }
 
     async def _calculate_pnl_and_register_trader_stats(self, position: OpenPosition) -> Dict[str, str]:
@@ -455,16 +478,17 @@ class PositionNotificationCallback:
                 f"📊 <b>Trade Summary</b>\n"
                 f"{'─'*12}\n"
                 f"💎 <b>Token:</b> {token_info['name']} ({token_info['symbol']})\n"
-                f"🔗 <b>Address:</b> {token_info['address'][:8]}...\n\n"
+                f"🔗 <b>Address:</b> {token_info['address']}\n\n"
 
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
                 f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
-                f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+                f"🔗 <b>Address:</b> {trader_wallet}\n\n"
 
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
-                f"🔑 <b>ID:</b> {position.id[:8]}...\n"
+                f"🔑 <b>ID Position:</b> {position.id}\n"
+                f"🔗 <b>Signature:</b> {position.execution_signature or 'N/A'}\n"
                 f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"🧾 <b>Fee:</b> {self._format_amount(fee_sol)} SOL ({self._format_amount(fee_sol_usd)} USD)\n\n"
@@ -472,9 +496,6 @@ class PositionNotificationCallback:
                 f"{percentage_info}"
                 f"⏰ <b>Time:</b> {position.executed_at.strftime('%Y-%m-%d %H:%M:%S') if position.executed_at else 'N/A'}"
             )
-
-            if position.execution_signature:
-                message += f"\n🔗 Signature: {position.execution_signature[:8]}..."
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "success")
@@ -497,6 +518,15 @@ class PositionNotificationCallback:
             validation = self.validation_service.validate_position_data(position)
             if validation['has_issues']:
                 self._logger.info(f"Position data issues: {validation['issues']}")
+
+            def _safe_decimal(value: Union[str, Decimal, float, int]) -> Decimal:
+                try:
+                    if value is None:
+                        return Decimal('0')
+                    return Decimal(str(value))
+                except (InvalidOperation, ValueError, TypeError):
+                    self._logger.warning(f"Valor decimal inválido para conversión: {value}, usando 0")
+                    return Decimal('0')
 
             # Obtener precio del SOL en USD
             sol_price_usd = await self._get_sol_price_usd()
@@ -530,6 +560,20 @@ class PositionNotificationCallback:
             total_pnl_sol_with_costs_acc_total = Decimal(pnl_data['pnl_sol_with_costs_acc_total'])
             total_pnl_usd_with_costs_acc_total = Decimal(pnl_data['pnl_usd_with_costs_acc_total'])
 
+            total_volume_sol_open_token = _safe_decimal(pnl_data.get('total_volume_sol_open_token', '0'))
+            total_volume_sol_closed_token = _safe_decimal(pnl_data.get('total_volume_sol_closed_token', '0'))
+            token_base_amount = total_volume_sol_open_token if total_volume_sol_open_token != Decimal('0') else total_volume_sol_closed_token
+
+            total_volume_sol_open_total = _safe_decimal(pnl_data.get('total_volume_sol_open_total', '0'))
+            total_volume_sol_closed_total = _safe_decimal(pnl_data.get('total_volume_sol_closed_total', '0'))
+            total_base_amount = total_volume_sol_open_total if total_volume_sol_open_total != Decimal('0') else total_volume_sol_closed_total
+
+            pnl_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_token, token_base_amount)
+            pnl_with_costs_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_token, token_base_amount)
+
+            pnl_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_total, total_base_amount)
+            pnl_with_costs_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_total, total_base_amount)
+
             # Obtener wallet del trader
             trader_wallet = position.trader_wallet
             original_amount = position.amount_sol_executed
@@ -537,6 +581,11 @@ class PositionNotificationCallback:
 
             original_amount_usd = float(original_amount or "0.0") * float(sol_price_usd or "0.0")
             total_closed_sol_usd = float(total_closed_sol or "0.0") * float(sol_price_usd or "0.0")
+
+            # Calcular porcentajes de P&L
+            original_amount_decimal = Decimal(original_amount or "0.0")
+            pnl_percentage = self._calculate_pnl_percentage(total_pnl_sol, original_amount_decimal)
+            pnl_with_costs_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs, original_amount_decimal)
 
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
@@ -551,16 +600,16 @@ class PositionNotificationCallback:
                 f"📊 <b>Trade Summary</b>\n"
                 f"{'─'*12}\n"
                 f"💎 <b>Token:</b> {token_info['name']} ({token_info['symbol']})\n"
-                f"🔗 <b>Address:</b> {token_info['address'][:8]}...\n\n"
+                f"🔗 <b>Address:</b> {token_info['address']}\n\n"
 
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
                 f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
-                f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+                f"🔗 <b>Address:</b> {trader_wallet}\n\n"
 
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
-                f"🔑 <b>ID:</b> {position.id[:8]}...\n"
+                f"🔑 <b>ID Position:</b> {position.id}\n"
                 f"📥 <b>Sent SOL:</b> {self._format_amount(original_amount)} SOL ({self._format_amount(original_amount_usd)} USD)\n"
                 f"📤 <b>Received SOL:</b> {self._format_amount(total_closed_sol)} SOL ({self._format_amount(total_closed_sol_usd)} USD)\n"
                 f"🪙 <b>Received Tokens:</b> {self._format_amount(original_amount_tokens)} Tokens\n"
@@ -569,22 +618,28 @@ class PositionNotificationCallback:
                 f"📈 <b>P&L Without Costs</b>\n"
                 f"{'─'*12}\n"
                 f"{pnl_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol)} SOL\n"
-                f"{pnl_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd)} USD\n\n"
+                f"{pnl_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd)} USD\n"
+                f"{pnl_indicator} <b>%:</b> {pnl_percentage}%\n\n"
 
                 f"💹 <b>P&L With Costs</b>\n"
                 f"{'─'*12}\n"
                 f"{pnl_with_costs_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol_with_costs)} SOL\n"
-                f"{pnl_with_costs_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd_with_costs)} USD\n\n"
+                f"{pnl_with_costs_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd_with_costs)} USD\n"
+                f"{pnl_with_costs_indicator} <b>%:</b> {pnl_with_costs_percentage}%\n\n"
 
                 f"📊 <b>Accumulated P&L (This Token)</b>\n"
                 f"{'─'*12}\n"
                 f"{pnl_acc_token_indicator} <b>Without Costs:</b> {self._format_amount(total_pnl_sol_acc_token)} SOL ({self._format_amount(total_pnl_usd_acc_token)} USD)\n"
-                f"{pnl_with_costs_acc_token_indicator} <b>With Costs:</b> {self._format_amount(total_pnl_sol_with_costs_acc_token)} SOL ({self._format_amount(total_pnl_usd_with_costs_acc_token)} USD)\n\n"
+                f"{pnl_acc_token_indicator} <b>%:</b> {pnl_acc_token_percentage}%\n"
+                f"{pnl_with_costs_acc_token_indicator} <b>With Costs:</b> {self._format_amount(total_pnl_sol_with_costs_acc_token)} SOL ({self._format_amount(total_pnl_usd_with_costs_acc_token)} USD)\n"
+                f"{pnl_with_costs_acc_token_indicator} <b>%:</b> {pnl_with_costs_acc_token_percentage}%\n\n"
 
                 f"📊 <b>Accumulated P&L (Total Trader)</b>\n"
                 f"{'─'*12}\n"
                 f"{pnl_acc_total_indicator} <b>Without Costs:</b> {self._format_amount(total_pnl_sol_acc_total)} SOL ({self._format_amount(total_pnl_usd_acc_total)} USD)\n"
-                f"{pnl_with_costs_acc_total_indicator} <b>With Costs:</b> {self._format_amount(total_pnl_sol_with_costs_acc_total)} SOL ({self._format_amount(total_pnl_usd_with_costs_acc_total)} USD)\n\n"
+                f"{pnl_acc_total_indicator} <b>%:</b> {pnl_acc_total_percentage}%\n"
+                f"{pnl_with_costs_acc_total_indicator} <b>With Costs:</b> {self._format_amount(total_pnl_sol_with_costs_acc_total)} SOL ({self._format_amount(total_pnl_usd_with_costs_acc_total)} USD)\n"
+                f"{pnl_with_costs_acc_total_indicator} <b>%:</b> {pnl_with_costs_acc_total_percentage}%\n\n"
 
                 f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
@@ -596,6 +651,9 @@ class PositionNotificationCallback:
             if self.notification_manager:
                 await self.notification_manager.notify(message, "success")
                 self._logger.debug(f"Notificación de posición cerrada enviada: {position.id}")
+
+            # Almacenar PNL en la base de datos
+            await self._store_pnl(position, pnl_data)
 
         except Exception as e:
             self.stats['error_notifications'] += 1
@@ -619,25 +677,23 @@ class PositionNotificationCallback:
                 f"📊 <b>Trade Summary</b>\n"
                 f"{'─'*12}\n"
                 f"💎 <b>Token:</b> {token_info['name']} ({token_info['symbol']})\n"
-                f"🔗 <b>Address:</b> {token_info['address'][:8]}...\n\n"
+                f"🔗 <b>Address:</b> {token_info['address']}\n\n"
 
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
                 f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
-                f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+                f"🔗 <b>Address:</b> {trader_wallet}\n\n"
 
                 f"💰 <b>Trade Details</b>\n"
                 f"{'─'*12}\n"
-                f"🔑 <b>ID:</b> {position.id[:8]}...\n"
+                f"🔑 <b>ID Position:</b> {position.id}\n"
+                f"🔗 <b>Signature:</b> {position.execution_signature or 'N/A'}\n"
                 f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
 
                 f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
-
-            if position.execution_signature:
-                message += f"\n🔗 Signature: {position.execution_signature[:8]}..."
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "error")
@@ -671,13 +727,22 @@ class PositionNotificationCallback:
             total_pnl_sol_with_costs = Decimal(pnl_data['pnl_sol_with_costs'])
             total_pnl_usd_with_costs = Decimal(pnl_data['pnl_usd_with_costs'])
 
+            # Calcular monto inicial proporcional para el porcentaje de P&L
+            # El monto inicial es aproximadamente el monto recibido menos el P&L
+            amount_sol_decimal = Decimal(amount_sol or "0.0")
+            initial_amount_proportional = amount_sol_decimal - total_pnl_sol
+
+            # Calcular porcentajes de P&L
+            pnl_percentage = self._calculate_pnl_percentage(total_pnl_sol, initial_amount_proportional)
+            pnl_with_costs_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs, initial_amount_proportional)
+
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
             pnl_with_costs_indicator = '🟢' if total_pnl_sol_with_costs > 0 else '🔴'
 
             if not close_position.is_liquidation:
                 trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
-                trader_info_message += f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+                trader_info_message += f"🔗 <b>Address:</b> {trader_wallet}\n\n"
             else:
                 trader_info_message = "⚡ Automatic liquidation by the system\n\n"
 
@@ -689,7 +754,7 @@ class PositionNotificationCallback:
                 f"📊 <b>Trade Summary</b>\n"
                 f"{'─'*12}\n"
                 f"💎 <b>Token:</b> {token_info['name']} ({token_info['symbol']})\n"
-                f"🔗 <b>Address:</b> {token_info['address'][:8]}...\n\n"
+                f"🔗 <b>Address:</b> {token_info['address']}\n\n"
 
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
@@ -697,26 +762,26 @@ class PositionNotificationCallback:
 
                 f"💰 <b>Close Details</b>\n"
                 f"{'─'*12}\n"
-                f"🔑 <b>ID:</b> {position_id[:8]}...\n"
+                f"🔑 <b>ID Position:</b> {position_id}\n"
+                f"🔗 <b>Signature:</b> {signature or 'N/A'}\n"
                 f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n\n"
 
                 f"📈 <b>P&L Without Costs</b>\n"
                 f"{'─'*12}\n"
                 f"{pnl_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol)} SOL\n"
-                f"{pnl_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd)} USD\n\n"
+                f"{pnl_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd)} USD\n"
+                f"{pnl_indicator} <b>%:</b> {pnl_percentage}%\n\n"
 
                 f"💹 <b>P&L With Costs</b>\n"
                 f"{'─'*12}\n"
                 f"{pnl_with_costs_indicator} <b>SOL:</b> {self._format_amount(total_pnl_sol_with_costs)} SOL\n"
-                f"{pnl_with_costs_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd_with_costs)} USD\n\n"
+                f"{pnl_with_costs_indicator} <b>USD:</b> {self._format_amount(total_pnl_usd_with_costs)} USD\n"
+                f"{pnl_with_costs_indicator} <b>%:</b> {pnl_with_costs_percentage}%\n\n"
 
                 f"{percentage_info}"
                 f"⏰ <b>Time:</b> {executed_at.strftime('%Y-%m-%d %H:%M:%S') if executed_at else 'N/A'}"
             )
-
-            if signature:
-                message += f"\n🔗 Signature: {signature[:8]}..."
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "info")
@@ -756,7 +821,7 @@ class PositionNotificationCallback:
 
             if not close_position.is_liquidation:
                 trader_info_message = f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
-                trader_info_message += f"🔗 <b>Address:</b> {trader_wallet[:8]}...\n\n"
+                trader_info_message += f"🔗 <b>Address:</b> {trader_wallet}\n\n"
             else:
                 trader_info_message = "⚡ Automatic liquidation by the system\n\n"
 
@@ -765,7 +830,7 @@ class PositionNotificationCallback:
                 f"📊 <b>Trade Summary</b>\n"
                 f"{'─'*12}\n"
                 f"💎 <b>Token:</b> {token_info['name']} ({token_info['symbol']})\n"
-                f"🔗 <b>Address:</b> {token_info['address'][:8]}...\n\n"
+                f"🔗 <b>Address:</b> {token_info['address']}\n\n"
 
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
@@ -773,7 +838,8 @@ class PositionNotificationCallback:
 
                 f"💰 <b>Close Details</b>\n"
                 f"{'─'*12}\n"
-                f"🔑 <b>ID:</b> {position_id[:8]}...\n"
+                f"🔑 <b>ID Position:</b> {position_id}\n"
+                f"🔗 <b>Signature:</b> {signature or 'N/A'}\n"
                 f"📤 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
@@ -790,9 +856,6 @@ class PositionNotificationCallback:
 
                 f"⏰ <b>Time:</b> {executed_at.strftime('%Y-%m-%d %H:%M:%S') if executed_at else 'N/A'}"
             )
-
-            if signature:
-                message += f"\n🔗 Signature: {signature[:8]}..."
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "error")
@@ -847,6 +910,50 @@ class PositionNotificationCallback:
         except Exception as e:
             self._logger.error(f"Error formateando valor '{value}': {e}")
             return '0'
+
+    def _calculate_pnl_percentage_decimal(self, pnl_sol: Decimal, initial_amount_sol: Decimal) -> Optional[Decimal]:
+        """Calcula el porcentaje de P&L como Decimal (método base).
+        
+        Args:
+            pnl_sol: P&L en SOL
+            initial_amount_sol: Monto inicial invertido en SOL
+            
+        Returns:
+            Decimal con el porcentaje de P&L o None si no se puede calcular
+        """
+        try:
+            if initial_amount_sol == Decimal('0') or initial_amount_sol is None:
+                return None
+
+            pnl_percent = (pnl_sol / initial_amount_sol) * Decimal('100.0')
+            return pnl_percent
+        except Exception as e:
+            self._logger.error(f"Error calculando porcentaje de P&L: {e}")
+            return None
+
+    def _calculate_pnl_percentage(self, pnl_sol: Decimal, initial_amount_sol: Decimal) -> str:
+        """
+        Calcula el porcentaje de P&L basado en el monto inicial invertido.
+        Usa _calculate_pnl_percentage_decimal internamente y formatea el resultado como string.
+        
+        Args:
+            pnl_sol: P&L en SOL
+            initial_amount_sol: Monto inicial invertido en SOL
+            
+        Returns:
+            String formateado con el porcentaje de P&L
+        """
+        try:
+            pnl_percent = self._calculate_pnl_percentage_decimal(pnl_sol, initial_amount_sol)
+
+            if pnl_percent is None:
+                return '0.00'
+
+            pnl_percent_str = format(pnl_percent.quantize(Decimal('0.01'), rounding=ROUND_DOWN).normalize(), "f")
+            return pnl_percent_str.rstrip('0').rstrip('.') if pnl_percent_str else '0.00'
+        except Exception as e:
+            self._logger.error(f"Error calculando porcentaje de P&L: {e}")
+            return '0.00'
 
     async def _get_percentage_info(self, position: Union[OpenPosition, ClosePosition, SubClosePosition]) -> str:
         try:
@@ -914,3 +1021,65 @@ class PositionNotificationCallback:
             'last_notification_time': None
         }
         self._logger.debug("Estadísticas del callback reseteadas")
+
+    async def _store_pnl(self, position: OpenPosition, pnl_data: Dict[str, str]) -> None:
+        """Almacena el PNL realizado en la base de datos.
+        
+        Args:
+            position: Posición cerrada con PNL calculado
+            pnl_data: Diccionario con los datos de PNL calculados
+        """
+        try:
+            if not self.pnl_repository:
+                self._logger.debug("PNLRepository no disponible, saltando almacenamiento de PNL")
+                return
+
+            # Convertir valores de PNL a Decimal
+            pnl_without_cost_sol = Decimal(pnl_data.get('pnl_sol', '0.0'))
+            pnl_without_cost_pct_sol = self._calculate_pnl_percentage_decimal(
+                pnl_without_cost_sol,
+                Decimal(position.amount_sol_executed or '0.0')
+            )
+            pnl_with_cost_sol = Decimal(pnl_data.get('pnl_sol_with_costs', '0.0'))
+            pnl_with_cost_pct_sol = self._calculate_pnl_percentage_decimal(
+                pnl_with_cost_sol,
+                Decimal(position.amount_sol_executed or '0.0')
+            )
+
+            # Obtener volumen de la posición (monto inicial invertido)
+            volume_sol = Decimal(position.amount_sol_executed or '0.0')
+
+            # Convertir position.id (string UUID) a UUID
+            open_positions_id = uuid.UUID(position.id)
+
+            # Obtener wallet_address y mint_address
+            wallet_address = position.trader_wallet
+            mint_address = position.token_address
+
+            if not wallet_address or not mint_address:
+                self._logger.warning(
+                    f"Faltan datos requeridos para almacenar PNL: "
+                    f"wallet_address={wallet_address}, mint_address={mint_address}"
+                )
+                return
+
+            # Almacenar PNL usando el repositorio
+            await self.pnl_repository.record_realized_pnl(
+                open_positions_id=open_positions_id,
+                pnl_without_cost_sol=pnl_without_cost_sol,
+                pnl_without_cost_pct_sol=pnl_without_cost_pct_sol,
+                pnl_with_cost_sol=pnl_with_cost_sol,
+                pnl_with_cost_pct_sol=pnl_with_cost_pct_sol,
+                runs_id=self.run_id,
+                wallet_address=wallet_address,
+                mint_address=mint_address,
+                volume_sol=volume_sol,
+            )
+
+            self._logger.debug(
+                f"PNL almacenado exitosamente para posición {position.id}: "
+                f"runs_id={self.run_id}, trader={wallet_address[:8]}..., mint={mint_address[:8]}..., volume={volume_sol}"
+            )
+
+        except Exception as e:
+            self._logger.error(f"Error almacenando PNL para posición {position.id}: {e}", exc_info=True)

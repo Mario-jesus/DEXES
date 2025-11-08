@@ -16,7 +16,7 @@ from logging_system import AppLogger
 from .config import CopyTradingConfig
 from .validation import ValidationEngine
 from .balance_management import BalanceManager
-from .callbacks import TradeProcessorCallback, MinimumBalanceHandler
+from .callbacks import TradeProcessorCallback, MinimumBalanceHandler, DryRunMinimumBalanceHandler, MinimumBalanceHandlerProtocol
 from .position_management import PositionQueueManager
 from .position_management.models import PositionTraderTradeData
 from .events import PositionEventBus, PositionExecutionFailedEvent, PositionFailedEvent
@@ -25,15 +25,27 @@ from .data_management import (
     TradingDataFetcher, 
     SolanaTxAnalyzer, 
     SolanaWebsocketManager,
-    TradingDataStore
+    TradingDataStore,
+    PumpFunRedisSubscriptions
 )
+from .data_management.solana_manager import DryRunSolanaTxAnalyzer, DryRunSolanaWebsocketManager
 from .notifications import (
     NotificationManager,
     TelegramStrategy,
     ConsoleStrategy
 )
-from .transactions_management import TransactionExecutor, CopyAmountCalculator, Liquidations
-from .persistence.repositories import TraderMintRepository, CopyTradingBotRepository, RunRepository
+from .transactions_management import (
+    TransactionExecutor,
+    CopyAmountCalculator,
+    Liquidations,
+    DryRunTransactionExecutor,
+    TransactionExecutorProtocol,
+    DryRunLiquidations,
+    LiquidationsProtocol
+)
+from .position_timeout import PositionTimeoutManager
+from .data_management import MoralisPriceClient
+from .persistence.repositories import TraderMintRepository, CopyTradingBotRepository, RunRepository, PNLRepository
 from .persistence.subscribers import attach_position_events_subscriber, attach_mint_events_subscriber
 
 
@@ -61,6 +73,10 @@ class CopyTrading:
         self.trading_data_fetcher = TradingDataFetcher(rpc_url=config.rpc_url)
         self._logger.debug("TradingDataFetcher inicializado")
 
+        # Inicializar MoralisPriceClient
+        self.moralis_client = MoralisPriceClient()
+        self._logger.debug("MoralisPriceClient inicializado")
+
         # Inicializar TradingDataStore
         self.trading_data_store = TradingDataStore()
         self._logger.debug("TradingDataStore inicializado")
@@ -81,9 +97,12 @@ class CopyTrading:
         else:
             self._logger.debug("Sistema de notificaciones deshabilitado")
 
-        # Inicializar SolanaTxAnalyzer
-        self.solana_analyzer = SolanaTxAnalyzer(endpoint=config.rpc_url)
-        self.solana_websocket = SolanaWebsocketManager(ws_url=config.websocket_url)
+        if self.config.dry_run:
+            self.solana_analyzer = DryRunSolanaTxAnalyzer(config=config)
+            self.solana_websocket = DryRunSolanaWebsocketManager(ws_url=config.websocket_url)
+        else:
+            self.solana_analyzer = SolanaTxAnalyzer(endpoint=config.rpc_url)
+            self.solana_websocket = SolanaWebsocketManager(ws_url=config.websocket_url)
 
         # Balance manager centralizado (antes de crear colas/managers para inyectarlo)
         self.balance_manager = BalanceManager(
@@ -91,6 +110,8 @@ class CopyTrading:
             solana_analyzer=self.solana_analyzer,
             position_event_bus=self.position_event_bus
         )
+
+        pnl_repository = PNLRepository()
 
         self.queue_manager = PositionQueueManager(
             config=config,
@@ -100,7 +121,8 @@ class CopyTrading:
             token_trader_manager=self.token_trader_manager,
             balance_manager=self.balance_manager,
             position_event_bus=self.position_event_bus,
-            notification_manager=self.notification_manager
+            notification_manager=self.notification_manager,
+            pnl_repository=pnl_repository
         )
         self._logger.debug("PositionQueueManager inicializado")
 
@@ -127,19 +149,23 @@ class CopyTrading:
         self.wallet_data: Optional[WalletData] = None
 
         self.subscriptions: Optional[PumpFunSubscriptions] = None
+        self.redis_subscriptions: Optional[PumpFunRedisSubscriptions] = None
         self.transactions_manager: Optional[PumpFunTransactions] = None
 
         # Transaction executor (se inicializará en start())
-        self.transaction_executor: Optional[TransactionExecutor] = None
+        self.transaction_executor: Optional[TransactionExecutorProtocol] = None
 
         # Liquidations
-        self.liquidations: Optional[Liquidations] = None
+        self.liquidations: Optional[LiquidationsProtocol] = None
+
+        # Position Timeout Manager
+        self.position_timeout_manager: Optional[PositionTimeoutManager] = None
 
         # Callback (se inicializará después de que las colas estén listas)
         self.trade_processor_callback: Optional[TradeProcessorCallback] = None
 
         # Minimum balance handler
-        self.minimum_balance_handler: Optional[MinimumBalanceHandler] = None
+        self.minimum_balance_handler: Optional[MinimumBalanceHandlerProtocol] = None
 
         # Estado
         self.is_running = False
@@ -253,11 +279,28 @@ class CopyTrading:
             self._logger.debug("Cliente API conectado")
 
             # Conectar cliente WebSocket
-            self.ws_client = PumpFunWebSocketApiClient(api_key=self.wallet_data.api_key)
-            await self.ws_client.connect()
-            self._logger.debug("Cliente WebSocket conectado")
+            if self.config.use_pumpfun_redis_bridge:
+                redis_url = self.config.pumpfun_redis_url or "redis://localhost:6379/0"
+                self._logger.debug(
+                    f"Inicializando PumpFunRedisSubscriptions ({redis_url}, namespace={self.config.pumpfun_redis_namespace})"
+                )
+                self.redis_subscriptions = PumpFunRedisSubscriptions(
+                    redis_url=redis_url,
+                    namespace=self.config.pumpfun_redis_namespace,
+                    client_id=self.config.pumpfun_redis_client_id or f"copytrading-{self.config.system_run_id}",
+                    ack_timeout=float(self.config.pumpfun_redis_ack_timeout_seconds),
+                )
+                await self.redis_subscriptions.start()
+                self._logger.debug("PumpFunRedisSubscriptions iniciado")
+            else:
+                self.ws_client = PumpFunWebSocketApiClient(api_key=self.wallet_data.api_key)
+                await self.ws_client.connect()
+                self._logger.debug("Cliente WebSocket conectado")
+                self.subscriptions = PumpFunSubscriptions(ws_client=self.ws_client)
+                self._logger.debug("Sistema de suscripciones PumpFun inicializado")
 
             # Inicializar SolanaTxAnalyzer
+            self.solana_analyzer.set_system_wallet_address(self.wallet_data.wallet_public_key)
             await self.solana_analyzer.__aenter__()
             self._logger.debug("SolanaTxAnalyzer inicializado")
 
@@ -270,31 +313,59 @@ class CopyTrading:
             await self.balance_manager.start(system_wallet_address=self.wallet_data.wallet_public_key)
             self._logger.debug("BalanceManager inicializado")
 
-            # Initialize transaction manager con el cliente centralizado
-            self.transactions_manager = PumpFunTransactions(api_client=self.http_client, api_key=self.wallet_data.api_key)
-            self._logger.debug("PumpFunTransactions inicializado")
+            # Inicializar MoralisPriceClient
+            await self.moralis_client.start()
+            self._logger.debug("MoralisPriceClient inicializado")
 
-            # Inicializar TransactionExecutor
-            self.transaction_executor = TransactionExecutor(
-                config=self.config,
-                transactions_manager=self.transactions_manager,
-                wallet_data=self.wallet_data,
-                position_event_bus=self.position_event_bus
-            )
-            self._logger.debug("TransactionExecutor inicializado")
+            if self.config.dry_run:
+                self.transaction_executor = DryRunTransactionExecutor(
+                    config=self.config,
+                    moralis_client=self.moralis_client,
+                    position_event_bus=self.position_event_bus
+                )
 
-            # Inicializar Liquidations
-            self.liquidations = Liquidations(
-                system_wallet_address=self.wallet_data.wallet_public_key,
-                solana_analyzer=self.solana_analyzer,
-                transaction_executor=self.transaction_executor,
-                position_queue_manager=self.queue_manager
-            )
-            self._logger.debug("Liquidations inicializado")
+                self.liquidations = DryRunLiquidations(
+                    system_wallet_address=self.wallet_data.wallet_public_key,
+                    solana_analyzer=self.solana_analyzer,
+                    transaction_executor=self.transaction_executor,
+                    position_queue_manager=self.queue_manager
+                )
+                self._logger.debug("DryRunLiquidations inicializado")
+            else:
+                # Initialize transaction manager con el cliente centralizado
+                self.transactions_manager = PumpFunTransactions(api_client=self.http_client, api_key=self.wallet_data.api_key)
+                self._logger.debug("PumpFunTransactions inicializado")
 
-            # Inicializar subscriptions con el cliente centralizado
-            self.subscriptions = PumpFunSubscriptions(ws_client=self.ws_client)
-            self._logger.debug("PumpFunSubscriptions inicializado")
+                # Inicializar TransactionExecutor
+                self.transaction_executor = TransactionExecutor(
+                    config=self.config,
+                    transactions_manager=self.transactions_manager,
+                    wallet_data=self.wallet_data,
+                    position_event_bus=self.position_event_bus
+                )
+                self._logger.debug("TransactionExecutor inicializado")
+
+                # Inicializar Liquidations
+                self.liquidations = Liquidations(
+                    system_wallet_address=self.wallet_data.wallet_public_key,
+                    solana_analyzer=self.solana_analyzer,
+                    transaction_executor=self.transaction_executor,
+                    position_queue_manager=self.queue_manager
+                )
+                self._logger.debug("Liquidations inicializado")
+
+            # Inicializar PositionTimeoutManager (tanto para dry_run como live)
+            if self.config.position_timeout_enabled:
+                self.position_timeout_manager = PositionTimeoutManager(
+                    config=self.config,
+                    position_queue_manager=self.queue_manager,
+                    transaction_executor=self.transaction_executor,
+                    position_event_bus=self.position_event_bus,
+                    system_wallet_address=self.wallet_data.wallet_public_key
+                )
+                await self.position_timeout_manager.start()
+                self._logger.debug("PositionTimeoutManager inicializado y ejecutándose")
+
 
             if not self.queue_manager.pending_queue:
                 error_msg = "PendingPositionQueue no inicializado"
@@ -328,26 +399,51 @@ class CopyTrading:
 
             # Inicializar MinimumBalanceHandler
             self._logger.debug("Inicializando MinimumBalanceHandler...")
-            self.minimum_balance_handler = MinimumBalanceHandler(
+            if self.config.dry_run:
+                self.minimum_balance_handler = DryRunMinimumBalanceHandler(
+                    system_wallet_address=self.wallet_data.wallet_public_key,
+                    transaction_executor=self.transaction_executor,
+                    position_queue_manager=self.queue_manager
+                )
+                self._logger.debug("MinimumBalanceHandler inicializado")
+            elif isinstance(self.transaction_executor, TransactionExecutor):
+                self.minimum_balance_handler = MinimumBalanceHandler(
                 system_wallet_address=self.wallet_data.wallet_public_key,
                 transaction_executor=self.transaction_executor,
                 position_queue_manager=self.queue_manager
-            )
-            self._logger.debug("MinimumBalanceHandler inicializado")
+                )
+                self._logger.debug("[DRY RUN] MinimumBalanceHandler inicializado")
+            else:
+                self._logger.error("TransactionExecutor no inicializado")
+                raise ValueError("TransactionExecutor no inicializado")
 
-            # Establecer callback de errores en WebSocket
-            self.ws_client.set_error_callback(self.minimum_balance_handler)
-            self._logger.debug("Callback de errores en WebSocket registrado")
-
-            # Suscribirse a trades de los traders
+            # Obtener addresses de los traders
             trader_addresses = [trader.wallet_address for trader in self.config.traders]
-            self._logger.debug(f"Suscribiendo a {len(trader_addresses)} traders: {[addr[:8] + '...' for addr in trader_addresses]}")
-            await self.subscriptions.subscribe_account_trade(
-                account_addresses=trader_addresses,
-                callback=self.trade_processor_callback,
-            )
 
-            self._logger.debug(f"Suscrito a {len(self.config.traders)} traders")
+            # Establecer callback de errores y suscribirse a trades
+            if self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
+                #self.redis_subscriptions.set_error_callback(self.minimum_balance_handler)
+                #self._logger.debug("Callback de errores registrado en consumidor Redis")
+                # Suscribirse a trades de los traders
+                self._logger.debug(f"Suscribiendo a {len(trader_addresses)} traders: {[addr[:8] + '...' for addr in trader_addresses]}")
+                await self.redis_subscriptions.subscribe_account_trade(
+                    account_addresses=trader_addresses,
+                    callback=self.trade_processor_callback,
+                )
+                self._logger.debug(f"Suscrito a {len(self.config.traders)} traders")
+            elif self.subscriptions and self.ws_client:
+                self.ws_client.set_error_callback(self.minimum_balance_handler)
+                self._logger.debug("Callback de errores en WebSocket registrado")
+                # Suscribirse a trades de los traders
+                self._logger.debug(f"Suscribiendo a {len(trader_addresses)} traders: {[addr[:8] + '...' for addr in trader_addresses]}")
+                await self.subscriptions.subscribe_account_trade(
+                    account_addresses=trader_addresses,
+                    callback=self.trade_processor_callback,
+                )
+                self._logger.debug(f"Suscrito a {len(self.config.traders)} traders")
+            else:
+                self._logger.error("No se puede establecer callback de errores ni suscribirse a trades")
+                raise ValueError("No se puede establecer callback de errores ni suscribirse a trades")
 
             # Actualizar estado
             self.is_running = True
@@ -363,6 +459,9 @@ class CopyTrading:
                     f"- Traders: 👥 {len(self.config.traders)}"
                 )
                 await self.notification_manager.notify_system(status_msg, "success")
+
+            # Mostrar mensaje de modo de trading
+            self.trading_mode_message()
 
             # Lanzar el loop de procesamiento de posiciones pendientes
             if not self._pending_task:
@@ -386,16 +485,21 @@ class CopyTrading:
             self._logger.info("Deteniendo sistema Copy Trading")
             # Desuscribir y desconectar WebSocket de PumpFun para detener pings
             try:
-                if self.subscriptions:
+                if self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
+                    self._logger.debug("Desconectando consumidor Redis de PumpFun...")
+                    await self.redis_subscriptions.disconnect()
+                    self._logger.debug("Consumidor Redis de PumpFun desconectado")
+                elif self.subscriptions and self.ws_client:
                     self._logger.debug("Desconectando cliente WebSocket de PumpFun...")
                     await self.subscriptions.disconnect()
-                    self._logger.debug("Cliente WebSocket de PumpFun desconectado")
-                elif self.ws_client:
-                    self._logger.debug("Desconectando cliente WebSocket de PumpFun...")
+                    self._logger.debug("Interfaz de suscripciones PumpFun desconectada")
                     await self.ws_client.disconnect()
                     self._logger.debug("Cliente WebSocket de PumpFun desconectado")
+                else:
+                    self._logger.error("No se puede desconectar WebSocket de PumpFun")
+                    raise ValueError("No se puede desconectar WebSocket de PumpFun")
             except Exception as e:
-                self._logger.error(f"Error desconectando WebSocket de PumpFun: {e}")
+                self._logger.error(f"Error desconectando PumpFun: {e}")
 
             # Cerrar callback
             if self.trade_processor_callback:
@@ -405,6 +509,14 @@ class CopyTrading:
             if self.liquidations:
                 await self.liquidations.run()
                 self._logger.debug("Liquidaciones detenidas")
+
+            # Detener PositionTimeoutManager
+            if self.position_timeout_manager:
+                try:
+                    await self.position_timeout_manager.stop()
+                    self._logger.debug("PositionTimeoutManager detenido")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo PositionTimeoutManager: {e}")
 
             self.is_running = False
 
@@ -439,6 +551,11 @@ class CopyTrading:
                     self._logger.debug("BalanceManager cerrado")
                 except Exception as e:
                     self._logger.error(f"Error cerrando BalanceManager: {e}")
+
+            # Cerrar MoralisPriceClient
+            if self.moralis_client:
+                await self.moralis_client.stop()
+                self._logger.debug("MoralisPriceClient cerrado")
 
             # Desconectar API
             if self.http_client:
@@ -525,7 +642,11 @@ class CopyTrading:
                 self._logger.error(msg)
                 raise RuntimeError(msg)
 
+            # Setear ended en el run
             await run_repo.set_ended(run.id)
+            # Setear final capital sol en el run (balance final de la wallet)
+            final_capital_sol = Decimal(total_pnl['current_balance_sol'] or "0.0")
+            await run_repo.set_final_capital_sol(run.id, final_capital_sol)
 
             self._logger.warning("Sistema detenido correctamente")
 
@@ -549,9 +670,17 @@ class CopyTrading:
             trader_info = self.config.add_trader_by_wallet_address(trader_address)
 
             # Si el sistema está corriendo, actualizar suscripción
-            if self.is_running and self.subscriptions:
+            if self.is_running and self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
                 self._logger.debug("Actualizando suscripciones para incluir nuevo trader...")
-                await self.subscriptions.unsubscribe_account_trade([trader.wallet_address for trader in self.config.traders[:-1]])
+                await self.redis_subscriptions.unsubscribe_account_trade([trader.wallet_address for trader in self.config.traders if trader.wallet_address != trader_address])
+                await self.redis_subscriptions.subscribe_account_trade(
+                    account_addresses=[trader.wallet_address for trader in self.config.traders],
+                    callback=self.trade_processor_callback,
+                )
+                self._logger.debug("Suscripciones actualizadas")
+            elif self.is_running and self.subscriptions:
+                self._logger.debug("Actualizando suscripciones para incluir nuevo trader...")
+                await self.subscriptions.unsubscribe_account_trade([trader.wallet_address for trader in self.config.traders if trader.wallet_address != trader_address])
                 await self.subscriptions.subscribe_account_trade(
                     account_addresses=[trader.wallet_address for trader in self.config.traders],
                     callback=self.trade_processor_callback,
@@ -576,7 +705,18 @@ class CopyTrading:
             self.config.remove_trader_info(trader_info)
 
             # Si el sistema está corriendo, actualizar suscripción
-            if self.is_running and self.subscriptions:
+            if self.is_running and self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
+                self._logger.debug("Actualizando suscripciones para excluir trader...")
+                await self.redis_subscriptions.unsubscribe_account_trade([trader_address])
+                if self.config.traders:  # Si quedan traders
+                    await self.redis_subscriptions.subscribe_account_trade(
+                        account_addresses=[trader.wallet_address for trader in self.config.traders],
+                        callback=self.trade_processor_callback,
+                    )
+                    self._logger.debug("Suscripciones actualizadas")
+                else:
+                    self._logger.debug("No quedan traders para suscribir")
+            elif self.is_running and self.subscriptions:
                 self._logger.debug("Actualizando suscripciones para excluir trader...")
                 await self.subscriptions.unsubscribe_account_trade([trader_address])
                 if self.config.traders:  # Si quedan traders
@@ -613,7 +753,7 @@ class CopyTrading:
         current_balance = 0.0
         if self.balance_manager and self.wallet_data:
             try:
-                current_balance = await self.balance_manager.get_sol_balance()
+                current_balance = await self.balance_manager.get_sol_balance(force_onchain=True)
                 self._logger.debug(f"Balance actual obtenido: {current_balance} SOL")
             except Exception as e:
                 # Error: registrar y continuar con balance 0
@@ -784,7 +924,7 @@ class CopyTrading:
         sol_price = Decimal(await self.trading_data_fetcher.get_sol_price_usd() or "0.0")
         initial_balance = Decimal(self.config.general_available_balance_to_invest or "0.0")
         initial_balance_usd = initial_balance * sol_price
-        current_balance = Decimal(await self.balance_manager.get_sol_balance() or "0.0")
+        current_balance = Decimal(await self.balance_manager.get_sol_balance(force_onchain=True) or "0.0")
         current_balance_usd = current_balance * sol_price
         pnl_sol = current_balance - initial_balance
         pnl_usd = pnl_sol * sol_price
@@ -806,6 +946,32 @@ class CopyTrading:
             "pnl_usd": pnl_usd,
             "pnl_percent": pnl_percent_str
         }
+
+    def trading_mode_message(self) -> None:
+        """
+        Obtiene el mensaje de modo de trading
+        """
+        if self.config.dry_run:
+            self._logger.warning(f"=" * 80)
+            self._logger.warning("⚠️  MODO DRY RUN ACTIVADO")
+            self._logger.warning("⚠️  No se ejecutarán trades reales on-chain")
+            self._logger.warning("⚠️  Las signatures serán falsas (DRY_RUN_xxx)")
+            self._logger.warning("⚠️  Los precios se obtendrán de Moralis API")
+            self._logger.warning("⚠️  Los balances se actualizarán como si fueran reales")
+            self._logger.warning("=" * 80)
+        elif isinstance(self.transaction_executor, TransactionExecutor):
+            self._logger.info("=" * 80)
+            self._logger.info("ℹ️  MODO REAL ACTIVADO")
+            self._logger.info("ℹ️  Se ejecutarán trades reales on-chain")
+            self._logger.info("ℹ️  Las signatures serán reales")
+            self._logger.info("ℹ️  Los precios se obtendrán de la API de PumpFun")
+            self._logger.info("ℹ️  Los balances se actualizarán como si fueran reales")
+            self._logger.info("=" * 80)
+        else:
+            self._logger.error("=" * 80)
+            self._logger.error("❌  MODO DESCONOCIDO ACTIVADO")
+            self._logger.error("❌  No se puede determinar el modo de trading")
+            self._logger.error("=" * 80)
 
     # ==================== Persistencia inicial ====================
     async def _persist_initial_config_entities(self) -> None:
@@ -835,6 +1001,9 @@ class CopyTrading:
 
             # Setear started en el run
             await run_repo.set_started(run.id)
+
+            # Setear initial capital sol en el run (balance inicial de la wallet)
+            await run_repo.set_initial_capital_sol(run.id, Decimal(self.config.general_available_balance_to_invest or "0.0"))
 
             # Upsert de traders desde configuración
             trader_items = []

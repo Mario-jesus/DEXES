@@ -8,7 +8,8 @@ from decimal import Decimal
 from typing import Union, cast, Tuple, Optional
 
 from logging_system import AppLogger
-from ...data_management import TokenTraderManager, SolanaTxAnalyzer
+from ...data_management import TokenTraderManager
+from copy_trading.protocols import SolanaTxAnalyzerProtocol
 from ...data_management.models import TransactionAnalysis
 from ...events import PositionEventBus, PositionAnalysisEvent
 from ..models import Position, OpenPosition, ClosePosition
@@ -21,7 +22,7 @@ class TradeAnalysisProcessor:
     """
 
     def __init__(self, 
-                    solana_analyzer: SolanaTxAnalyzer,
+                    solana_analyzer: SolanaTxAnalyzerProtocol,
                     token_trader_manager: TokenTraderManager,
                     position_event_bus: Optional[PositionEventBus] = None):
         self._logger = AppLogger(self.__class__.__name__)
@@ -164,6 +165,8 @@ class TradeAnalysisProcessor:
                     mint_address=position.token_address,
                     signer_sol_delta=analysis_result.signer_sol_delta,
                     token_ui_delta=analysis_result.token_ui_delta,
+                    amount_sol_executed=format(abs(Decimal(analysis_result.bonding_curve_sol_delta or "0.0")), "f"),
+                    amount_tokens_executed=format(abs(Decimal(analysis_result.token_ui_delta or "0.0")), "f"),
                     fee_sol=analysis_result.fee_sol,
                     total_cost_sol=analysis_result.total_cost_sol,
                 ))

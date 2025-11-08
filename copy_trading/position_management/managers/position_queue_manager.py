@@ -9,18 +9,20 @@ from typing import Optional, Dict, Any, TYPE_CHECKING
 from logging_system import AppLogger
 
 from ...config import CopyTradingConfig
-from ...data_management import TradingDataFetcher, TokenTraderManager, SolanaTxAnalyzer, SolanaWebsocketManager
+from ...data_management import TradingDataFetcher, TokenTraderManager
 from ...notifications import NotificationManager
 from ...balance_management import BalanceManager
 from ...events import PositionEventBus
 from ..models import PositionTraderTradeData, Position, OpenPosition, ClosePosition, PositionStatus
-from ..processors import PositionClosureProcessor, TradeAnalysisProcessor
+from ..processors import PositionClosureProcessor, AnalysisProcessorProtocol
 from ..factories import PositionFactory
 from .position_lifecycle_manager import PositionLifecycleManager
 from .queue_initialization_manager import QueueInitializationManager
 
 if TYPE_CHECKING:
     from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue, ClosedPositionQueue, PositionNotificationQueue
+    from copy_trading.protocols import SolanaTxAnalyzerProtocol, SolanaWebsocketProtocol
+    from copy_trading.persistence.repositories import PNLRepository
 
 
 class PositionQueueManager:
@@ -30,12 +32,13 @@ class PositionQueueManager:
     """
 
     def __init__(self, config: CopyTradingConfig,
-                solana_analyzer: SolanaTxAnalyzer,
-                solana_websocket: SolanaWebsocketManager,
+                solana_analyzer: 'SolanaTxAnalyzerProtocol',
+                solana_websocket: 'SolanaWebsocketProtocol',
                 trading_data_fetcher: TradingDataFetcher,
                 token_trader_manager: TokenTraderManager,
                 balance_manager: BalanceManager,
                 position_event_bus: PositionEventBus,
+                pnl_repository: 'PNLRepository',
                 notification_manager: Optional[NotificationManager] = None):
         # Logger
         self._logger = AppLogger(self.__class__.__name__)
@@ -49,7 +52,8 @@ class PositionQueueManager:
             token_trader_manager=token_trader_manager,
             balance_manager=balance_manager,
             position_event_bus=position_event_bus,
-            notification_manager=notification_manager
+            notification_manager=notification_manager,
+            pnl_repository=pnl_repository
         )
 
         self.position_factory = PositionFactory()
@@ -63,7 +67,7 @@ class PositionQueueManager:
 
         # Referencias a managers y procesadores
         self.closure_processor: Optional[PositionClosureProcessor] = None
-        self.analysis_processor: Optional[TradeAnalysisProcessor] = None
+        self.analysis_processor: Optional[AnalysisProcessorProtocol] = None
 
         # Manager de ciclo de vida
         self.lifecycle_manager: Optional[PositionLifecycleManager] = None

@@ -3,7 +3,18 @@ import uuid
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import String, Text, Enum, ForeignKey, UUID, DECIMAL, DateTime, func
+from sqlalchemy import (
+    String,
+    Text,
+    Enum,
+    ForeignKey,
+    ForeignKeyConstraint,
+    UniqueConstraint,
+    UUID,
+    DECIMAL,
+    DateTime,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .enums import OpenPositionStatus, CloseOrderStatus, Side, PartialCloseOrderStatus
@@ -56,6 +67,8 @@ class Run(Base):
     is_dry_run: Mapped[bool] = mapped_column(default=False, nullable=False)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    initial_capital_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    final_capital_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
 
     copy_trading_bots_id: Mapped[str] = mapped_column(
         ForeignKey("copy_trading_bots.system_wallet_address", ondelete="RESTRICT"),
@@ -77,6 +90,7 @@ class RunTrader(Base):
 
     run: Mapped["Run"] = relationship(back_populates="run_traders", uselist=False)
     trader: Mapped["Trader"] = relationship(back_populates="run_traders", uselist=False)
+    pnl_realized: Mapped["PNLRealizedTrader"] = relationship(back_populates="run_trader", uselist=False, cascade="all, delete-orphan", single_parent=True, passive_deletes=True)
 
 
 class RunMint(Base):
@@ -87,6 +101,7 @@ class RunMint(Base):
 
     run: Mapped["Run"] = relationship(back_populates="run_mints", uselist=False)
     mint: Mapped["Mint"] = relationship(back_populates="run_mints", uselist=False)
+    pnl_realized: Mapped["PNLRealizedMint"] = relationship(back_populates="run_mint", uselist=False, cascade="all, delete-orphan", single_parent=True, passive_deletes=True)
 
 
 class Position(Base):
@@ -128,6 +143,7 @@ class OpenPosition(Base):
     position: Mapped["Position"] = relationship(back_populates="open_position", uselist=False)
     close_orders: Mapped[List["CloseOrder"]] = relationship(back_populates="open_position", uselist=True, cascade="all")
     partials: Mapped[List["PartialCloseOrder"]] = relationship(back_populates="open_position", uselist=True, cascade="all")
+    pnl_realized: Mapped["PNLRealizedPosition"] = relationship(back_populates="open_position", uselist=False, cascade="all, delete-orphan", single_parent=True, passive_deletes=True)
 
 
 class CloseOrder(Base):
@@ -177,3 +193,68 @@ class TraderTradeData(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     position: Mapped["Position"] = relationship(back_populates="trade_data", uselist=False)
+
+
+class PNLRealizedTrader(Base):
+    __tablename__ = "pnl_realized_trader"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["runs_id", "traders_id"],
+            ["run_traders.runs_id", "run_traders.traders_id"],
+            ondelete="CASCADE"
+        ),
+        UniqueConstraint("runs_id", "traders_id", name="uq_pnl_realized_trader_runs_id_traders_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    runs_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    traders_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    pnl_without_cost_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_without_cost_pct_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_with_cost_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_with_cost_pct_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    total_volume_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+
+    run_trader: Mapped["RunTrader"] = relationship(
+        back_populates="pnl_realized",
+        uselist=False
+    )
+
+
+class PNLRealizedMint(Base):
+    __tablename__ = "pnl_realized_mint"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["runs_id", "mints_id"],
+            ["run_mints.runs_id", "run_mints.mints_id"],
+            ondelete="CASCADE"
+        ),
+        UniqueConstraint("runs_id", "mints_id", name="uq_pnl_realized_mint_runs_id_mints_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    runs_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    mints_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    pnl_without_cost_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_without_cost_pct_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_with_cost_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_with_cost_pct_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    total_volume_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+
+    run_mint: Mapped["RunMint"] = relationship(
+        back_populates="pnl_realized",
+        uselist=False
+    )
+
+
+class PNLRealizedPosition(Base):
+    __tablename__ = "pnl_realized_position"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    open_positions_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("open_positions.positions_id", ondelete="CASCADE"), unique=True, nullable=False)
+    pnl_without_cost_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_without_cost_pct_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_with_cost_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    pnl_with_cost_pct_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+
+    open_position: Mapped["OpenPosition"] = relationship(back_populates="pnl_realized", uselist=False)

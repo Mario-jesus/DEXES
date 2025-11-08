@@ -4,21 +4,25 @@ Módulo de Liquidaciones para Copy Trading.
 """
 import asyncio
 from datetime import datetime
+from typing import Dict, Any
 from logging_system import AppLogger
 from ..data_management.models.analyzer_models import TokenBalance
-from ..data_management.solana_manager import SolanaTxAnalyzer
+from copy_trading.protocols import SolanaTxAnalyzerProtocol
 from ..position_management.models import PositionTraderTradeData, TraderTradeData
-from ..position_management.managers.position_queue_manager import PositionQueueManager
-from .transactions import TransactionExecutor
+from .protocols import TransactionExecutorProtocol
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..position_management.managers.position_queue_manager import PositionQueueManager
 
 
 class Liquidations:
 
     def __init__(self,
                 system_wallet_address: str,
-                solana_analyzer: SolanaTxAnalyzer,
-                transaction_executor: TransactionExecutor,
-                position_queue_manager: PositionQueueManager):
+                solana_analyzer: SolanaTxAnalyzerProtocol,
+                transaction_executor: TransactionExecutorProtocol,
+                position_queue_manager: "PositionQueueManager"):
         self._logger = AppLogger(self.__class__.__name__)
         self._solana_analyzer = solana_analyzer
         self._system_wallet_address = system_wallet_address
@@ -111,3 +115,8 @@ class Liquidations:
         except Exception as e:
             self._logger.error(f"Error al liquidar token: {e}", exc_info=True)
             self._logger.debug(f"Error detallado en liquidación - Token: {token.mint[:8]}..., Exception: {type(e).__name__}")
+
+    async def get_stats(self) -> Dict[str, Any]:
+        return {
+            'mode': 'real'
+        }

@@ -1,4 +1,22 @@
 services:
+  redis:
+    image: redis:8.0.5-alpine3.21
+    container_name: redis-pubsub
+    ports:
+      - "6379:6379"
+    networks:
+      - trading_network
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine3.22
     container_name: postgres-db
@@ -41,11 +59,29 @@ services:
       - trading_network
     restart: no
 
-  COPY_TRADING_BOT_A:
+  pumpfun_bridge:
     image: copy-trading-bot:1.0.0
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: pumpfun-redis-bridge
+    ports:
+      - "7777:8888"
+    environment:
+      - PUMPFUN_REDIS_URL=redis://redis:6379/0
+      - PUMPFUN_REDIS_NAMESPACE=pumpfun
+      - PUMPFUN_API_KEY=${PUMPFUN_API_KEY}
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_A:
+    image: copy-trading-bot:1.0.0
     container_name: COPY_TRADING_BOT_A
     ports:
       - "7778:8888"
@@ -61,6 +97,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
       migration:
         condition: service_completed_successfully
     networks:
@@ -84,6 +124,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
       migration:
         condition: service_completed_successfully
     networks:
@@ -107,6 +151,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
       migration:
         condition: service_completed_successfully
     networks:
@@ -130,6 +178,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
       migration:
         condition: service_completed_successfully
     networks:
@@ -153,6 +205,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
       migration:
         condition: service_completed_successfully
     networks:
@@ -161,6 +217,7 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
 
 networks:
   trading_network:

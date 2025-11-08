@@ -10,25 +10,25 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Literal, Tuple, cast, TYPE_CHECKING
 
 from logging_system import AppLogger
-from ...data_management.solana_manager import SolanaTxAnalyzer, SolanaWebsocketManager
+from copy_trading.protocols import SolanaWebsocketProtocol, SolanaTxAnalyzerProtocol
 from ...data_management.models import SignatureNotification, TransactionAnalysis
 from ...data_management import TokenTraderManager
 from ...events import PositionEventBus, PositionAnalysisFinishedEvent, PositionQueuedEvent
 from ..models import Position, OpenPosition, ClosePosition, ProcessedAnalysisResult
 
 if TYPE_CHECKING:
-    from ..processors import TradeAnalysisProcessor
+    from ..processors import AnalysisProcessorProtocol
 
 
 class AnalysisPositionQueue:
     """Cola FIFO de posiciones para análisis con persistencia y worker"""
 
     def __init__(self, 
-            solana_analyzer: SolanaTxAnalyzer,
-            solana_websocket: SolanaWebsocketManager,
+            solana_analyzer: SolanaTxAnalyzerProtocol,
+            solana_websocket: SolanaWebsocketProtocol,
             token_trader_manager: TokenTraderManager,
             position_event_bus: Optional[PositionEventBus] = None,
-            analysis_processor: Optional['TradeAnalysisProcessor'] = None,
+            analysis_processor: Optional['AnalysisProcessorProtocol'] = None,
             data_path: str = "copy_trading/data",
             max_size: Optional[int] = None
         ):
@@ -112,7 +112,7 @@ class AnalysisPositionQueue:
             self._logger.error(f"Error deteniendo AnalysisPositionQueue: {e}")
             raise
 
-    def set_analysis_processor(self, analysis_processor: 'TradeAnalysisProcessor'):
+    def set_analysis_processor(self, analysis_processor: 'AnalysisProcessorProtocol'):
         self.analysis_processor = analysis_processor
 
     async def on_signature_confirmed(self, signature: str, data: SignatureNotification):

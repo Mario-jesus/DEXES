@@ -35,7 +35,7 @@ class SolanaWebsocketManager:
 
         # Estado de la conexión
         self.websocket: Optional[websockets.ClientConnection] = None
-        self.is_connected = False
+        self._is_connected = False
         self.is_running = False
 
         # Gestión de suscripciones
@@ -156,6 +156,13 @@ class SolanaWebsocketManager:
         if on_connection_error is not None:
             self.on_connection_error = on_connection_error
         self._logger.debug("Callbacks configurados")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._is_connected
+
+    def get_subscribed_count(self) -> int:
+        return len(self.subscriptions)
 
     async def subscribe_signature(
         self,
@@ -292,7 +299,7 @@ class SolanaWebsocketManager:
                     open_timeout=30  # 30 segundos para el handshake
                 ) as websocket:
                     self.websocket = websocket
-                    self.is_connected = True
+                    self._is_connected = True
                     consecutive_failures = 0
 
                     self._logger.info("Conexión websocket establecida")
@@ -342,7 +349,7 @@ class SolanaWebsocketManager:
                     await self.on_connection_error(e)
 
             finally:
-                self.is_connected = False
+                self._is_connected = False
                 self.websocket = None
 
                 if self.heartbeat_task:

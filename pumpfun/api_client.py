@@ -933,65 +933,76 @@ class PumpFunWebSocketApiClient():
         """
         Procesa mensajes recibidos del WebSocket de forma optimizada
         Maneja callbacks síncronos y asíncronos eficientemente
+        Añade logs detallados para facilitar el diagnóstico.
         """
+        self._logger.debug(f"[WS] Recibido mensaje crudo: {message[:300]}{'...' if len(message) > 300 else ''}")
         try:
             data = json.loads(message)
+            self._logger.debug(f"[WS] Mensaje decodificado correctamente (claves: {list(data.keys())})")
 
             # Si el mensaje es de confirmación, solo lo mostramos y salimos
             if 'message' in data:
-                self._logger.info(f"Mensaje del servidor: {data['message']}")
+                self._logger.info(f"[WS] Mensaje del servidor: {data['message']}")
                 return
 
+            # Determinar tipo de evento
             if 'txType' in data:
                 event_type = data['txType']
+                self._logger.debug(f"[WS] 'txType' detectado: {event_type}")
             elif 'errors' in data:
                 event_type = 'error'
+                self._logger.debug(f"[WS] 'errors' detectado en el mensaje: {data['errors']}")
             else:
-                self._logger.error(f"Mensaje no válido: {data}")
+                self._logger.error(f"[WS] Mensaje no válido o inesperado: {data}")
                 return
 
             callback = None
 
-            # Determinar callback según el tipo de evento
+            # Determinar callback según el tipo de evento y loggear detalles
             if event_type == 'create':
                 callback = self._websocket_callbacks.get('subscribeNewToken')
+                self._logger.debug(f"[WS] Callback asociado para 'create': {'encontrado' if callback else 'no encontrado'}")
             elif event_type in ['buy', 'sell']:
-                # Un trade puede venir de una suscripción a token o a cuenta
                 callback = self._websocket_callbacks.get('subscribeTokenTrade') or self._websocket_callbacks.get('subscribeAccountTrade')
-                # Actualizar métricas de trades
+                self._logger.debug(f"[WS] Callback asociado para '{event_type}': {'encontrado' if callback else 'no encontrado'}")
                 self._update_trade_metrics()
+                self._logger.debug(f"[WS] Métricas de trade actualizadas (event_type: {event_type})")
             elif event_type == 'migrate':
                 callback = self._websocket_callbacks.get('subscribeMigration')
+                self._logger.debug(f"[WS] Callback asociado para 'migrate': {'encontrado' if callback else 'no encontrado'}")
             elif event_type == 'error':
-                # Manejar errores con callback específico
                 callback = self._websocket_callbacks.get('on_error')
                 if callback:
-                    self._logger.debug(f"Ejecutando callback de error para: {data}")
+                    self._logger.debug(f"[WS] Ejecutando callback de error para: {data}")
                 else:
-                    self._logger.error(f"No se encontró callback para errores")
+                    self._logger.error(f"[WS] No se encontró callback para errores. Data: {data}")
 
             # Ejecutar callback principal
             if callback:
-                # Ejecutando callback para {event_type}
+                self._logger.info(f"[WS] Ejecutando callback principal para event_type='{event_type}'. Data resumida: {str(data)[:250]}")
                 await self._execute_callback(callback, data, f"callback principal para {event_type}")
             else:
                 # Usar callback por defecto si existe uno para eventos no manejados
                 default_cb = self._websocket_callbacks.get('default')
                 if default_cb:
+                    self._logger.info(f"[WS] Ejecutando callback por defecto para evento no manejado: '{event_type}'.")
                     await self._execute_callback(default_cb, data, "callback por defecto")
                 else:
                     if event_type != 'error':  # Ya logueamos los errores arriba
-                        self._logger.warning(f"Evento no manejado o sin callback para txType '{event_type}'")
+                        self._logger.warning(f"[WS] Evento no manejado o sin callback para txType '{event_type}'. Data: {str(data)[:250]}")
 
             # Callback genérico para todos los mensajes (si existe)
             on_message_cb = self._websocket_callbacks.get('on_message')
             if on_message_cb:
+                self._logger.debug(f"[WS] Ejecutando callback genérico para mensaje recibido.")
                 await self._execute_callback(on_message_cb, data, "callback genérico")
+            else:
+                self._logger.debug(f"[WS] No hay callback genérico configurado ('on_message').")
 
         except json.JSONDecodeError:
-            self._logger.error(f"Error decodificando JSON del mensaje: {message[:200]}...")
+            self._logger.error(f"[WS] Error decodificando JSON del mensaje: {message[:200]}...")
         except Exception as e:
-            self._logger.error(f"Error procesando mensaje WebSocket: {e}")
+            self._logger.error(f"[WS] Error procesando mensaje WebSocket: {type(e).__name__}: {e} | Mensaje: {message[:200]}...")
 
     async def _unsubscribe_all_events(self):
         """

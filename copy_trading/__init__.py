@@ -31,6 +31,7 @@ from .events import (
     PositionCloseRequestedEvent,
     PositionClosedEvent,
 )
+from .position_timeout import PositionTimeoutManager
 
 __version__ = "1.0.0"
 
@@ -82,4 +83,7 @@ __all__ = [
     "PositionUpdatedEvent",
     "PositionCloseRequestedEvent",
     "PositionClosedEvent",
+
+    # Timeout de posiciones
+    "PositionTimeoutManager",
 ]

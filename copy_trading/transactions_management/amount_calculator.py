@@ -20,7 +20,7 @@ from ..position_management.services.position_calculation_service import Position
 
 if TYPE_CHECKING:
     from ..position_management.queues import OpenPositionQueue
-    from ..data_management import SolanaTxAnalyzer
+    from copy_trading.protocols import SolanaTxAnalyzerProtocol
     from ..balance_management import BalanceManager
     from ..events import (
         PositionEventBus,
@@ -77,7 +77,7 @@ class CopyAmountCalculator:
         config: CopyTradingConfig,
         position_event_bus: "PositionEventBus",
         open_position_queue: Optional["OpenPositionQueue"] = None,
-        solana_analyzer: Optional["SolanaTxAnalyzer"] = None,
+        solana_analyzer: Optional["SolanaTxAnalyzerProtocol"] = None,
         balance_manager: Optional["BalanceManager"] = None
     ):
         """Inicializa la calculadora con las estrategias de cálculo"""

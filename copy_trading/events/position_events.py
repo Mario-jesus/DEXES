@@ -106,6 +106,8 @@ class PositionAnalysisEvent(BasePositionEvent):
     mint_address: Optional[str] = None
     signer_sol_delta: Optional[str] = None
     token_ui_delta: Optional[str] = None
+    amount_sol_executed: Optional[str] = None
+    amount_tokens_executed: Optional[str] = None
     fee_sol: Optional[str] = None
     total_cost_sol: Optional[str] = None
 
