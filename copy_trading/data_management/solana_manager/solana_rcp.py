@@ -226,6 +226,7 @@ class SolanaTxAnalyzer:
     async def analyze_transaction_by_signature(
         self,
         signature: str,
+        bonding_curve_key: Optional[str] = None,
         *,
         commitment: str = "finalized",
         max_supported_transaction_version: int = 0,
@@ -239,7 +240,7 @@ class SolanaTxAnalyzer:
                 max_supported_transaction_version=max_supported_transaction_version,
                 encoding=encoding,
             )
-            analysis = self._analyze_transaction(tx)
+            analysis = self._analyze_transaction(tx, bonding_curve_key=bonding_curve_key)
             self._logger.info(f"Transaction {signature[:8]}... analysis: success={analysis.success}, op_type={analysis.op_type}")
             return analysis
 
@@ -621,7 +622,8 @@ class SolanaTxAnalyzer:
 
     def _analyze_transaction(
         self,
-        tx: Optional[Dict[str, Any]]
+        tx: Optional[Dict[str, Any]],
+        bonding_curve_key: Optional[str] = None
     ) -> TransactionAnalysis:
         """Analiza una transacción y retorna resumen completo."""
         if tx is None:
@@ -671,9 +673,12 @@ class SolanaTxAnalyzer:
         # Calcular métricas para transacciones exitosas
         signers = self._extract_signers(tx)
         # Detectar dinámicamente contrapartes (bonding curve o pools) desde innerInstructions
-        detected_counterparties = self._detect_counterparty_pubkeys(tx, signers)
-        # Usar contrapartes detectadas dinámicamente, combinadas con cualquier bonding_curve_pubkeys proporcionado
-        counterparty_pubkeys = detected_counterparties
+        if not bonding_curve_key:
+            detected_counterparties = self._detect_counterparty_pubkeys(tx, signers)
+            # Usar contrapartes detectadas dinámicamente, combinadas con cualquier bonding_curve_pubkeys proporcionado
+            counterparty_pubkeys = detected_counterparties
+        else:
+            counterparty_pubkeys = {bonding_curve_key}
 
         # Excluir contrapartes y firmantes de los costos para no contaminar el costo del usuario
         exclude_for_cost = signers | counterparty_pubkeys

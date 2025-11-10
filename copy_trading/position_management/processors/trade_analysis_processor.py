@@ -78,7 +78,10 @@ class TradeAnalysisProcessor:
             self._logger.debug(f"Analizando transacción {signature}")
 
             # Analizar transacciones
-            analysis_result = await self.solana_analyzer.analyze_transaction_by_signature(signature)
+            analysis_result = await self.solana_analyzer.analyze_transaction_by_signature(
+                signature,
+                bonding_curve_key=position.trader_trade_data.bonding_curve_key if position.trader_trade_data else None
+            )
 
             if not analysis_result.success:
                 self._logger.warning(f"No se encontró análisis para la transacción {signature}")

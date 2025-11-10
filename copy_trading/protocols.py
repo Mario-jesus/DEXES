@@ -71,12 +71,13 @@ class SolanaTxAnalyzerProtocol(Protocol):
     def set_system_wallet_address(self, system_wallet_address: str) -> None:
         ...
 
-    async def analyze_transaction_by_signature(self, signature: str) -> "TransactionAnalysis":
+    async def analyze_transaction_by_signature(self, signature: str, bonding_curve_key: Optional[str] = None) -> "TransactionAnalysis":
         """
         Analiza una transacción por su signature.
 
         Args:
             signature: La signature de la transacción a analizar
+            bonding_curve_key: La clave de la bonding curve
 
         Returns:
             TransactionAnalysis con los resultados del análisis

@@ -935,7 +935,7 @@ class PumpFunWebSocketApiClient():
         Maneja callbacks síncronos y asíncronos eficientemente
         Añade logs detallados para facilitar el diagnóstico.
         """
-        self._logger.debug(f"[WS] Recibido mensaje crudo: {message[:300]}{'...' if len(message) > 300 else ''}")
+        self._logger.debug(f"[WS] Recibido mensaje crudo: {message}")
         try:
             data = json.loads(message)
             self._logger.debug(f"[WS] Mensaje decodificado correctamente (claves: {list(data.keys())})")

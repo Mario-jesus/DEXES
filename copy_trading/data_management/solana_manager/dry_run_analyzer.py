@@ -85,7 +85,7 @@ class DryRunSolanaTxAnalyzer:
             all_exists=True
         )
 
-    async def analyze_transaction_by_signature(self, signature: str) -> TransactionAnalysis:
+    async def analyze_transaction_by_signature(self, signature: str, bonding_curve_key: Optional[str] = None) -> TransactionAnalysis:
         """
         Construye TransactionAnalysis usando metadata registrada para la signature.
         Espera claves como:

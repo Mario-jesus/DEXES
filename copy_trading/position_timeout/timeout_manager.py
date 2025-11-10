@@ -283,7 +283,7 @@ class PositionTimeoutManager:
                 signature="",  # Se asignará después de la ejecución
                 token_amount=remaining_tokens,
                 new_token_balance="",
-                pool=position.trader_trade_data.pool if position.trader_trade_data else "auto",
+                pool="auto",
                 bonding_curve_key=position.trader_trade_data.bonding_curve_key if position.trader_trade_data else "",
                 v_tokens_in_bonding_curve=position.trader_trade_data.v_tokens_in_bonding_curve if position.trader_trade_data else "",
                 v_sol_in_bonding_curve=position.trader_trade_data.v_sol_in_bonding_curve if position.trader_trade_data else "",
