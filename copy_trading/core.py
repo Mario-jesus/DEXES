@@ -61,6 +61,8 @@ class CopyTrading:
         """
         self.config = config
 
+        self.graceful_shutdown_event: asyncio.Event = asyncio.Event()
+
         # Inicializar logger
         self._logger = AppLogger(self.__class__.__name__)
         self._logger.info("Inicializando sistema Copy Trading")
@@ -128,6 +130,7 @@ class CopyTrading:
 
         self.validation_engine = ValidationEngine(
             config=config,
+            graceful_shutdown_event=self.graceful_shutdown_event,
             token_trader_manager=self.token_trader_manager,
             balance_manager=self.balance_manager
         )
@@ -237,6 +240,9 @@ class CopyTrading:
         if self.is_running:
             self._logger.warning("El sistema ya está ejecutándose")
             return
+
+        # Limpiar evento de shutdown graceful
+        self.graceful_shutdown_event.clear()
 
         try:
             self._logger.info("Iniciando sistema Copy Trading")
@@ -483,6 +489,14 @@ class CopyTrading:
         """Detiene el sistema"""
         try:
             self._logger.info("Deteniendo sistema Copy Trading")
+
+            if self.config.graceful_shutdown_enabled:
+                self._logger.info("Requesting graceful shutdown")
+                await self._request_graceful_shutdown()
+                self._logger.info("Graceful shutdown requested")
+            else:
+                self._logger.info("No graceful shutdown requested")
+
             # Desuscribir y desconectar WebSocket de PumpFun para detener pings
             try:
                 if self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
@@ -655,6 +669,37 @@ class CopyTrading:
             if self.notification_manager:
                 error_msg = f"Error al detener sistema: {str(e)}"
                 await self.notification_manager.notify_system(error_msg, "error")
+
+    async def _request_graceful_shutdown(self) -> None:
+        """
+        Solicita una parada segura del sistema.
+        Puede ser llamado desde __aexit__, desde stop(), o manualmente.
+        
+        Args:
+            reason: Razón de la parada (para logging)
+        """
+        if self.graceful_shutdown_event.is_set():
+            self._logger.debug("Shutdown seguro ya fue solicitado previamente")
+            return
+
+        self._logger.warning("Shutdown graceful activado")
+
+        # Activar evento (bloquea BUYs en validaciones)
+        self.graceful_shutdown_event.set()
+
+        # Notificar
+        if self.notification_manager:
+            await self.notification_manager.notify_system(
+                f"🛑 Graceful shutdown activated\n"
+                "- Blocking new buys\n"
+                "- Waiting for positions to close\n"
+                "- Trader sells will continue to execute",
+                "warning"
+            )
+
+        # Esperar a que se drenen las posiciones abiertas
+        await self._wait_for_open_queue_drained()
+        self._logger.info("OpenPositionQueue drenado correctamente")
 
     async def add_trader(self, trader_address: str):
         """
@@ -839,15 +884,86 @@ class CopyTrading:
                 position = await self.queue_manager.get_next_pending()
                 if position:
                     self._logger.debug(f"Procesando posición pendiente: {position.token_address[:8]}...")
-                    await self._execute_trade(position)
+
+                    # Proteger la ejecución del trade con shield para evitar cancelaciones abruptas
+                    try:
+                        await asyncio.shield(self._execute_trade(position))
+                    except asyncio.CancelledError:
+                        self._logger.warning(
+                            f"Trade interrumpido durante ejecución: {position.token_address[:8]}"
+                        )
+                        # No re-lanzar, continuar con el siguiente
+
             except asyncio.CancelledError:
-                # Salir del bucle si la tarea es cancelada
+                # Cancelación del loop completo
                 self._logger.debug("Loop de posiciones pendientes cancelado")
                 break
             except Exception as e:
                 self._logger.error(f"Error en el loop de ejecución de trades: {e}", exc_info=True)
                 # Esperar antes de reintentar para no sobrecargar en caso de error continuo
                 await asyncio.sleep(1)
+
+    async def _wait_for_open_queue_drained(self):
+        """
+        Espera a que la cola de posiciones abiertas se vacíe usando shutdown/join.
+        """
+        self._logger.info("Esperando que se drenen las posiciones abiertas...")
+
+        if not self.queue_manager.open_queue:
+            self._logger.warning("OpenPositionQueue no inicializada")
+            return
+
+        try:
+            # Esperar 5s a que se encolen las ultimas posiciones abiertas si las hubieron durante el evento de shutdown
+            await asyncio.sleep(5)
+
+            # Señalizar shutdown en open_queue (no acepta nuevas posiciones abiertas)
+            await self.queue_manager.open_queue.shutdown()
+            self._logger.info("OpenPositionQueue en modo shutdown - bloqueadas nuevas posiciones abiertas")
+
+            # Log del estado actual
+            open_stats = await self.queue_manager.open_queue.get_stats()
+            open_count = open_stats.get('open_count', 0)
+
+            self._logger.info(
+                f"Posiciones abiertas a drenar: {open_count}"
+            )
+
+            # Si ya está vacía, retornar inmediatamente
+            if open_count == 0:
+                self._logger.info("OpenPositionQueue ya está vacía")
+                return
+
+            # Esperar drenaje usando join con timeout de seguridad
+            try:
+                self._logger.info("Esperando drenado de OpenPositionQueue...")
+                if self.config.position_timeout_enabled and self.config.max_position_age_seconds:
+                    # Tiempo de margen para que se cierren las posiciones
+                    if self.config.position_timeout_check_interval > 0:
+                        margin = self.config.position_timeout_check_interval * 2
+                    else:
+                        margin = 10 * 60 # 10 minutos de margen para que se cierren las posiciones
+                    # Timeout de seguridad para que se cierren las posiciones
+                    timeout = self.config.max_position_age_seconds + margin
+                    await asyncio.wait_for(
+                        self.queue_manager.open_queue.join(),
+                        timeout=timeout
+                    )
+                else:
+                    await self.queue_manager.open_queue.join()
+                self._logger.info("OpenPositionQueue drenado correctamente")
+            except asyncio.TimeoutError:
+                self._logger.warning("Timeout esperando drenado de OpenPositionQueue")
+                final_open_stats = await self.queue_manager.open_queue.get_stats()
+                final_open = final_open_stats.get('open_count', 0)
+                self._logger.warning(
+                    f"Timeout esperando drenado de OpenPositionQueue - "
+                    f"quedan {final_open} posiciones abiertas"
+                )
+
+        except Exception as e:
+            self._logger.error(f"Error drenando open queue: {e}", exc_info=True)
+            raise
 
     def _log_final_stats(self, stats: Dict[str, Any]):
         """Log de estadísticas finales"""

@@ -207,6 +207,7 @@ class CopyTradingConfig:
     max_daily_volume_sol_open: Optional[str] = None                # Maximo de SOL que puede tener un trader en un dia en posiciones abiertas
     min_open_trade_interval_seconds_per_trader: Optional[int] = None    # Minimo de segundos que debe esperar un trader para hacer un trade de apertura de posicion
     min_global_available_balance_threshold_percent: Optional[str] = None    # Porcentaje (0-100) del presupuesto global por debajo del cual se bloquean BUY
+    graceful_shutdown_enabled: bool = False                        # Si se habilita el shutdown graceful, se espera a que todas las posiciones se cierren antes de cerrar el sistema
 
     # Configuración de Transacciones
     transaction_type: TransactionType = TransactionType.LIGHTNING_TRADE
@@ -416,6 +417,7 @@ class CopyTradingConfig:
             'max_daily_volume_sol_open': self.max_daily_volume_sol_open,
             'min_open_trade_interval_seconds_per_trader': self.min_open_trade_interval_seconds_per_trader,
             'min_global_available_balance_threshold_percent': self.min_global_available_balance_threshold_percent,
+            'graceful_shutdown_enabled': self.graceful_shutdown_enabled,
             'transaction_type': self.transaction_type.value,
             'pool_type': self.pool_type,
             'skip_preflight': self.skip_preflight,
@@ -514,6 +516,7 @@ class CopyTradingConfig:
             max_daily_volume_sol_open=data.get('max_daily_volume_sol_open'),
             min_open_trade_interval_seconds_per_trader=data.get('min_open_trade_interval_seconds_per_trader'),
             min_global_available_balance_threshold_percent=data.get('min_global_available_balance_threshold_percent'),
+            graceful_shutdown_enabled=data.get('graceful_shutdown_enabled', False),
 
             # Configuración de Transacciones
             transaction_type=TransactionType(data.get('transaction_type', TransactionType.LIGHTNING_TRADE.value)),

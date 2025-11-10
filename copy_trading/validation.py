@@ -64,6 +64,7 @@ class ValidationEngine:
 
     def __init__(self, 
                     config: CopyTradingConfig,
+                    graceful_shutdown_event: asyncio.Event,
                     token_trader_manager: Optional[TokenTraderManager] = None,
                     balance_manager: Optional[BalanceManager] = None):
         """
@@ -76,6 +77,7 @@ class ValidationEngine:
         """
         self.config = config
         self._logger = AppLogger(self.__class__.__name__)
+        self.graceful_shutdown_event = graceful_shutdown_event
         self.token_trader_manager = token_trader_manager
         self.balance_manager = balance_manager
 
@@ -233,6 +235,7 @@ class ValidationEngine:
             tasks['max_tokens'] = tg.create_task(self.check_max_open_tokens_per_trader(trader_wallet, token_address, side))
             tasks['max_positions'] = tg.create_task(self.check_max_open_positions_per_token_per_trader(trader_wallet, token_address, side))
             tasks['amount'] = tg.create_task(self.check_amount(amount_sol))
+            tasks['graceful_shutdown'] = tg.create_task(self.check_graceful_shutdown(side))
         else:
             tasks['token_balance'] = tg.create_task(self.check_token_balance(token_address, amount_tokens))
             tasks['amount'] = tg.create_task(self.check_amount(amount_tokens))
@@ -1168,6 +1171,35 @@ class ValidationEngine:
             self._logger.error(f"Error verificando max_daily_volume_sol_open para {trader_wallet}: {e}")
             check.fail("Error al verificar máximo volumen diario", {'error': str(e)})
 
+        return check
+
+    async def check_graceful_shutdown(self, side: str = "buy") -> ValidationCheck:
+        """Verifica si se debe esperar a que todas las posiciones se cierren antes de cerrar el sistema."""
+        check = ValidationCheck(name="GracefulShutdownCheck")
+
+        # Las ventas no requieren esta validación ya que no abren nuevas posiciones
+        if side.lower() == "sell":
+            check.passthrough("Validación de shutdown graceful omitida para ventas", {
+                'side': side,
+                'reason': 'Las ventas no requieren shutdown graceful'
+            })
+            return check
+
+        # Verificar si la validación está configurada
+        if self._should_skip_validation("", "graceful_shutdown_enabled"):
+            check.passthrough("Validación de shutdown graceful no configurada")
+            return check
+
+        if self.graceful_shutdown_event.is_set():
+            check.fail("Shutdown graceful activado, no se permiten la apertura de nuevas posiciones", {
+                'side': side,
+                'reason': 'Shutdown graceful activado, no se permiten la apertura de nuevas posiciones'
+            })
+        else:
+            check.passthrough("Shutdown graceful no activado, se permiten la apertura de nuevas posiciones", {
+                'side': side,
+                'reason': 'Shutdown graceful no activado, se permiten la apertura de nuevas posiciones'
+            })
         return check
 
     def _get_trader_config_value(self, trader_wallet: str, attr_name: str, global_default: Any = None) -> Any:
