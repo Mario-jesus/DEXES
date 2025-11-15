@@ -935,10 +935,10 @@ class PumpFunWebSocketApiClient():
         Maneja callbacks síncronos y asíncronos eficientemente
         Añade logs detallados para facilitar el diagnóstico.
         """
-        self._logger.debug(f"[WS] Recibido mensaje crudo: {message}")
+        self._logger.debug(f"[WS] Mensaje recibido")
         try:
             data = json.loads(message)
-            self._logger.debug(f"[WS] Mensaje decodificado correctamente (claves: {list(data.keys())})")
+            self._logger.debug(f"[WS] Mensaje decodificado correctamente")
 
             # Si el mensaje es de confirmación, solo lo mostramos y salimos
             if 'message' in data:
@@ -963,6 +963,7 @@ class PumpFunWebSocketApiClient():
                 callback = self._websocket_callbacks.get('subscribeNewToken')
                 self._logger.debug(f"[WS] Callback asociado para 'create': {'encontrado' if callback else 'no encontrado'}")
             elif event_type in ['buy', 'sell']:
+                self._logger.debug(f"[WS] Mensaje de trade recibido: {data}")
                 callback = self._websocket_callbacks.get('subscribeTokenTrade') or self._websocket_callbacks.get('subscribeAccountTrade')
                 self._logger.debug(f"[WS] Callback asociado para '{event_type}': {'encontrado' if callback else 'no encontrado'}")
                 self._update_trade_metrics()
@@ -979,7 +980,7 @@ class PumpFunWebSocketApiClient():
 
             # Ejecutar callback principal
             if callback:
-                self._logger.info(f"[WS] Ejecutando callback principal para event_type='{event_type}'. Data resumida: {str(data)[:250]}")
+                self._logger.info(f"[WS] Ejecutando callback principal para event_type='{event_type}'.")
                 await self._execute_callback(callback, data, f"callback principal para {event_type}")
             else:
                 # Usar callback por defecto si existe uno para eventos no manejados

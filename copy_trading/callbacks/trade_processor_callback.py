@@ -96,6 +96,9 @@ class TradeProcessorCallback:
         # Flag para controlar el procesamiento
         self._processing_active = True
 
+        # token_address -> contador de trades observados en la ventana de tiempo
+        self._token_trade_activity_cache: TTLCache[str, int] = TTLCache(maxsize=1000, ttl=self.config.trade_activity_window_seconds)
+
         # Iniciar worker de procesamiento
         asyncio.create_task(self._processing_worker())
 
@@ -131,6 +134,16 @@ class TradeProcessorCallback:
                 asyncio.create_task(self._log_async("Trade rechazado - validación básica", data.get('signature', 'N/A')))
                 return
 
+            if not self._validate_minimum_sol_amount(trade_data):
+                self.stats['trades_rejected'] += 1
+                asyncio.create_task(self._log_async("Trade rechazado - monto mínimo de SOL", data.get('signature', 'N/A')))
+                return
+
+            if not self._validate_trade_activity_threshold(trade_data):
+                self.stats['trades_rejected'] += 1
+                asyncio.create_task(self._log_async("Trade rechazado - actividad de trading insuficiente", data.get('signature', 'N/A')))
+                return
+
             if not self._validate_trade_rate_limits(trade_data):
                 self.stats['trades_rejected'] += 1
                 asyncio.create_task(self._log_async("Trade rechazado - límites de rate", data.get('signature', 'N/A')))
@@ -147,6 +160,75 @@ class TradeProcessorCallback:
         except Exception as e:
             self._logger.error(f"Error en procesamiento inicial: {e}", exc_info=True)
             self.stats['trades_rejected'] += 1
+
+    def _validate_minimum_sol_amount(self, trade_data: TraderTradeData) -> bool:
+        """
+        Valida que el trade cumpla con el monto mínimo de SOL configurado
+        
+        Args:
+            trade_data: Datos del trade a validar
+            
+        Returns:
+            True si el monto es mayor o igual al umbral mínimo, False en caso contrario
+        """
+        if self.config.min_sol_amount_threshold is None:
+            self._logger.debug("Monto mínimo de SOL deshabilitado")
+            return True
+
+        if trade_data.side == 'sell':
+            self._logger.debug("Operación de tipo 'sell', no se valida monto mínimo de SOL para esta operación")
+            return True
+
+        try:
+            amount_decimal = Decimal(trade_data.amount_sol)
+            if amount_decimal < Decimal(self.config.min_sol_amount_threshold):
+                self._logger.warning(f"Trade rechazado - monto {trade_data.amount_sol} SOL < {self.config.min_sol_amount_threshold} SOL (mínimo)")
+                return False
+            self._logger.debug(f"Trade validado - monto {trade_data.amount_sol} SOL >= {self.config.min_sol_amount_threshold} SOL (mínimo)")
+            return True
+        except (ValueError, TypeError, Exception):
+            self._logger.warning(f"Error al validar monto mínimo de SOL: {trade_data.amount_sol}")
+            return False
+
+    def _validate_trade_activity_threshold(self, trade_data: TraderTradeData) -> bool:
+        """
+        Valida que el token haya alcanzado un umbral mínimo de actividad de trading
+        
+        Este filtro solo permite copiar trades después de observar N trades previos
+        en el token dentro de una ventana de tiempo. Sirve como filtro de "popularidad"
+        para evitar copiar tokens con baja actividad.
+        
+        Args:
+            trade_data: Datos del trade a validar
+            
+        Returns:
+            True si se ha alcanzado el umbral de actividad, False en caso contrario
+        """
+        if not self.config.is_trade_activity_filter_enabled:
+            self._logger.debug("Filtro de actividad de trading deshabilitado")
+            return True
+
+        if trade_data.side == 'sell':
+            self._logger.debug("Operación de tipo 'sell', no se valida actividad de trading para esta operación")
+            return True
+
+        try:
+            token_key = trade_data.token_address
+            if token_key not in self._token_trade_activity_cache:
+                self._token_trade_activity_cache[token_key] = 0
+
+            self._token_trade_activity_cache[token_key] += 1
+            current_count = self._token_trade_activity_cache[token_key]
+
+            if current_count >= self.config.min_trade_count_threshold:
+                self._logger.debug(f"Trade validado - actividad suficiente para {trade_data.token_address}: {current_count}/{self.config.min_trade_count_threshold} trades observados")
+                return True
+
+            self._logger.debug(f"Trade rechazado - actividad insuficiente para {trade_data.token_address}: {current_count}/{self.config.min_trade_count_threshold} trades observados")
+            return False
+        except (ValueError, TypeError, Exception) as e:
+            self._logger.warning(f"Error al validar actividad de trading para {trade_data.token_address}: {e}")
+            return False
 
     async def _processing_worker(self):
         """Worker que procesa trades de la cola interna"""

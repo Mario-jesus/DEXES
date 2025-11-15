@@ -25,6 +25,7 @@ class RedisBridgeConfig:
     api_key: Optional[str] = None
     inactivity_watch_seconds: int = 600
     websocket_timeout: int = 60
+    keep_new_token_subscription_active: bool = False
 
 
 class PumpFunRedisBridgeService:
@@ -32,10 +33,13 @@ class PumpFunRedisBridgeService:
 
     COMMAND_SUBSCRIBE_ACCOUNT = "subscribe_account_trade"
     COMMAND_UNSUBSCRIBE_ACCOUNT = "unsubscribe_account_trade"
+    COMMAND_SUBSCRIBE_NEW_TOKEN = "subscribe_new_token"
+    COMMAND_UNSUBSCRIBE_NEW_TOKEN = "unsubscribe_new_token"
     COMMAND_UNSUBSCRIBE_ALL = "unsubscribe_all"
     COMMAND_PING = "ping"
 
     EVENT_ACCOUNT_TRADE = "account_trade"
+    EVENT_NEW_TOKEN = "new_token"
     EVENT_ERROR = "error"
     EVENT_SYSTEM = "system"
 
@@ -60,6 +64,10 @@ class PumpFunRedisBridgeService:
         self._client_accounts: defaultdict[str, Set[str]] = defaultdict(set)
         # Mapea account address → set de client_ids que siguen esa cuenta (índice inverso)
         self._account_clients: defaultdict[str, Set[str]] = defaultdict(set)
+        # Set de client_ids suscritos a nuevos tokens (suscripción global, sin keys)
+        self._new_token_clients: Set[str] = set()
+        # Flag para saber si ya estamos suscritos a nuevos tokens en el WebSocket
+        self._new_token_subscribed = False
 
         # Locks
         self._subscription_lock = asyncio.Lock()
@@ -101,6 +109,16 @@ class PumpFunRedisBridgeService:
         await self._ws_client.connect()
         self._ws_client.set_error_callback(self._handle_ws_error_event)
         self._logger.debug("Cliente WebSocket PumpFun conectado")
+
+        # Si la bandera está activa, suscribirse automáticamente a nuevos tokens
+        # para mantener el WebSocket activo incluso sin consumidores
+        if self._config.keep_new_token_subscription_active:
+            self._logger.info("Bandera keep_new_token_subscription_active activa: suscribiendo a nuevos tokens automáticamente")
+            await self._subscriptions.subscribe_new_token(
+                callback=self._handle_new_token_event,
+            )
+            self._new_token_subscribed = True
+            self._logger.debug("Suscripción automática a nuevos tokens activada para mantener WebSocket vivo")
 
         self._command_task = asyncio.create_task(self._command_loop())
         self._running = True
@@ -148,6 +166,8 @@ class PumpFunRedisBridgeService:
 
         self._client_accounts.clear()
         self._account_clients.clear()
+        self._new_token_clients.clear()
+        self._new_token_subscribed = False
         self._running = False
         self._logger.info("Servicio PumpFun Redis Bridge detenido")
 
@@ -207,6 +227,10 @@ class PumpFunRedisBridgeService:
         elif action == self.COMMAND_UNSUBSCRIBE_ACCOUNT:
             keys = self._sanitize_keys(payload.get("keys", []))
             await self._handle_unsubscribe_account_trade(client_id, keys, request_id)
+        elif action == self.COMMAND_SUBSCRIBE_NEW_TOKEN:
+            await self._handle_subscribe_new_token(client_id, request_id)
+        elif action == self.COMMAND_UNSUBSCRIBE_NEW_TOKEN:
+            await self._handle_unsubscribe_new_token(client_id, request_id)
         elif action == self.COMMAND_UNSUBSCRIBE_ALL:
             await self._handle_unsubscribe_all(client_id, request_id)
         elif action == self.COMMAND_PING:
@@ -349,16 +373,100 @@ class PumpFunRedisBridgeService:
             },
         )
 
+    async def _handle_subscribe_new_token(
+        self,
+        client_id: str,
+        request_id: Optional[str],
+    ) -> None:
+        self._logger.debug(f"Procesando suscripción a nuevos tokens para cliente {client_id}")
+
+        was_empty = False
+        needs_subscription = False
+        async with self._subscription_lock:
+            was_empty = not self._new_token_clients
+            self._new_token_clients.add(client_id)
+            # Solo necesitamos suscribirnos si no hay clientes previos Y no está ya suscrito
+            # (puede estar suscrito por la bandera keep_new_token_subscription_active)
+            needs_subscription = was_empty and not self._new_token_subscribed
+
+        if needs_subscription:
+            self._logger.debug("Suscribiendo a nuevos tokens en el WebSocket de PumpFun")
+            await self._subscriptions.subscribe_new_token(
+                callback=self._handle_new_token_event,
+            )
+            self._new_token_subscribed = True
+            self._logger.debug("Suscripción PumpFun agregada para nuevos tokens")
+        elif self._new_token_subscribed:
+            self._logger.debug("Cliente agregado a suscripción existente de nuevos tokens")
+        else:
+            self._logger.debug("Ya había clientes suscritos a nuevos tokens")
+
+        await self._send_response(
+            client_id,
+            {
+                "type": "subscription",
+                "request_id": request_id,
+                "status": "ok",
+                "action": self.COMMAND_SUBSCRIBE_NEW_TOKEN,
+            },
+        )
+
+    async def _handle_unsubscribe_new_token(
+        self,
+        client_id: str,
+        request_id: Optional[str],
+    ) -> None:
+        self._logger.debug(f"Procesando desuscripción de nuevos tokens para cliente {client_id}")
+
+        should_unsubscribe = False
+        async with self._subscription_lock:
+            if client_id in self._new_token_clients:
+                self._new_token_clients.discard(client_id)
+                # Solo desuscribir si no hay más clientes Y la bandera no está activa
+                if not self._new_token_clients and not self._config.keep_new_token_subscription_active:
+                    should_unsubscribe = True
+
+        if should_unsubscribe:
+            self._logger.debug("Desuscribiendo de nuevos tokens en el WebSocket de PumpFun")
+            await self._subscriptions.unsubscribe_new_token()
+            self._new_token_subscribed = False
+            self._logger.debug("Suscripción PumpFun removida para nuevos tokens")
+        elif self._config.keep_new_token_subscription_active and not self._new_token_clients:
+            self._logger.debug("Cliente desuscrito, pero manteniendo suscripción activa por bandera keep_new_token_subscription_active")
+        else:
+            self._logger.debug("Cliente no estaba suscrito o aún hay otros clientes suscritos")
+
+        await self._send_response(
+            client_id,
+            {
+                "type": "subscription",
+                "request_id": request_id,
+                "status": "ok",
+                "action": self.COMMAND_UNSUBSCRIBE_NEW_TOKEN,
+            },
+        )
+
     async def _handle_unsubscribe_all(self, client_id: str, request_id: Optional[str]) -> None:
         async with self._subscription_lock:
             keys = list(self._client_accounts.get(client_id, set()))
+            was_subscribed_new_token = client_id in self._new_token_clients
 
-        self._logger.debug(f"Desuscribiendo todas las cuentas ({len(keys)}) del cliente {client_id}")
+        self._logger.debug(
+            f"Desuscribiendo todas las suscripciones del cliente {client_id} "
+            f"({len(keys)} cuentas, nuevos tokens: {was_subscribed_new_token})"
+        )
 
+        # Desuscribir de cuentas
         if keys:
-            await self._handle_unsubscribe_account_trade(client_id, keys, request_id)
-        else:
-            self._logger.debug(f"Cliente {client_id} no tenía cuentas suscritas")
+            await self._handle_unsubscribe_account_trade(client_id, keys, None)
+
+        # Desuscribir de nuevos tokens
+        if was_subscribed_new_token:
+            await self._handle_unsubscribe_new_token(client_id, None)
+
+        # Si no había suscripciones, enviar respuesta
+        if not keys and not was_subscribed_new_token:
+            self._logger.debug(f"Cliente {client_id} no tenía suscripciones activas")
             await self._send_response(
                 client_id,
                 {
@@ -403,6 +511,31 @@ class PumpFunRedisBridgeService:
             return_exceptions=True,
         )
 
+    async def _handle_new_token_event(self, data: Dict[str, Any]) -> None:
+        async with self._subscription_lock:
+            consumers = list(self._new_token_clients)
+
+        if not consumers:
+            if self._config.keep_new_token_subscription_active:
+                pass # La suscripción se mantiene activa para mantener el WebSocket vivo
+            else:
+                self._logger.debug("Evento de nuevo token recibido pero sin consumidores")
+            return
+
+        self._logger.debug(f"Evento de nuevo token distribuido a {len(consumers)} cliente(s)")
+
+        message = json.dumps(
+            {
+                "event": self.EVENT_NEW_TOKEN,
+                "data": data,
+            }
+        )
+
+        await asyncio.gather(
+            *[self._publish_event(client_id, message) for client_id in consumers],
+            return_exceptions=True,
+        )
+
     async def _publish_event(self, client_id: str, message: str) -> None:
         if not self._redis:
             return
@@ -418,7 +551,9 @@ class PumpFunRedisBridgeService:
 
     async def _handle_ws_error_event(self, data: Dict[str, Any]) -> None:
         async with self._subscription_lock:
-            clients = list(self._client_accounts.keys())
+            # Obtener todos los clientes (tanto de cuentas como de nuevos tokens)
+            clients = set(self._client_accounts.keys()) | self._new_token_clients
+            clients = list(clients)
 
         if not clients:
             self._logger.debug("Error del WebSocket recibido pero sin clientes conectados")
@@ -461,8 +596,15 @@ class PumpFunRedisBridgeService:
             "namespace": self._config.namespace,
             "clients": len(self._client_accounts),
             "accounts": len(self._account_clients),
+            "new_token_clients": len(self._new_token_clients),
+            "new_token_subscribed": self._new_token_subscribed,
+            "keep_new_token_subscription_active": self._config.keep_new_token_subscription_active,
         }
-        self._logger.debug(f"Estado del servicio consultado: {status['clients']} clientes, {status['accounts']} cuentas")
+        self._logger.debug(
+            f"Estado del servicio consultado: {status['clients']} clientes, "
+            f"{status['accounts']} cuentas, {status['new_token_clients']} clientes de nuevos tokens, "
+            f"keep_active={status['keep_new_token_subscription_active']}"
+        )
         return status
 
 
@@ -499,10 +641,13 @@ async def run_service(config: RedisBridgeConfig) -> None:
 def from_env() -> RedisBridgeConfig:
     import os
 
+    keep_new_token_active = os.getenv("PUMPFUN_KEEP_NEW_TOKEN_ACTIVE", "false").lower() in ("true", "1", "yes")
+
     return RedisBridgeConfig(
         redis_url=os.getenv("PUMPFUN_REDIS_URL", "redis://localhost:6379/0"),
         namespace=os.getenv("PUMPFUN_REDIS_NAMESPACE", "pumpfun"),
         api_key=os.getenv("PUMPFUN_API_KEY"),
+        keep_new_token_subscription_active=keep_new_token_active,
     )
 
 
