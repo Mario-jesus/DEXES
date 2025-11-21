@@ -134,14 +134,13 @@ class TradeProcessorCallback:
                 asyncio.create_task(self._log_async("Trade rechazado - validación básica", data.get('signature', 'N/A')))
                 return
 
-            if not self._validate_minimum_sol_amount(trade_data):
-                self.stats['trades_rejected'] += 1
-                asyncio.create_task(self._log_async("Trade rechazado - monto mínimo de SOL", data.get('signature', 'N/A')))
-                return
+            # Validar que al menos una de las dos condiciones se cumpla (monto mínimo SOL o actividad de trading)
+            min_sol_valid = self._validate_minimum_sol_amount(trade_data)
+            activity_valid = self._validate_trade_activity_threshold(trade_data)
 
-            if not self._validate_trade_activity_threshold(trade_data):
+            if not (min_sol_valid or activity_valid):
                 self.stats['trades_rejected'] += 1
-                asyncio.create_task(self._log_async("Trade rechazado - actividad de trading insuficiente", data.get('signature', 'N/A')))
+                asyncio.create_task(self._log_async("Trade rechazado - monto mínimo de SOL y actividad de trading insuficiente", data.get('signature', 'N/A')))
                 return
 
             if not self._validate_trade_rate_limits(trade_data):
