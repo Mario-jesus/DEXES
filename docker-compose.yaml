@@ -71,6 +71,7 @@ services:
       - PUMPFUN_REDIS_URL=redis://redis:6379/0
       - PUMPFUN_REDIS_NAMESPACE=pumpfun
       - PUMPFUN_API_KEY=${PUMPFUN_API_KEY}
+      - PUMPFUN_KEEP_NEW_TOKEN_ACTIVE=true
     env_file:
       - .env
     depends_on:
