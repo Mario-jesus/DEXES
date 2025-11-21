@@ -2,8 +2,9 @@
 """
 Solana client for analyzing transactions.
 """
-from .solana_rcp import (
+from .rpc import (
     SolanaTxAnalyzer,
+    get_transaction,
     get_token_balances,
     get_sol_balance,
     get_signature_statuses,
@@ -17,6 +18,7 @@ __all__ = [
     'DryRunSolanaTxAnalyzer',
     'SolanaWebsocketManager',
     'DryRunSolanaWebsocketManager',
+    'get_transaction',
     'get_token_balances',
     'get_sol_balance',
     'get_signature_statuses'

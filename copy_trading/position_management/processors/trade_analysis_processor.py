@@ -77,14 +77,25 @@ class TradeAnalysisProcessor:
 
             self._logger.debug(f"Analizando transacción {signature}")
 
+            pair_addresses = {}
+            if position.trader_trade_data and position.trader_trade_data.bonding_curve_key:
+                pair_addresses[signature] = position.trader_trade_data.bonding_curve_key
+
             # Analizar transacciones
-            analysis_result = await self.solana_analyzer.analyze_transaction_by_signature(
-                signature,
-                bonding_curve_key=position.trader_trade_data.bonding_curve_key if position.trader_trade_data else None
+            analysis_results = await self.solana_analyzer.analyze_transactions_enhanced(
+                [signature],
+                pair_addresses=pair_addresses
             )
 
-            if not analysis_result.success:
+            # Extraer el análisis del diccionario usando la signature como clave
+            analysis_result = analysis_results.get(signature) if analysis_results else None
+
+            if not analysis_result:
                 self._logger.warning(f"No se encontró análisis para la transacción {signature}")
+                return False, None
+
+            if not analysis_result.success:
+                self._logger.warning(f"Análisis no exitoso para la transacción {signature}")
                 return False, analysis_result
 
             # Aplicar análisis a la posición

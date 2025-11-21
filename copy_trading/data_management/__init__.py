@@ -11,8 +11,10 @@ from .pumpfun_redis_consumer import PumpFunRedisSubscriptions
 from .analytics.token_analytics import TokenAnalytics
 from .analytics.trader_analytics import TraderAnalytics
 from .analytics.performance_metrics import PerformanceMetrics
-from .solana_manager.solana_rcp import (
+from .solana_manager.rpc import (
     SolanaTxAnalyzer,
+)
+from .models import (
     TransactionAnalysis,
     TokenBalance,
     BalanceResponse

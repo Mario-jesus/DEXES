@@ -103,7 +103,7 @@ class CopyTrading:
             self.solana_analyzer = DryRunSolanaTxAnalyzer(config=config)
             self.solana_websocket = DryRunSolanaWebsocketManager(ws_url=config.websocket_url)
         else:
-            self.solana_analyzer = SolanaTxAnalyzer(endpoint=config.rpc_url)
+            self.solana_analyzer = SolanaTxAnalyzer(base_rpc_url=config.rpc_url, api_key=config.rpc_api_key)
             self.solana_websocket = SolanaWebsocketManager(ws_url=config.websocket_url)
 
         # Balance manager centralizado (antes de crear colas/managers para inyectarlo)

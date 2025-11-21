@@ -85,86 +85,111 @@ class DryRunSolanaTxAnalyzer:
             all_exists=True
         )
 
-    async def analyze_transaction_by_signature(self, signature: str, bonding_curve_key: Optional[str] = None) -> TransactionAnalysis:
+    async def analyze_transactions_enhanced(self, signatures: List[str], pair_addresses: Optional[Dict[str, str]] = None) -> Dict[str, Optional[TransactionAnalysis]]:
         """
-        Construye TransactionAnalysis usando metadata registrada para la signature.
+        Construye TransactionAnalysis usando metadata registrada para cada signature.
         Espera claves como:
         - position_type: "open" | "close"
         - execution_price_sol_per_token (o market_price_sol_per_token)
         - amount_sol, amount_tokens
         - simulated_fee_sol (o fee_sol)
+        
+        Args:
+            signatures: Lista de firmas de transacciones a analizar
+            pair_addresses: Diccionario opcional de signature -> pair address (no usado en dry run)
+            
+        Returns:
+            Diccionario que mapea cada signature a su TransactionAnalysis (o None si no hay metadata)
         """
-        meta = self._sig_metadata.get(signature, {})
-        if not meta:
-            self._logger.warning(f"[DRY RUN] No hay metadata para signature {signature}")
-            return TransactionAnalysis(
-                success=False,
-                op_type=None,
-                error_kind="unknown",
-                error_message="No metadata available for signature"
-            )
+        results: Dict[str, Optional[TransactionAnalysis]] = {}
+        pair_addresses = pair_addresses or {}
 
-        # Extraer datos con fallbacks
-        position_type = meta.get("position_type") or meta.get("side") or "open"
-        price_str = meta.get("execution_price_sol_per_token") or meta.get("market_price_sol_per_token") or meta.get("execution_price") or "0"
-        fee_str = meta.get("simulated_fee_sol") or meta.get("fee_sol") or "0"
-        amount_sol_str = meta.get("amount_sol") or "0"
-        amount_tokens_str = meta.get("amount_tokens") or "0"
-
-        try:
-            price = Decimal(price_str)
-        except Exception:
-            price = Decimal("0")
-        try:
-            fee = Decimal(fee_str)
-        except Exception:
-            fee = Decimal("0")
-        try:
-            amount_sol = Decimal(amount_sol_str)
-        except Exception:
-            amount_sol = Decimal("0")
-        try:
-            amount_tokens = Decimal(amount_tokens_str)
-        except Exception:
-            amount_tokens = Decimal("0")
-
-        # Cálculos por tipo
-        if position_type == "open":
-            # BUY
-            tokens_received = Decimal("0") if price <= 0 else (amount_sol / price)
-            signer_sol_delta = -(amount_sol + fee)
-            bonding_curve_sol_delta = amount_sol
-            token_ui_delta = tokens_received
-            total_cost_sol = amount_sol + fee
-            side: Literal["buy", "sell"] = "buy"
-        else:
-            # SELL
-            sol_received = amount_tokens * price
-            signer_sol_delta = sol_received - fee
-            bonding_curve_sol_delta = -sol_received
-            token_ui_delta = -amount_tokens
-            total_cost_sol = fee
-            side = "sell"
-
-        # Formatear strings
+        # Formatear strings helper
         def fs(x: Decimal, q: str = "0.000000001") -> str:
             try:
                 return format(x.quantize(Decimal(q), rounding=ROUND_DOWN).normalize(), "f")
             except Exception:
                 return format(x, "f")
 
-        analysis = TransactionAnalysis(
-            success=True,
-            op_type=side,
-            token_ui_delta=fs(token_ui_delta),
-            bonding_curve_sol_delta=fs(bonding_curve_sol_delta),
-            signer_sol_delta=fs(signer_sol_delta),
-            fee_sol=fs(fee),
-            total_cost_sol=fs(total_cost_sol),
-            price_sol_per_token=fs(price, "0.000000000001")
-        )
+        for signature in signatures:
+            try:
+                meta = self._sig_metadata.get(signature, {})
+                if not meta:
+                    self._logger.warning(f"[DRY RUN] No hay metadata para signature {signature}")
+                    results[signature] = TransactionAnalysis(
+                        success=False,
+                        op_type=None,
+                        error_kind="unknown",
+                        error_message="No metadata available for signature"
+                    )
+                    continue
 
-        return analysis
+                # Extraer datos con fallbacks
+                position_type = meta.get("position_type") or meta.get("side") or "open"
+                price_str = meta.get("execution_price_sol_per_token") or meta.get("market_price_sol_per_token") or meta.get("execution_price") or "0"
+                fee_str = meta.get("simulated_fee_sol") or meta.get("fee_sol") or "0"
+                amount_sol_str = meta.get("amount_sol") or "0"
+                amount_tokens_str = meta.get("amount_tokens") or "0"
+
+                try:
+                    price = Decimal(price_str)
+                except Exception:
+                    price = Decimal("0")
+                try:
+                    fee = Decimal(fee_str)
+                except Exception:
+                    fee = Decimal("0")
+                try:
+                    amount_sol = Decimal(amount_sol_str)
+                except Exception:
+                    amount_sol = Decimal("0")
+                try:
+                    amount_tokens = Decimal(amount_tokens_str)
+                except Exception:
+                    amount_tokens = Decimal("0")
+
+                # Cálculos por tipo
+                if position_type == "open":
+                    # BUY
+                    tokens_received = Decimal("0") if price <= 0 else (amount_sol / price)
+                    signer_sol_delta = -(amount_sol + fee)
+                    bonding_curve_sol_delta = amount_sol
+                    token_ui_delta = tokens_received
+                    total_cost_sol = amount_sol + fee
+                    side: Literal["buy", "sell"] = "buy"
+                else:
+                    # SELL
+                    sol_received = amount_tokens * price
+                    signer_sol_delta = sol_received - fee
+                    bonding_curve_sol_delta = -sol_received
+                    token_ui_delta = -amount_tokens
+                    total_cost_sol = fee
+                    side = "sell"
+
+                analysis = TransactionAnalysis(
+                    success=True,
+                    op_type=side,
+                    token_ui_delta=fs(token_ui_delta),
+                    bonding_curve_sol_delta=fs(bonding_curve_sol_delta),
+                    signer_sol_delta=fs(signer_sol_delta),
+                    fee_sol=fs(fee),
+                    total_cost_sol=fs(total_cost_sol),
+                    price_sol_per_token=fs(price, "0.000000000001")
+                )
+
+                results[signature] = analysis
+                self._logger.debug(f"[DRY RUN] Análisis completado para signature {signature}: success={analysis.success}, op_type={analysis.op_type}")
+
+            except Exception as e:
+                self._logger.error(f"[DRY RUN] Error analizando signature {signature}: {e}", exc_info=True)
+                results[signature] = TransactionAnalysis(
+                    success=False,
+                    op_type=None,
+                    error_kind="unknown",
+                    error_message=f"Error processing signature: {str(e)}"
+                )
+
+        return results
 
     async def get_token_balances(
         self,

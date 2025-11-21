@@ -5,7 +5,7 @@ Contiene las interfaces que evitan dependencias circulares.
 """
 from __future__ import annotations
 
-from typing import Protocol, Optional, Callable, Awaitable, Literal, List, TYPE_CHECKING
+from typing import Protocol, Optional, Callable, Awaitable, Literal, List, TYPE_CHECKING, Dict
 
 if TYPE_CHECKING:
     from .data_management.models import SignatureNotification, TransactionAnalysis, SignaturesWithStatuses, BalanceResponse
@@ -71,16 +71,17 @@ class SolanaTxAnalyzerProtocol(Protocol):
     def set_system_wallet_address(self, system_wallet_address: str) -> None:
         ...
 
-    async def analyze_transaction_by_signature(self, signature: str, bonding_curve_key: Optional[str] = None) -> "TransactionAnalysis":
+    async def analyze_transactions_enhanced(self, signatures: List[str], pair_addresses: Optional[Dict[str, str]] = None) -> Dict[str, Optional[TransactionAnalysis]]:
         """
-        Analiza una transacción por su signature.
+        Analiza múltiples transacciones enhanced.
 
         Args:
-            signature: La signature de la transacción a analizar
-            bonding_curve_key: La clave de la bonding curve
+            signatures: Lista de signatures a analizar
+            pair_addresses: Diccionario de pair addresses a analizar
+            (signature -> pair address)
 
         Returns:
-            TransactionAnalysis con los resultados del análisis
+            Dict[str, Optional[TransactionAnalysis]] con los resultados del análisis
         """
         ...
 

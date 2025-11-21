@@ -73,7 +73,8 @@ class DryRunAnalysisProcessor:
                 if self.analyzer is None:
                     self._logger.warning(f"[DRY RUN] Analyzer no seteado para posición {position.id}")
                     return False, None
-                analysis_result = await self.analyzer.analyze_transaction_by_signature(signature)
+                analysis_results = await self.analyzer.analyze_transactions_enhanced([signature])
+                analysis_result = analysis_results.get(signature) if analysis_results else None
 
                 if analysis_result and analysis_result.success:
                     # Aplicar análisis a la posición

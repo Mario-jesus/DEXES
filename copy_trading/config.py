@@ -183,6 +183,7 @@ class CopyTradingConfig:
     # Wallet y Red
     wallet_file: str = "wallets/wallet_pumpportal.json"
     rpc_url: str = "https://api.mainnet-beta.solana.com/"
+    rpc_api_key: Optional[str] = None
     websocket_url: str = "wss://api.mainnet-beta.solana.com/"
 
     general_available_balance_to_invest: str = "0.0"
@@ -402,6 +403,7 @@ class CopyTradingConfig:
             'system_name': self.system_name,
             'wallet_file': self.wallet_file,
             'rpc_url': self.rpc_url,
+            'rpc_api_key': self.rpc_api_key,
             'websocket_url': self.websocket_url,
             'general_available_balance_to_invest': self.general_available_balance_to_invest,
             'amount_mode': self.amount_mode.value,
@@ -501,6 +503,7 @@ class CopyTradingConfig:
             # Wallet y Red
             wallet_file=data.get('wallet_file', 'wallets/wallet_pumpportal.json'),
             rpc_url=data.get('rpc_url', 'https://api.mainnet-beta.solana.com/'),
+            rpc_api_key=data.get('rpc_api_key'),
             websocket_url=data.get('websocket_url', 'wss://api.mainnet-beta.solana.com/'),
             general_available_balance_to_invest=data.get('general_available_balance_to_invest', "0.0"),
 
