@@ -139,6 +139,7 @@ class OpenPosition(Base):
     sol_amount_executed: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
     token_amount_received: Mapped[Optional[Decimal]] = mapped_column(DEC_TOK, nullable=True)
     status: Mapped[OpenPositionStatus] = mapped_column(Enum(OpenPositionStatus), default=OpenPositionStatus.PENDING)
+    description: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
 
     position: Mapped["Position"] = relationship(back_populates="open_position", uselist=False)
     close_orders: Mapped[List["CloseOrder"]] = relationship(back_populates="open_position", uselist=True, cascade="all")
@@ -181,16 +182,18 @@ class TraderTradeData(Base):
     __tablename__ = "trader_trade_data"
 
     positions_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("positions.id", ondelete="CASCADE"), primary_key=True)
-    sol_amount: Mapped[Decimal] = mapped_column(DEC_SOL, nullable=False)
-    token_amount: Mapped[Decimal] = mapped_column(DEC_TOK, nullable=False)
-    new_token_balance: Mapped[Decimal] = mapped_column(DEC_TOK, nullable=False)
     signature: Mapped[str] = mapped_column(String(100), nullable=False)
-    pool: Mapped[str] = mapped_column(String(15), nullable=False)
-    bonding_curve_key: Mapped[str] = mapped_column(String(50), nullable=False)
-    v_sol_in_bonding_curve: Mapped[Decimal] = mapped_column(DEC_SOL, nullable=False)
-    v_tokens_in_bonding_curve: Mapped[Decimal] = mapped_column(DEC_TOK, nullable=False)
+    token_amount: Mapped[Decimal] = mapped_column(DEC_TOK, nullable=False)
+    sol_amount: Mapped[Decimal] = mapped_column(DEC_SOL, nullable=False)
+    tokens_in_pool: Mapped[Optional[Decimal]] = mapped_column(DEC_TOK, nullable=True)
+    sol_in_pool: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
+    new_token_balance: Mapped[Optional[Decimal]] = mapped_column(DEC_TOK, nullable=True)
+    bonding_curve_key: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    v_tokens_in_bonding_curve: Mapped[Optional[Decimal]] = mapped_column(DEC_TOK, nullable=True)
+    v_sol_in_bonding_curve: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
     market_cap_sol: Mapped[Decimal] = mapped_column(DEC_SOL, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    pool: Mapped[str] = mapped_column(String(15), nullable=False)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=True)
 
     position: Mapped["Position"] = relationship(back_populates="trade_data", uselist=False)
 

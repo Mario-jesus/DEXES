@@ -473,6 +473,23 @@ class PositionNotificationCallback:
             # Obtener información de porcentajes
             percentage_info = await self._get_percentage_info(position)
 
+            # Añadir información de validaciones
+            min_sol_amount_valid = position.get_metadata("min_sol_amount_valid")
+            activity_valid = position.get_metadata("activity_valid")
+            is_min_sol_enabled = position.get_metadata("is_min_sol_enabled")
+            is_activity_enabled = position.get_metadata("is_activity_enabled")
+
+            def _validation_status(val: Optional[bool], enabled: Optional[bool]) -> str:
+                if not enabled or enabled in [False, "False", None, ""]:
+                    return "Not active"
+                if val is True or val == "True":
+                    return "✅"
+                elif val is False or val == "False":
+                    return "❌"
+                elif val is None or val == "":
+                    return "❔"
+                return f"❔ ({val})"
+
             message = (
                 f"🟢 <b>Position Opened</b>\n\n"
                 f"📊 <b>Trade Summary</b>\n"
@@ -492,6 +509,11 @@ class PositionNotificationCallback:
                 f"📥 <b>Amount:</b> {self._format_amount(amount_sol)} SOL ({self._format_amount(amount_sol_usd)} USD)\n"
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"🧾 <b>Fee:</b> {self._format_amount(fee_sol)} SOL ({self._format_amount(fee_sol_usd)} USD)\n\n"
+
+                f"🛡️ <b>Validations</b>\n"
+                f"{'─'*12}\n"
+                f"💸 <b>Min SOL Amount:</b> {_validation_status(min_sol_amount_valid, is_min_sol_enabled)}\n"
+                f"📈 <b>Trade Activity:</b> {_validation_status(activity_valid, is_activity_enabled)}\n\n"
 
                 f"{percentage_info}"
                 f"⏰ <b>Time:</b> {position.executed_at.strftime('%Y-%m-%d %H:%M:%S') if position.executed_at else 'N/A'}"

@@ -88,15 +88,32 @@ class PositionFactory:
                 trader_trade_data=position_trade_data.trader_trade_data,
             )
 
+            # Añadir metadata de uso de balance
             trader_balance_used = position_trade_data.get_metadata("trader_balance_used")
             own_balance_used = position_trade_data.get_metadata("own_balance_used")
             original_percentage = position_trade_data.get_metadata("original_percentage")
+
             if trader_balance_used:
                 position.add_metadata("trader_balance_used", trader_balance_used)
             if own_balance_used:
                 position.add_metadata("own_balance_used", own_balance_used)
             if original_percentage:
                 position.add_metadata("original_percentage", original_percentage)
+
+            # Añadir metadata de validaciones
+            min_sol_amount_valid = position_trade_data.get_metadata("min_sol_amount_valid")
+            activity_valid = position_trade_data.get_metadata("activity_valid")
+            is_min_sol_enabled = position_trade_data.get_metadata("is_min_sol_enabled")
+            is_activity_enabled = position_trade_data.get_metadata("is_activity_enabled")
+
+            if min_sol_amount_valid is not None:
+                position.add_metadata("min_sol_amount_valid", min_sol_amount_valid)
+            if activity_valid is not None:
+                position.add_metadata("activity_valid", activity_valid)
+            if is_min_sol_enabled is not None:
+                position.add_metadata("is_min_sol_enabled", is_min_sol_enabled)
+            if is_activity_enabled is not None:
+                position.add_metadata("is_activity_enabled", is_activity_enabled)
 
             self._logger.debug(f"OpenPosition creada exitosamente: {position.id}")
             return position

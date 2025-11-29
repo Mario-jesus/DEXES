@@ -110,6 +110,8 @@ class DryRunLiquidations:
                 amount_sol="",
                 signature="",
                 token_amount=token.ui_amount_string,
+                tokens_in_pool="",
+                sol_in_pool="",
                 new_token_balance="",
                 pool="auto",
                 bonding_curve_key="",

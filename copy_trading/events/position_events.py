@@ -123,6 +123,7 @@ class PositionAnalysisFinishedEvent(BasePositionEvent):
 @dataclass(slots=True)
 class PositionOpenedEvent(BasePositionEvent):
     amount_sol: str = ""
+    description: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -160,15 +161,17 @@ class PositionPartialClosedEvent(BasePositionEvent):
 
 @dataclass(slots=True)
 class PositionTraderTradeDataEvent(BasePositionEvent):
-    amount_sol: str = ""
     signature: str = ""
     token_amount: str = ""
+    amount_sol: str = ""
+    tokens_in_pool: str = ""
+    sol_in_pool: str = ""
     new_token_balance: str = ""
-    pool: str = ""
     bonding_curve_key: str = ""
-    v_sol_in_bonding_curve: str = ""
     v_tokens_in_bonding_curve: str = ""
+    v_sol_in_bonding_curve: str = ""
     market_cap_sol: str = ""
+    pool: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
 
 

@@ -2,7 +2,7 @@
 
 Revision ID: 654f26037b5d
 Revises: 
-Create Date: 2025-11-06 21:52:45.348653
+Create Date: 2025-11-29 16:50:45.348653
 
 """
 from typing import Sequence, Union
@@ -105,22 +105,25 @@ def upgrade() -> None:
         sa.Column('sol_amount_executed', sa.DECIMAL(precision=18, scale=9), nullable=True),
         sa.Column('token_amount_received', sa.DECIMAL(precision=18, scale=6), nullable=True),
         sa.Column('status', sa.Enum('PENDING', 'OPEN', 'PARTIALLY_CLOSED', 'CLOSED', 'FAILED', name='openpositionstatus'), nullable=False),
+        sa.Column('description', sa.String(length=45), nullable=True),
         sa.ForeignKeyConstraint(['positions_id'], ['positions.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('positions_id')
     )
 
     op.create_table('trader_trade_data',
         sa.Column('positions_id', sa.UUID(), nullable=False),
-        sa.Column('sol_amount', sa.DECIMAL(precision=18, scale=9), nullable=False),
-        sa.Column('token_amount', sa.DECIMAL(precision=18, scale=6), nullable=False),
-        sa.Column('new_token_balance', sa.DECIMAL(precision=18, scale=6), nullable=False),
         sa.Column('signature', sa.String(length=100), nullable=False),
-        sa.Column('pool', sa.String(length=15), nullable=False),
-        sa.Column('bonding_curve_key', sa.String(length=50), nullable=False),
-        sa.Column('v_sol_in_bonding_curve', sa.DECIMAL(precision=18, scale=9), nullable=False),
-        sa.Column('v_tokens_in_bonding_curve', sa.DECIMAL(precision=18, scale=6), nullable=False),
+        sa.Column('token_amount', sa.DECIMAL(precision=18, scale=6), nullable=False),
+        sa.Column('sol_amount', sa.DECIMAL(precision=18, scale=9), nullable=False),
+        sa.Column('tokens_in_pool', sa.DECIMAL(precision=18, scale=6), nullable=True),
+        sa.Column('sol_in_pool', sa.DECIMAL(precision=18, scale=9), nullable=True),
+        sa.Column('new_token_balance', sa.DECIMAL(precision=18, scale=6), nullable=True),
+        sa.Column('bonding_curve_key', sa.String(length=50), nullable=True),
+        sa.Column('v_tokens_in_bonding_curve', sa.DECIMAL(precision=18, scale=6), nullable=True),
+        sa.Column('v_sol_in_bonding_curve', sa.DECIMAL(precision=18, scale=9), nullable=True),
         sa.Column('market_cap_sol', sa.DECIMAL(precision=18, scale=9), nullable=False),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+        sa.Column('pool', sa.String(length=15), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
         sa.ForeignKeyConstraint(['positions_id'], ['positions.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('positions_id')
     )

@@ -62,17 +62,19 @@ class PositionLifecycleManager:
                 self.position_event_bus.emit_position_trader_trade_data(
                     PositionTraderTradeDataEvent(
                         position_id=position_trade_data.id,
-                        amount_sol=position_trade_data.trader_trade_data.amount_sol,
-                        token_amount=position_trade_data.trader_trade_data.token_amount,
                         signature=signature,
+                        token_amount=position_trade_data.trader_trade_data.token_amount,
+                        amount_sol=position_trade_data.trader_trade_data.amount_sol,
+                        tokens_in_pool=position_trade_data.trader_trade_data.tokens_in_pool,
+                        sol_in_pool=position_trade_data.trader_trade_data.sol_in_pool,
+                        new_token_balance=position_trade_data.trader_trade_data.new_token_balance,
+                        bonding_curve_key=position_trade_data.trader_trade_data.bonding_curve_key,
+                        v_tokens_in_bonding_curve=position_trade_data.trader_trade_data.v_tokens_in_bonding_curve,
+                        v_sol_in_bonding_curve=position_trade_data.trader_trade_data.v_sol_in_bonding_curve,
+                        market_cap_sol=position_trade_data.trader_trade_data.market_cap_sol,
+                        pool=position_trade_data.pool,
                         token_address=position_trade_data.token_address,
                         trader_wallet=position_trade_data.trader_wallet,
-                        pool=position_trade_data.pool,
-                        bonding_curve_key=position_trade_data.trader_trade_data.bonding_curve_key,
-                        new_token_balance=position_trade_data.trader_trade_data.new_token_balance,
-                        v_sol_in_bonding_curve=position_trade_data.trader_trade_data.v_sol_in_bonding_curve,
-                        v_tokens_in_bonding_curve=position_trade_data.trader_trade_data.v_tokens_in_bonding_curve,
-                        market_cap_sol=position_trade_data.trader_trade_data.market_cap_sol,
                         timestamp=position_trade_data.created_at
                     )
                 )
@@ -152,6 +154,18 @@ class PositionLifecycleManager:
                 self._logger.warning(f"No se pudo agregar posición abierta {position.id}")
                 return False
 
+            min_sol_amount_valid = position.get_metadata("min_sol_amount_valid")
+            activity_valid = position.get_metadata("activity_valid")
+            is_min_sol_enabled = position.get_metadata("is_min_sol_enabled")
+            is_activity_enabled = position.get_metadata("is_activity_enabled")
+
+            # Construir descripción tipo clave
+            description_keys = [
+                f"min_sol:{'EN' if is_min_sol_enabled else 'OFF'}_{'OK' if min_sol_amount_valid else 'NO'}",
+                f"activity:{'EN' if is_activity_enabled else 'OFF'}_{'OK' if activity_valid else 'NO'}"
+            ]
+            description = "|".join(description_keys)
+
             self._logger.debug(f"Posición abierta {position.id} agregada exitosamente")
             self._logger.debug(f"Emitiendo evento de posición abierta: {position.id}")
             self.position_event_bus.emit_position_opened(
@@ -160,7 +174,8 @@ class PositionLifecycleManager:
                     token_address=position.token_address,
                     trader_wallet=position.trader_wallet,
                     amount_sol=position.amount_sol,
-                    timestamp=position.created_at
+                    timestamp=position.created_at,
+                    description=description
                 )
             )
 

@@ -114,6 +114,8 @@ class DryRunMinimumBalanceHandler(MinimumBalanceHandlerProtocol):
                 amount_sol="",
                 signature="",
                 token_amount=position.amount_tokens_executed,
+                tokens_in_pool="",
+                sol_in_pool="",
                 new_token_balance="",
                 pool="auto",
                 bonding_curve_key="",

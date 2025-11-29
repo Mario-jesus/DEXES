@@ -157,24 +157,27 @@ class PositionEventsSubscriber:
         async with (await self._get_session()) as s:
             self._logger.debug(
                 f"Creando TraderTradeData con: "
-                f"sol_amount={event.amount_sol}, token_amount={event.token_amount}, "
-                f"new_token_balance={event.new_token_balance}, signature={event.signature}, "
-                f"pool={event.pool}, bonding_curve_key={event.bonding_curve_key}, "
-                f"v_sol_in_bonding_curve={event.v_sol_in_bonding_curve}, "
+                f"signature={event.signature}, token_amount={event.token_amount}, "
+                f"sol_amount={event.amount_sol}, tokens_in_pool={event.tokens_in_pool}, "
+                f"sol_in_pool={event.sol_in_pool}, new_token_balance={event.new_token_balance}, "
+                f"bonding_curve_key={event.bonding_curve_key}, "
                 f"v_tokens_in_bonding_curve={event.v_tokens_in_bonding_curve}, "
-                f"market_cap_sol={event.market_cap_sol}"
+                f"v_sol_in_bonding_curve={event.v_sol_in_bonding_curve}, "
+                f"market_cap_sol={event.market_cap_sol}, pool={event.pool}"
             )
             trader_trade_data = TraderTradeData(
                 positions_id=uuid.UUID(event.position_id),
-                sol_amount=Decimal(event.amount_sol),
-                token_amount=Decimal(event.token_amount),
-                new_token_balance=Decimal(event.new_token_balance),
                 signature=event.signature,
-                pool=event.pool,
-                bonding_curve_key=event.bonding_curve_key,
-                v_sol_in_bonding_curve=Decimal(event.v_sol_in_bonding_curve),
-                v_tokens_in_bonding_curve=Decimal(event.v_tokens_in_bonding_curve),
-                market_cap_sol=Decimal(event.market_cap_sol)
+                token_amount=Decimal(event.token_amount),
+                sol_amount=Decimal(event.amount_sol),
+                tokens_in_pool=Decimal(event.tokens_in_pool) if event.tokens_in_pool and event.tokens_in_pool.strip() else None,
+                sol_in_pool=Decimal(event.sol_in_pool) if event.sol_in_pool and event.sol_in_pool.strip() else None,
+                new_token_balance=Decimal(event.new_token_balance) if event.new_token_balance and event.new_token_balance.strip() else None,
+                bonding_curve_key=event.bonding_curve_key if event.bonding_curve_key and event.bonding_curve_key.strip() else None,
+                v_tokens_in_bonding_curve=Decimal(event.v_tokens_in_bonding_curve) if event.v_tokens_in_bonding_curve and event.v_tokens_in_bonding_curve.strip() else None,
+                v_sol_in_bonding_curve=Decimal(event.v_sol_in_bonding_curve) if event.v_sol_in_bonding_curve and event.v_sol_in_bonding_curve.strip() else None,
+                market_cap_sol=Decimal(event.market_cap_sol) if event.market_cap_sol and event.market_cap_sol.strip() else Decimal("0"),
+                pool=event.pool
             )
             s.add(trader_trade_data)
             try:
@@ -229,8 +232,10 @@ class PositionEventsSubscriber:
             open_position = OpenPosition(
                 positions_id=uuid.UUID(event.position_id),
                 status=OpenPositionStatus.PENDING,
-                sol_amount_sent=event.amount_sol
+                sol_amount_sent=Decimal(event.amount_sol) if event.amount_sol else Decimal(0)
             )
+            if event.description:
+                open_position.description = event.description
             s.add(open_position)
 
             try:

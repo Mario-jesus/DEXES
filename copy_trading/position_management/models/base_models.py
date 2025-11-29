@@ -27,6 +27,10 @@ class TraderTradeData:
     token_amount: str
     new_token_balance: str
 
+    # Información del pool
+    tokens_in_pool: str
+    sol_in_pool: str
+
     # Información del pool/bonding curve
     pool: str
     bonding_curve_key: str
@@ -49,6 +53,8 @@ class TraderTradeData:
             "signature": self.signature,
             "token_amount": self.token_amount,
             "new_token_balance": self.new_token_balance,
+            "tokens_in_pool": self.tokens_in_pool,
+            "sol_in_pool": self.sol_in_pool,
             "pool": self.pool,
             "bonding_curve_key": self.bonding_curve_key,
             "v_tokens_in_bonding_curve": self.v_tokens_in_bonding_curve,
@@ -68,6 +74,8 @@ class TraderTradeData:
             signature=data["signature"],
             token_amount=data["token_amount"],
             new_token_balance=data["new_token_balance"],
+            tokens_in_pool=data["tokens_in_pool"],
+            sol_in_pool=data["sol_in_pool"],
             pool=data["pool"],
             bonding_curve_key=data["bonding_curve_key"],
             v_tokens_in_bonding_curve=data["v_tokens_in_bonding_curve"],

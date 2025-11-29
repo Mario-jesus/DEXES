@@ -13,12 +13,9 @@ from logging_system import AppLogger
 from ..config import CopyTradingConfig
 from ..position_management.models import (
     OpenPosition,
-    ClosePosition,
     PositionTraderTradeData,
-    TraderTradeData,
-    ClosePositionStatus
+    TraderTradeData
 )
-from ..position_management.queues import OpenPositionQueue
 from ..position_management.managers import PositionQueueManager
 from ..position_management.services import PositionCalculationService
 from ..events import PositionEventBus, PositionCloseRequestedEvent
@@ -282,6 +279,8 @@ class PositionTimeoutManager:
                 amount_sol="",  # Se calculará durante la ejecución
                 signature="",  # Se asignará después de la ejecución
                 token_amount=remaining_tokens,
+                tokens_in_pool=position.trader_trade_data.tokens_in_pool if position.trader_trade_data else "",
+                sol_in_pool=position.trader_trade_data.sol_in_pool if position.trader_trade_data else "",
                 new_token_balance="",
                 pool="auto",
                 bonding_curve_key=position.trader_trade_data.bonding_curve_key if position.trader_trade_data else "",

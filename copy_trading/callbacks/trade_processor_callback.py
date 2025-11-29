@@ -49,6 +49,16 @@ class TraderTokenRateLimitData:
     open_positions_per_token: int = 0
 
 
+@dataclass(slots=True)
+class TradeDataWithValidation:
+    """Datos del trade con las validaciones"""
+    trade_data: TraderTradeData
+    min_sol_amount_valid: bool
+    activity_valid: bool
+    is_min_sol_enabled: bool
+    is_activity_enabled: bool
+
+
 class TradeProcessorCallback:
     """Callback para procesar trades y replicarlos automáticamente"""
 
@@ -90,7 +100,7 @@ class TradeProcessorCallback:
             raise ValueError("pending_position_queue no puede ser None")
 
         # Cola interna para procesamiento asíncrono
-        self._processing_queue: asyncio.Queue[TraderTradeData] = asyncio.Queue(maxsize=1000)
+        self._processing_queue: asyncio.Queue[TradeDataWithValidation] = asyncio.Queue(maxsize=1000)
         self._processing_tasks: Set[asyncio.Task] = set()
 
         # Flag para controlar el procesamiento
@@ -138,10 +148,23 @@ class TradeProcessorCallback:
             min_sol_valid = self._validate_minimum_sol_amount(trade_data)
             activity_valid = self._validate_trade_activity_threshold(trade_data)
 
-            if not (min_sol_valid or activity_valid):
-                self.stats['trades_rejected'] += 1
-                asyncio.create_task(self._log_async("Trade rechazado - monto mínimo de SOL y actividad de trading insuficiente", data.get('signature', 'N/A')))
-                return
+            is_min_sol_enabled = self.config.min_sol_amount_threshold is not None
+            is_activity_enabled = self.config.is_trade_activity_filter_enabled
+
+            if is_min_sol_enabled and is_activity_enabled:
+                if not (min_sol_valid or activity_valid):
+                    self.stats['trades_rejected'] += 1
+                    asyncio.create_task(self._log_async("Trade rechazado - monto mínimo de SOL y actividad de trading insuficiente", data.get('signature', 'N/A')))
+                    return
+            elif is_min_sol_enabled:
+                if not min_sol_valid:
+                    self.stats['trades_rejected'] += 1
+                    asyncio.create_task(self._log_async("Trade rechazado - monto mínimo de SOL insuficiente", data.get('signature', 'N/A')))
+                    return
+            elif is_activity_enabled:
+                if not activity_valid:
+                    self.stats['trades_rejected'] += 1
+                    asyncio.create_task(self._log_async("Trade rechazado - actividad de trading insuficiente", data.get('signature', 'N/A')))
 
             if not self._validate_trade_rate_limits(trade_data):
                 self.stats['trades_rejected'] += 1
@@ -150,7 +173,14 @@ class TradeProcessorCallback:
 
             # Añadir a cola de procesamiento para operaciones lentas
             try:
-                self._processing_queue.put_nowait(trade_data)
+                self._processing_queue.put_nowait(TradeDataWithValidation(
+                    trade_data=trade_data,
+                    min_sol_amount_valid=min_sol_valid,
+                    activity_valid=activity_valid,
+                    is_min_sol_enabled=is_min_sol_enabled,
+                    is_activity_enabled=is_activity_enabled,
+                ))
+
                 self.stats['trades_processing'] += 1
             except asyncio.QueueFull:
                 self._logger.warning("Cola de procesamiento llena, trade descartado")
@@ -181,7 +211,7 @@ class TradeProcessorCallback:
         try:
             amount_decimal = Decimal(trade_data.amount_sol)
             if amount_decimal < Decimal(self.config.min_sol_amount_threshold):
-                self._logger.warning(f"Trade rechazado - monto {trade_data.amount_sol} SOL < {self.config.min_sol_amount_threshold} SOL (mínimo)")
+                self._logger.info(f"Trade rechazado - monto {trade_data.amount_sol} SOL < {self.config.min_sol_amount_threshold} SOL (mínimo)")
                 return False
             self._logger.debug(f"Trade validado - monto {trade_data.amount_sol} SOL >= {self.config.min_sol_amount_threshold} SOL (mínimo)")
             return True
@@ -234,12 +264,12 @@ class TradeProcessorCallback:
         while self._processing_active:
             try:
                 # Obtener trade de la cola con timeout
-                trade_data = await asyncio.wait_for(
+                trade_data_with_validation = await asyncio.wait_for(
                     self._processing_queue.get(), timeout=1.0
                 )
 
                 # Procesar trade en task separado
-                task = asyncio.create_task(self._process_trade_async(trade_data))
+                task = asyncio.create_task(self._process_trade_async(trade_data_with_validation))
                 self._processing_tasks.add(task)
                 task.add_done_callback(self._processing_tasks.discard)
 
@@ -251,9 +281,16 @@ class TradeProcessorCallback:
             except Exception as e:
                 self._logger.error(f"Error en processing worker: {e}")
 
-    async def _process_trade_async(self, trade_data: TraderTradeData):
+    async def _process_trade_async(self, trade_data_with_validation: TradeDataWithValidation):
         """Procesa un trade de manera asíncrona con todas las validaciones"""
         try:
+            # Obtener datos del trade con validaciones
+            trade_data = trade_data_with_validation.trade_data
+            min_sol_amount_valid = trade_data_with_validation.min_sol_amount_valid
+            activity_valid = trade_data_with_validation.activity_valid
+            is_min_sol_enabled = trade_data_with_validation.is_min_sol_enabled
+            is_activity_enabled = trade_data_with_validation.is_activity_enabled
+
             # Calcular montos de copia
             copy_amount, context = await self._amount_calculator.calculate_copy_amount(trade_data)
 
@@ -298,6 +335,12 @@ class TradeProcessorCallback:
                 own_balance_used=format(context.own_balance, "f") if context.own_balance else None,
                 original_percentage=context.original_percentage
             )
+
+            # Añadir metadata a la posición
+            position.add_metadata("min_sol_amount_valid", min_sol_amount_valid)
+            position.add_metadata("activity_valid", activity_valid)
+            position.add_metadata("is_min_sol_enabled", is_min_sol_enabled)
+            position.add_metadata("is_activity_enabled", is_activity_enabled)
 
             # Encolar posición
             await self.pending_position_queue.add_position(position)
@@ -647,13 +690,17 @@ class TradeProcessorCallback:
 
                 # Información del token
                 token_amount=format(Decimal(str(data.get('tokenAmount', 0))), "f"),
-                new_token_balance=format(Decimal(str(data.get('newTokenBalance', 0))), "f"),
+                new_token_balance=format(Decimal(str(data['newTokenBalance'])), "f") if 'newTokenBalance' in data else '',
+
+                # Información del pool
+                tokens_in_pool=format(Decimal(str(data['tokensInPool'])), "f") if 'tokensInPool' in data else '',
+                sol_in_pool=format(Decimal(str(data['solInPool'])), "f") if 'solInPool' in data else '',
 
                 # Información del pool/bonding curve
                 pool=data.get('pool', ''),
                 bonding_curve_key=data.get('bondingCurveKey', ''),
-                v_tokens_in_bonding_curve=format(Decimal(str(data.get('vTokensInBondingCurve', 0))), "f"),
-                v_sol_in_bonding_curve=format(Decimal(str(data.get('vSolInBondingCurve', 0))), "f"),
+                v_tokens_in_bonding_curve=format(Decimal(str(data['vTokensInBondingCurve'])), "f") if 'vTokensInBondingCurve' in data else '',
+                v_sol_in_bonding_curve=format(Decimal(str(data['vSolInBondingCurve'])), "f") if 'vSolInBondingCurve' in data else '',
                 market_cap_sol=format(Decimal(str(data.get('marketCapSol', 0))), "f"),
 
                 # Metadatos
@@ -664,7 +711,7 @@ class TradeProcessorCallback:
             # Retornar un objeto vacío con valores por defecto
             return TraderTradeData(
                 trader_wallet='', side='buy', token_address='', amount_sol='',
-                signature='', token_amount='', new_token_balance='', pool='',
+                signature='', token_amount='', new_token_balance='', pool='', tokens_in_pool='', sol_in_pool='',
                 bonding_curve_key='', v_tokens_in_bonding_curve='',
                 v_sol_in_bonding_curve='', market_cap_sol='', timestamp=datetime.now()
             )
