@@ -21,8 +21,8 @@ from .position_management import PositionQueueManager
 from .position_management.models import PositionTraderTradeData
 from .events import PositionEventBus, PositionExecutionFailedEvent, PositionFailedEvent
 from .data_management import (
-    TokenTraderManager, 
-    TradingDataFetcher, 
+    TokenTraderManager,
+    MoralisPriceClient,
     SolanaTxAnalyzer, 
     SolanaWebsocketManager,
     TradingDataStore,
@@ -71,10 +71,6 @@ class CopyTrading:
         self.position_event_bus = PositionEventBus()
         self._logger.debug("PositionEventBus inicializado")
 
-        # Inicializar TradingDataFetcher
-        self.trading_data_fetcher = TradingDataFetcher(rpc_url=config.rpc_url)
-        self._logger.debug("TradingDataFetcher inicializado")
-
         # Inicializar MoralisPriceClient
         self.moralis_client = MoralisPriceClient()
         self._logger.debug("MoralisPriceClient inicializado")
@@ -86,7 +82,7 @@ class CopyTrading:
         # Inicializar TokenTraderManager
         self.token_trader_manager = TokenTraderManager(
             config=config,
-            trading_data_fetcher=self.trading_data_fetcher,
+            price_client=self.moralis_client,
             trading_data_store=self.trading_data_store,
             position_event_bus=self.position_event_bus
         )
@@ -119,7 +115,7 @@ class CopyTrading:
             config=config,
             solana_analyzer=self.solana_analyzer,
             solana_websocket=self.solana_websocket,
-            trading_data_fetcher=self.trading_data_fetcher,
+            price_client=self.moralis_client,
             token_trader_manager=self.token_trader_manager,
             balance_manager=self.balance_manager,
             position_event_bus=self.position_event_bus,
@@ -176,12 +172,9 @@ class CopyTrading:
 
         # Métricas
         self.metrics = {
-            'trades_processed': 0,
             'trades_executed': 0,
             'total_volume_sol': 0.0,
-            'total_pnl': 0.0,
-            'average_latency_ms': 0.0,
-            'uptime_seconds': 0
+            'uptime_seconds': 0.0
         }
 
         self._pending_task = None
@@ -581,10 +574,13 @@ class CopyTrading:
                     self._logger.error(f"Error desconectando PumpFunApiClient: {e}")
 
             # Liberar recursos del fetcher de datos de trading
-            if self.trading_data_fetcher:
-                self._logger.debug("Cerrando TradingDataFetcher...")
-                await self.trading_data_fetcher.close()
-                self._logger.debug("TradingDataFetcher cerrado")
+            if self.moralis_client:
+                try:
+                    self._logger.debug("Cerrando MoralisPriceClient...")
+                    await self.moralis_client.stop()
+                    self._logger.debug("MoralisPriceClient cerrado")
+                except Exception as e:
+                    self._logger.error(f"Error cerrando MoralisPriceClient: {e}")
 
             # Mostrar estadísticas finales
             stats = await self.get_metrics()
@@ -779,49 +775,113 @@ class CopyTrading:
 
     async def get_metrics(self) -> Dict[str, Any]:
         """Obtiene métricas del sistema"""
-        # Actualizar uptime
-        if self.start_time:
-            self.metrics['uptime_seconds'] = (datetime.now() - self.start_time).total_seconds()
+        try:
+            self._logger.debug("Iniciando obtención de métricas del sistema")
 
-        if not self.trade_processor_callback:
-            error_msg = "TradeProcessorCallback no inicializado"
-            self._logger.error(error_msg)
-            raise ValueError(error_msg)
+            # Actualizar uptime
+            if self.start_time:
+                self.metrics['uptime_seconds'] = (datetime.now() - self.start_time).total_seconds()
+                self._logger.debug(f"Uptime actualizado: {self.metrics['uptime_seconds']:.1f}s")
+            else:
+                self._logger.warning("start_time no está definido, uptime será 0")
 
-        # Combinar con métricas del callback
-        callback_stats = self.trade_processor_callback.get_stats()
+            if not self.trade_processor_callback:
+                error_msg = "TradeProcessorCallback no inicializado"
+                self._logger.error(error_msg)
+                raise ValueError(error_msg)
 
-        # Combinar con métricas de las colas
-        queue_stats = await self.queue_manager.get_stats()
+            # Combinar con métricas del callback
+            self._logger.debug("Obteniendo estadísticas del callback")
+            callback_stats = self.trade_processor_callback.get_stats()
+            self._logger.debug(f"Callback stats obtenidas: trades_received={callback_stats.get('trades_received', 0)}, trades_validated={callback_stats.get('trades_validated', 0)}")
 
-        # Obtener balance actual
-        current_balance = 0.0
-        if self.balance_manager and self.wallet_data:
-            try:
-                current_balance = await self.balance_manager.get_sol_balance(force_onchain=True)
-                self._logger.debug(f"Balance actual obtenido: {current_balance} SOL")
-            except Exception as e:
-                # Error: registrar y continuar con balance 0
-                if self._logger:
+            # Combinar con métricas de las colas
+            self._logger.debug("Obteniendo estadísticas de las colas")
+            queue_stats = await self.queue_manager.get_stats()
+            pending_count = queue_stats.get('pending', {}).get('count', 0) if isinstance(queue_stats.get('pending'), dict) else 0
+            self._logger.debug(f"Queue stats obtenidas: pending={pending_count}")
+
+            # Obtener balance actual
+            current_balance = 0.0
+            if self.balance_manager and self.wallet_data:
+                try:
+                    self._logger.debug("Obteniendo balance actual desde BalanceManager")
+                    balance_str = await self.balance_manager.get_sol_balance(force_onchain=True)
+                    # Convertir string a float para formateo correcto
+                    current_balance = float(balance_str) if balance_str else 0.0
+                    self._logger.debug(f"Balance actual obtenido: {current_balance} SOL")
+                except Exception as e:
+                    # Error: registrar y continuar con balance 0
                     self._logger.warning(f"No se pudo obtener balance: {e}")
+                    current_balance = 0.0
+            else:
+                self._logger.debug("BalanceManager o wallet_data no disponibles, usando balance 0.0")
 
-        # Obtener estado del cliente API centralizado
-        client_status = self.http_client.get_status() if self.http_client else None
+            # Obtener estado del cliente API centralizado
+            client_status = None
+            if self.http_client:
+                try:
+                    self._logger.debug("Obteniendo estado del cliente HTTP")
+                    client_status = self.http_client.get_status()
+                    self._logger.debug(f"Estado del cliente HTTP obtenido: {client_status}")
+                except Exception as e:
+                    self._logger.warning(f"Error obteniendo estado del cliente HTTP: {e}")
 
-        # Obtener información del TransactionExecutor
-        transaction_info = self.transaction_executor.get_transaction_type_info() if self.transaction_executor else None
+            # Obtener información del TransactionExecutor
+            transaction_info = None
+            if self.transaction_executor:
+                try:
+                    self._logger.debug("Obteniendo información del TransactionExecutor")
+                    transaction_info = self.transaction_executor.get_transaction_type_info()
+                    self._logger.debug(f"Información del TransactionExecutor obtenida: {transaction_info}")
+                except Exception as e:
+                    self._logger.warning(f"Error obteniendo información del TransactionExecutor: {e}")
 
-        return {
-            'system_metrics': self.metrics,
-            'callback_stats': callback_stats,
-            'queue_stats': queue_stats,
-            'client_status': client_status,
-            'transaction_info': transaction_info,
-            'wallet_balance': current_balance,
-            'is_running': self.is_running,
-            'dry_run': self.config.dry_run,
-            'traders_count': len(self.config.traders)
-        }
+            # Asegurar que todas las métricas numéricas sean del tipo correcto
+            self._logger.debug("Convirtiendo métricas a tipos numéricos correctos")
+            system_metrics = {
+                'trades_executed': int(self.metrics.get('trades_executed', 0)),
+                'total_volume_sol': float(self.metrics.get('total_volume_sol', 0.0)),
+                'uptime_seconds': float(self.metrics.get('uptime_seconds', 0.0))
+            }
+            self._logger.debug(f"Métricas del sistema preparadas: trades_executed={system_metrics['trades_executed']}, total_volume_sol={system_metrics['total_volume_sol']:.6f}, uptime_seconds={system_metrics['uptime_seconds']:.1f}")
+
+            result = {
+                'system_metrics': system_metrics,
+                'callback_stats': callback_stats,
+                'queue_stats': queue_stats,
+                'client_status': client_status,
+                'transaction_info': transaction_info,
+                'wallet_balance': float(current_balance),
+                'is_running': self.is_running,
+                'dry_run': self.config.dry_run,
+                'traders_count': len(self.config.traders)
+            }
+
+            self._logger.debug("Métricas del sistema obtenidas exitosamente")
+            return result
+
+        except ValueError as e:
+            self._logger.error(f"Error de validación al obtener métricas: {e}")
+            raise
+        except Exception as e:
+            self._logger.error(f"Error inesperado al obtener métricas: {e}", exc_info=True)
+            # Devolver métricas básicas en caso de error
+            return {
+                'system_metrics': {
+                    'trades_executed': int(self.metrics.get('trades_executed', 0)),
+                    'total_volume_sol': float(self.metrics.get('total_volume_sol', 0.0)),
+                    'uptime_seconds': float(self.metrics.get('uptime_seconds', 0.0))
+                },
+                'callback_stats': {},
+                'queue_stats': {},
+                'client_status': None,
+                'transaction_info': None,
+                'wallet_balance': 0.0,
+                'is_running': self.is_running,
+                'dry_run': self.config.dry_run if self.config else False,
+                'traders_count': len(self.config.traders) if self.config else 0
+            }
 
     async def _execute_trade(self, trade_data: PositionTraderTradeData) -> None:
         """
@@ -841,9 +901,11 @@ class CopyTrading:
 
             if success and signature:
                 # Incrementar métricas de ejecución
-                self.metrics['trades_executed'] += 1
+                self.metrics['trades_executed'] = int(self.metrics.get('trades_executed', 0)) + 1
                 if trade_data.side == "buy":
-                    self.metrics['total_volume_sol'] += float(trade_data.copy_amount_sol)
+                    current_volume = float(self.metrics.get('total_volume_sol', 0.0))
+                    amount = float(trade_data.copy_amount_sol) if trade_data.copy_amount_sol else 0.0
+                    self.metrics['total_volume_sol'] = current_volume + amount
                 self._logger.debug(f"Métricas actualizadas: trades_executed={self.metrics['trades_executed']}, total_volume={self.metrics['total_volume_sol']}")
 
                 # Procesar posición ejecutada
@@ -972,7 +1034,6 @@ class CopyTrading:
 
             self._logger.info("📊 Estadísticas finales:")
             self._logger.info(f"  • Tiempo activo: {uptime/3600:.1f}h")
-            self._logger.info(f"  • Trades procesados: {self.metrics['trades_processed']}")
             self._logger.info(f"  • Trades ejecutados: {self.metrics['trades_executed']}")
             vol = self.metrics['total_volume_sol']
             if vol < 1e-6 and vol > 0:
@@ -1031,13 +1092,34 @@ class CopyTrading:
         else:
             self._logger.warning("No se pueden resetear métricas: cliente API no inicializado")
 
+    async def get_sol_price_usd(self) -> Optional[str]:
+        """
+        Obtiene el precio de SOL en USD usando Moralis API.
+        
+        Returns:
+            Optional[str]: Precio de SOL en USD como string, o None si no se puede obtener.
+        """
+        if not self.moralis_client:
+            self._logger.warning("MoralisPriceClient no está disponible para obtener el precio SOL/USD")
+            return None
+        
+        try:
+            # Dirección del token SOL en Solana
+            SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
+            sol_price_usd = await self.moralis_client.get_token_price_usd(SOL_MINT_ADDRESS)
+            self._logger.debug(f"Precio SOL/USD obtenido: ${sol_price_usd}")
+            return sol_price_usd
+        except Exception as e:
+            self._logger.error(f"Error obteniendo precio SOL/USD desde Moralis: {e}")
+            return None
+
     async def _get_total_pnl(self) -> Dict[str, str]:
         """
         Calcula el P&L (profit and loss) total, en SOL, USD y porcentaje.
         Returns:
             dict: {'initial_balance': str, 'current_balance': str, 'sol_price': str, 'pnl_sol': str, 'pnl_usd': str, 'pnl_percent': str}
         """
-        sol_price = Decimal(await self.trading_data_fetcher.get_sol_price_usd() or "0.0")
+        sol_price = Decimal(await self.get_sol_price_usd() or "0.0")
         initial_balance = Decimal(self.config.general_available_balance_to_invest or "0.0")
         initial_balance_usd = initial_balance * sol_price
         current_balance = Decimal(await self.balance_manager.get_sol_balance(force_onchain=True) or "0.0")

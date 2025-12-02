@@ -9,7 +9,8 @@ from typing import Optional, Dict, Any, TYPE_CHECKING
 from logging_system import AppLogger
 
 from ...config import CopyTradingConfig
-from ...data_management import TradingDataFetcher, TokenTraderManager
+from ...data_management.moralis.price_client import MoralisPriceClient
+from ...data_management import TokenTraderManager
 from ...notifications import NotificationManager
 from ...balance_management import BalanceManager
 from ...events import PositionEventBus
@@ -34,7 +35,7 @@ class PositionQueueManager:
     def __init__(self, config: CopyTradingConfig,
                 solana_analyzer: 'SolanaTxAnalyzerProtocol',
                 solana_websocket: 'SolanaWebsocketProtocol',
-                trading_data_fetcher: TradingDataFetcher,
+                price_client: MoralisPriceClient,
                 token_trader_manager: TokenTraderManager,
                 balance_manager: BalanceManager,
                 position_event_bus: PositionEventBus,
@@ -48,7 +49,7 @@ class PositionQueueManager:
             config=config,
             solana_analyzer=solana_analyzer,
             solana_websocket=solana_websocket,
-            trading_data_fetcher=trading_data_fetcher,
+            price_client=price_client,
             token_trader_manager=token_trader_manager,
             balance_manager=balance_manager,
             position_event_bus=position_event_bus,

@@ -10,7 +10,8 @@ from logging_system import AppLogger
 
 from ...config import CopyTradingConfig
 from ...callbacks.notification_callback import PositionNotificationCallback
-from ...data_management import TradingDataFetcher, TokenTraderManager
+from ...data_management.moralis.price_client import MoralisPriceClient
+from ...data_management import TokenTraderManager
 from ...notifications import NotificationManager
 from ...balance_management import BalanceManager
 from ...events import PositionEventBus
@@ -46,7 +47,7 @@ class QueueInitializationManager:
                     config: CopyTradingConfig,
                     solana_analyzer: SolanaTxAnalyzerProtocol,
                     solana_websocket: SolanaWebsocketProtocol,
-                    trading_data_fetcher: TradingDataFetcher,
+                    price_client: MoralisPriceClient,
                     token_trader_manager: TokenTraderManager,
                     balance_manager: BalanceManager,
                     pnl_repository: PNLRepository,
@@ -56,7 +57,7 @@ class QueueInitializationManager:
         self._config = config
         self.solana_analyzer = solana_analyzer
         self.solana_websocket = solana_websocket
-        self.trading_data_fetcher = trading_data_fetcher
+        self.price_client = price_client
         self.token_trader_manager = token_trader_manager
         self.balance_manager = balance_manager
         self.pnl_repository = pnl_repository
@@ -159,7 +160,7 @@ class QueueInitializationManager:
                 self.notification_callback = PositionNotificationCallback(
                     run_id=self._config.system_run_id,
                     notification_manager=self.notification_manager,
-                    trading_data_fetcher=self.trading_data_fetcher,
+                    price_client=self.price_client,
                     token_trader_manager=self.token_trader_manager,
                     pnl_repository=self.pnl_repository
                 )

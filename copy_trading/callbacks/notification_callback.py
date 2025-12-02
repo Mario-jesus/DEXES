@@ -5,14 +5,15 @@ Integra con NotificationManager para procesar diferentes tipos de eventos.
 """
 import re
 import uuid
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, Tuple
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from cachetools import TTLCache
 
 from logging_system import AppLogger
 from ..notifications import NotificationManager
-from ..data_management import TradingDataFetcher, TokenTraderManager
+from ..data_management.moralis.price_client import MoralisPriceClient
+from ..data_management import TokenTraderManager
 from ..data_management.models import TokenInfo
 from ..position_management.models import (
     OpenPosition, 
@@ -40,7 +41,7 @@ class PositionNotificationCallback:
         self,
         run_id: uuid.UUID,
         notification_manager: Optional[NotificationManager] = None,
-        trading_data_fetcher: Optional[TradingDataFetcher] = None,
+        price_client: Optional[MoralisPriceClient] = None,
         token_trader_manager: Optional[TokenTraderManager] = None,
         pnl_repository: Optional[PNLRepository] = None
     ):
@@ -50,13 +51,13 @@ class PositionNotificationCallback:
         Args:
             run_id: ID del run al que pertenecen las posiciones
             notification_manager: Manager de notificaciones
-            trading_data_fetcher: Fetcher de datos de trading
+            price_client: Cliente de Moralis para obtener precios
             token_trader_manager: Manager de traders y tokens
             pnl_repository: Repositorio para almacenar PNL realizado
         """
         self.run_id = run_id
         self.notification_manager = notification_manager
-        self.trading_data_fetcher = trading_data_fetcher
+        self.price_client = price_client
         self.token_trader_manager = token_trader_manager
         self.pnl_repository = pnl_repository or PNLRepository()
         self._logger = AppLogger(self.__class__.__name__)
@@ -243,6 +244,51 @@ class PositionNotificationCallback:
         self._logger.debug(f"Resultado de _extract_token_info: {resultado['name']} ({resultado['symbol']})")
         return resultado
 
+    def _is_timeout_liquidation(self, position: OpenPosition) -> Tuple[bool, Optional[str]]:
+        """
+        Verifica si una posición de apertura fue cerrada por timeout o es una posición errónea por timeout.
+        Solo lee los metadatos de la posición de apertura.
+        
+        Args:
+            position: Posición de apertura a verificar
+            
+        Returns:
+            Tuple con (es_timeout, timeout_info)
+            - es_timeout: True si fue por timeout
+            - timeout_info: Información adicional del timeout (edad en segundos, intentos, etc.)
+        """
+        # Verificar si el message_error indica timeout fallido
+        if position.message_error and "Timeout closure failed" in position.message_error:
+            attempts_match = re.search(r'after (\d+) attempts', position.message_error)
+            attempts = attempts_match.group(1) if attempts_match else "?"
+            return True, f"Timeout closure failed after {attempts} attempts"
+
+        # Verificar si fue removida por timeout (fallo)
+        timeout_removed = position.get_metadata("timeout_removed_from_open_queue")
+        if timeout_removed:
+            attempts = int(position.get_metadata("timeout_closure_attempts", 0) or 0)
+            return True, f"Removed after {attempts} timeout closure attempts"
+
+        # Verificar metadata de timeout_closed en la posición de apertura
+        timeout_closed = position.get_metadata("timeout_closed")
+        if timeout_closed:
+            timeout_age = position.get_metadata("timeout_age_seconds")
+            if timeout_age:
+                try:
+                    age_seconds = int(timeout_age)
+                    hours = age_seconds // 3600
+                    minutes = (age_seconds % 3600) // 60
+                    if hours > 0:
+                        age_str = f"{hours}h {minutes}m"
+                    else:
+                        age_str = f"{minutes}m"
+                    return True, f"Closed by timeout after {age_str}"
+                except (ValueError, TypeError):
+                    return True, "Closed by timeout"
+            return True, "Closed by timeout"
+
+        return False, None
+
     async def _extract_trader_info(self, position: Union[OpenPosition, ClosePosition, SubClosePosition]) -> Dict[str, str]:
         """
         Extrae información del trader desde metadata o usa fallbacks.
@@ -264,18 +310,24 @@ class PositionNotificationCallback:
 
     async def _get_sol_price_usd(self) -> Optional[str]:
         """Obtiene el precio del SOL en USD"""
-        if not self.trading_data_fetcher:
-            self._logger.warning("TradingDataFetcher no está disponible para obtener el precio SOL/USD")
+        if not self.price_client:
+            self._logger.warning("MoralisPriceClient no está disponible para obtener el precio SOL/USD")
             return
 
         if "sol_price_usd" not in self.sol_price_usd_cache:
-            self._logger.info("Precio SOL/USD no encontrado en cache, solicitando a TradingDataFetcher")
-            sol_price_usd = await self.trading_data_fetcher.get_sol_price_usd()
-            if sol_price_usd:
-                self.sol_price_usd_cache["sol_price_usd"] = sol_price_usd
-                self._logger.debug(f"Precio SOL/USD obtenido y almacenado en cache: {sol_price_usd}")
-            else:
-                self._logger.error("No se pudo obtener el precio SOL/USD desde TradingDataFetcher")
+            self._logger.info("Precio SOL/USD no encontrado en cache, solicitando a MoralisPriceClient")
+            try:
+                # Dirección del token SOL en Solana
+                SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
+                sol_price_usd = await self.price_client.get_token_price_usd(SOL_MINT_ADDRESS)
+                if sol_price_usd:
+                    self.sol_price_usd_cache["sol_price_usd"] = sol_price_usd
+                    self._logger.debug(f"Precio SOL/USD obtenido y almacenado en cache: {sol_price_usd}")
+                else:
+                    self._logger.error("No se pudo obtener el precio SOL/USD desde MoralisPriceClient")
+                    return
+            except Exception as e:
+                self._logger.error(f"Error obteniendo precio SOL/USD desde MoralisPriceClient: {e}")
                 return
         else:
             self._logger.debug(f"Precio SOL/USD obtenido del cache: {self.sol_price_usd_cache['sol_price_usd']}")
@@ -617,13 +669,23 @@ class PositionNotificationCallback:
             pnl_acc_total_indicator = '🟢' if total_pnl_sol_acc_total > 0 else '🔴'
             pnl_with_costs_acc_total_indicator = '🟢' if total_pnl_sol_with_costs_acc_total > 0 else '🔴'
 
+            # Verificar si fue liquidación por timeout
+            is_timeout, timeout_info = self._is_timeout_liquidation(position)
+            timeout_header = "🔴 <b>Position Closed</b>"
+            if is_timeout:
+                timeout_header = "⏱️ <b>Position Closed (Timeout Liquidation)</b>"
+            timeout_section = ""
+            if is_timeout and timeout_info:
+                timeout_section = f"⏱️ <b>Timeout Info</b>\n{'─'*12}\n{timeout_info}\n\n"
+
             message = (
-                f"🔴 <b>Position Closed</b>\n\n"
+                f"{timeout_header}\n\n"
                 f"📊 <b>Trade Summary</b>\n"
                 f"{'─'*12}\n"
                 f"💎 <b>Token:</b> {token_info['name']} ({token_info['symbol']})\n"
                 f"🔗 <b>Address:</b> {token_info['address']}\n\n"
 
+                f"{timeout_section}"
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
                 f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"
@@ -694,13 +756,23 @@ class PositionNotificationCallback:
             sol_price_usd = await self._get_sol_price_usd()
             amount_sol_usd = float(amount_sol or "0.0") * float(sol_price_usd or "0.0")
 
+            # Verificar si fue fallo por timeout
+            is_timeout, timeout_info = self._is_timeout_liquidation(position)
+            failed_header = "❌ <b>Trade Opening Failed</b>"
+            if is_timeout:
+                failed_header = "⏱️ <b>Position Failed (Timeout Liquidation)</b>"
+            timeout_section = ""
+            if is_timeout and timeout_info:
+                timeout_section = f"⏱️ <b>Timeout Info</b>\n{'─'*12}\n{timeout_info}\n\n"
+
             message = (
-                f"❌ <b>Trade Opening Failed</b>\n\n"
+                f"{failed_header}\n\n"
                 f"📊 <b>Trade Summary</b>\n"
                 f"{'─'*12}\n"
                 f"💎 <b>Token:</b> {token_info['name']} ({token_info['symbol']})\n"
                 f"🔗 <b>Address:</b> {token_info['address']}\n\n"
 
+                f"{timeout_section}"
                 f"👤 <b>Trader Info</b>\n"
                 f"{'─'*12}\n"
                 f"🎭 <b>Nickname:</b> {trader_info['nickname']}\n"

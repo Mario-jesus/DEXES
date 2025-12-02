@@ -253,6 +253,7 @@ class CopyTradingConfig:
     position_timeout_enabled: bool = False  # Habilitar cierre automático por timeout
     max_position_age_seconds: Optional[int] = None  # Tiempo máximo en segundos antes de cerrar automáticamente
     position_timeout_check_interval: int = 300  # Intervalo de verificación en segundos (default: 5 minutos)
+    position_timeout_max_retry_attempts: int = 3  # Máximo número de reintentos antes de remover de cola de abiertas
 
     # Persistencia
     data_path: str = "copy_trading/data"
@@ -451,6 +452,7 @@ class CopyTradingConfig:
             'position_timeout_enabled': self.position_timeout_enabled,
             'max_position_age_seconds': self.max_position_age_seconds,
             'position_timeout_check_interval': self.position_timeout_check_interval,
+            'position_timeout_max_retry_attempts': self.position_timeout_max_retry_attempts,
             'data_path': self.data_path,
             'save_interval_seconds': self.save_interval_seconds,
             'websocket_reconnect_delay': self.websocket_reconnect_delay,
@@ -570,6 +572,7 @@ class CopyTradingConfig:
             position_timeout_enabled=data.get('position_timeout_enabled', False),
             max_position_age_seconds=data.get('max_position_age_seconds'),
             position_timeout_check_interval=data.get('position_timeout_check_interval', 300),
+            position_timeout_max_retry_attempts=data.get('position_timeout_max_retry_attempts', 3),
             data_path=data.get('data_path', 'copy_trading/data'),
             save_interval_seconds=data.get('save_interval_seconds', 300),
 

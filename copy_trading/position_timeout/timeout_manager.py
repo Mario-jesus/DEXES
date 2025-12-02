@@ -4,7 +4,6 @@ Manager de timeout de posiciones para Copy Trading.
 Cierra automáticamente posiciones que han permanecido abiertas más tiempo del configurado.
 """
 import asyncio
-import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from decimal import Decimal, getcontext
@@ -13,6 +12,7 @@ from logging_system import AppLogger
 from ..config import CopyTradingConfig
 from ..position_management.models import (
     OpenPosition,
+    PositionStatus,
     PositionTraderTradeData,
     TraderTradeData
 )
@@ -150,6 +150,10 @@ class PositionTimeoutManager:
             self._logger.warning("OpenPositionQueue no disponible para verificación de timeout")
             return
 
+        if not self.transaction_executor:
+            self._logger.warning("TransactionExecutor no disponible para verificación de timeout")
+            return
+
         try:
             async with self._lock:
                 self.stats['total_checks'] += 1
@@ -178,13 +182,26 @@ class PositionTimeoutManager:
                     if position.is_fully_closed():
                         continue
 
+                    # Verificar si la posición ya excedió el límite de reintentos
+                    attempts = int(position.get_metadata("timeout_closure_attempts", 0) or 0)
+                    max_attempts = self.config.position_timeout_max_retry_attempts
+
+                    if attempts >= max_attempts:
+                        self._logger.warning(
+                            f"Posición {position.id} excedió límite de reintentos ({attempts}/{max_attempts}). "
+                            f"Removiendo de cola de posiciones abiertas..."
+                        )
+                        await self._remove_position_from_open_queue(position)
+                        continue
+
                     age = now - position.created_at
                     if age >= max_age:
                         timeout_positions.append(position)
                         self._logger.info(
                             f"Posición {position.id} excede timeout - "
                             f"Edad: {age.total_seconds():.0f}s, "
-                            f"Límite: {self.config.max_position_age_seconds}s"
+                            f"Límite: {self.config.max_position_age_seconds}s, "
+                            f"Intentos previos: {attempts}/{max_attempts}"
                         )
 
                 if not timeout_positions:
@@ -215,7 +232,7 @@ class PositionTimeoutManager:
                             self.stats['positions_skipped'] += 1
 
                         # Pequeña pausa entre cierres para no saturar
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1)
 
                     except Exception as e:
                         self._logger.error(
@@ -233,6 +250,64 @@ class PositionTimeoutManager:
         except Exception as e:
             self._logger.error(f"Error en verificación de timeout: {e}", exc_info=True)
 
+    async def _remove_position_from_open_queue(self, position: OpenPosition) -> bool:
+        """
+        Remueve una posición de la cola de posiciones abiertas cuando 
+        excede el límite de reintentos de timeout.
+        
+        Args:
+            position: Posición a remover de la cola de abiertas
+            
+        Returns:
+            True si se removió exitosamente, False en caso contrario
+        """
+        try:
+            # Verificar que la cola de abiertas esté disponible
+            if not self.position_queue_manager.open_queue:
+                self._logger.warning(
+                    f"Cola de posiciones abiertas no disponible para remover posición {position.id}"
+                )
+                return False
+
+            attempts = int(position.get_metadata("timeout_closure_attempts", 0) or 0)
+            max_attempts = self.config.position_timeout_max_retry_attempts
+
+            # Marcar como fallido y analizado
+            position.status = PositionStatus.FAILED
+            last_error = position.get_metadata("timeout_closure_last_error")
+            position.message_error = f"Timeout closure failed after {attempts} attempts." + (f" Last error: {last_error}." if last_error else "")
+            position.is_analyzed = True
+
+            # Remover usando el método existente
+            # register_data=False porque no queremos registrar datos de un cierre fallido
+            was_removed = await self.position_queue_manager.open_queue.remove_position(
+                position,
+                register_data=False
+            )
+
+            if was_removed:
+                self._logger.info(
+                    f"Posición {position.id} removida de cola de posiciones abiertas "
+                    f"después de exceder límite de reintentos de timeout ({attempts}/{max_attempts})"
+                )
+                # Marcar en metadata que fue removida
+                position.add_metadata("timeout_removed_from_open_queue", True)
+                position.add_metadata("timeout_removed_from_open_queue_at", datetime.now().isoformat())
+                position.add_metadata("timeout_removed_reason", "max_retry_attempts_exceeded")
+                return True
+            else:
+                self._logger.warning(
+                    f"Posición {position.id} no encontrada en cola de posiciones abiertas"
+                )
+                return False
+
+        except Exception as e:
+            self._logger.error(
+                f"Error removiendo posición {position.id} de cola de abiertas: {e}",
+                exc_info=True
+            )
+            return False
+
     async def _close_timeout_position(self, position: OpenPosition) -> bool:
         """
         Cierra una posición que ha excedido el timeout.
@@ -244,11 +319,17 @@ class PositionTimeoutManager:
             True si el cierre fue exitoso, False en caso contrario
         """
         try:
+            # Obtener o inicializar contador de intentos
+            attempts = int(position.get_metadata("timeout_closure_attempts", 0) or 0)
+            max_attempts = self.config.position_timeout_max_retry_attempts
+            current_attempt = attempts + 1
+
             self._logger.info(
                 f"Cerrando posición por timeout: {position.id} - "
                 f"Token: {position.token_address[:8]}..., "
                 f"Trader: {position.trader_wallet[:8]}..., "
-                f"Tokens: {position.amount_tokens_executed}"
+                f"Tokens: {position.amount_tokens_executed}, "
+                f"Intento: {current_attempt}/{max_attempts}"
             )
 
             # Verificar que la posición tenga trader_trade_data
@@ -298,54 +379,79 @@ class PositionTimeoutManager:
                 is_liquidation=True
             )
 
-            # Marcar como timeout en metadata
+            # Calcular timeout_age una vez para reutilizar
+            timeout_age = int((datetime.now() - position.created_at).total_seconds())
+
+            # Marcar como timeout en metadata del PositionTraderTradeData y de la OpenPosition
             position_trader_trade_data.add_metadata("timeout_closed", True)
-            position_trader_trade_data.add_metadata("timeout_age_seconds", 
-                str(int((datetime.now() - position.created_at).total_seconds())))
+            position_trader_trade_data.add_metadata("timeout_age_seconds", str(timeout_age))
+            position.add_metadata("timeout_closed", True)
+            position.add_metadata("timeout_age_seconds", str(timeout_age))
 
             # Emitir evento de solicitud de cierre
             if self.position_event_bus:
-                timeout_age = int((datetime.now() - position.created_at).total_seconds())
                 self.position_event_bus.emit_position_close_requested(
                     PositionCloseRequestedEvent(
-                        position_id=str(uuid.uuid4()),  # Nuevo ID para el cierre
+                        position_id=position.id,
                         token_address=position.token_address,
                         trader_wallet=position.trader_wallet,
                         reason=f"timeout ({timeout_age}s)"
                     )
                 )
 
+            # Verificar que transaction_executor esté disponible
+            if not self.transaction_executor:
+                self._logger.error(
+                    f"TransactionExecutor no disponible para cerrar posición {position.id} por timeout"
+                )
+                return False
+
             # Ejecutar el trade de cierre
             self._logger.debug(
-                f"Ejecutando trade de cierre por timeout para posición {position.id}"
+                f"Ejecutando trade de cierre por timeout para posición {position.id} "
+                f"(intento {current_attempt}/{max_attempts})"
             )
             success, signature, error_message = await self.transaction_executor.execute_trade(
                 position_trader_trade_data
             )
 
+            # Siempre incrementar el contador de intentos (independientemente de éxito o fallo)
+            new_attempts = attempts + 1
+            position.add_metadata("timeout_closure_attempts", new_attempts)
+            position.add_metadata("timeout_closure_last_attempt_at", datetime.now().isoformat())
+
             if success and signature:
                 self._logger.info(
                     f"Trade de cierre por timeout ejecutado exitosamente: {signature} "
-                    f"para posición {position.id}"
+                    f"para posición {position.id} (intento {new_attempts}/{max_attempts})"
                 )
 
                 # Procesar la posición ejecutada usando el sistema existente
-                await self.position_queue_manager.process_executed_position(
+                return await self.position_queue_manager.process_executed_position(
                     position_trade_data=position_trader_trade_data,
                     signature=signature
                 )
 
-                return True
             else:
-                error_msg = error_message or 'Error desconocido'
+                position.add_metadata("timeout_closure_last_error", error_message)
                 self._logger.error(
-                    f"Error ejecutando trade de cierre por timeout para posición {position.id}: {error_msg}"
+                    f"Error ejecutando trade de cierre por timeout para posición {position.id}: {error_message or 'Error desconocido'} "
+                    f"(intento {new_attempts}/{max_attempts})"
                 )
                 return False
 
         except Exception as e:
+            # Incrementar contador de intentos también en caso de excepción
+            attempts = int(position.get_metadata("timeout_closure_attempts", 0) or 0)
+            max_attempts = self.config.position_timeout_max_retry_attempts
+            new_attempts = attempts + 1
+            position.add_metadata("timeout_closure_attempts", new_attempts)
+            position.add_metadata("timeout_closure_last_attempt_at", datetime.now().isoformat())
+            position.add_metadata("timeout_closure_last_error", str(e))
+
             self._logger.error(
-                f"Error cerrando posición por timeout {position.id}: {e}",
+                f"Error cerrando posición por timeout {position.id}: {e} "
+                f"(intento {new_attempts}/{max_attempts})",
                 exc_info=True
             )
             return False
@@ -361,6 +467,7 @@ class PositionTimeoutManager:
             'enabled': self.config.position_timeout_enabled,
             'max_position_age_seconds': self.config.max_position_age_seconds,
             'check_interval_seconds': self.config.position_timeout_check_interval,
+            'max_retry_attempts': self.config.position_timeout_max_retry_attempts,
             'is_running': self._is_running,
             'stats': self.stats.copy()
         }

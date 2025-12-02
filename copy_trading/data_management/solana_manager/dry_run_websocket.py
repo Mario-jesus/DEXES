@@ -6,7 +6,7 @@ No abre conexiones reales. Confirma automáticamente después de un pequeño del
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Callable, Awaitable, Literal
+from typing import Optional, Callable, Awaitable, Literal, TYPE_CHECKING
 from datetime import datetime
 
 from logging_system import AppLogger
@@ -17,6 +17,9 @@ from ..models.websocket_models import (
     SignatureNotificationValue,
     RpcContext,
 )
+
+if TYPE_CHECKING:
+    from ...protocols import SolanaWebsocketProtocol
 
 
 class DryRunSolanaWebsocketManager:
@@ -42,7 +45,7 @@ class DryRunSolanaWebsocketManager:
 
         self._logger.info("[DRY RUN] DryRunSolanaWebsocketManager inicializado - sin conexión real")
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "SolanaWebsocketProtocol":
         self.is_running = True
         self._logger.debug("[DRY RUN] Websocket mock iniciado")
         return self

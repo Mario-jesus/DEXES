@@ -3,15 +3,19 @@
 Sistema de websocket optimizado para seguimiento de firmas Solana
 Diseñado para trabajar con la cola de análisis de posiciones
 """
+from __future__ import annotations
 import asyncio
 import websockets
 import json
 import socket
-from typing import Dict, Set, Optional, Callable, Any, List, Awaitable, Literal
+from typing import Dict, Set, Optional, Callable, Any, List, Awaitable, Literal, TYPE_CHECKING
 from datetime import datetime
 
 from logging_system import AppLogger
 from ..models import WebsocketSubscription, SignatureNotification
+
+if TYPE_CHECKING:
+    from ...protocols import SolanaWebsocketProtocol
 
 
 class SolanaWebsocketManager:
@@ -80,7 +84,7 @@ class SolanaWebsocketManager:
 
         self._logger.debug(f"SolanaWebsocketManager inicializado - URL: {ws_url}")
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "SolanaWebsocketProtocol":
         """Context manager para inicio automático"""
         await self.start()
         return self

@@ -12,7 +12,7 @@ from ..config import CopyTradingConfig
 from ..events import PositionEventBus, MintMetadataUpdatedEvent
 from .models import TokenInfo, TraderStats, TraderTokenStats
 from .services import TraderStatsSyncService
-from .fetch_data import TradingDataFetcher
+from .moralis.price_client import MoralisPriceClient
 from .trading_data_store import TradingDataStore
 
 
@@ -23,7 +23,7 @@ class TokenTraderManager:
     """
 
     def __init__(self, config: CopyTradingConfig,
-        trading_data_fetcher: Optional[TradingDataFetcher] = None, 
+        price_client: Optional[MoralisPriceClient] = None, 
         trading_data_store: Optional[TradingDataStore] = None,
         position_event_bus: Optional[PositionEventBus] = None
     ):
@@ -32,7 +32,7 @@ class TokenTraderManager:
         
         Args:
             config: Configuración del sistema
-            trading_data_fetcher: Cliente para obtener datos de trading (opcional)
+            price_client: Cliente de Moralis para obtener datos de trading (opcional)
             trading_data_store: Gestor de datos de trading
             position_event_bus: Bus de eventos de posiciones
         """
@@ -43,7 +43,7 @@ class TokenTraderManager:
             self._logger = AppLogger(self.__class__.__name__)
 
             # Componentes optimizados de data_management
-            self.trading_data_fetcher = trading_data_fetcher or TradingDataFetcher()
+            self.price_client = price_client or MoralisPriceClient()
             self._trading_data_store = trading_data_store or TradingDataStore()
 
             # Solo un lock para coordinación (no para estado)
@@ -1017,8 +1017,12 @@ class TokenTraderManager:
             # Obtener información existente del cache primero
             existing_info = self._trading_data_store.get_token_data(token_address)
 
-            # Intentar obtener datos frescos de la fuente externa
-            token_data = await self.trading_data_fetcher.get_token_trading_info(token_address)
+            # Intentar obtener datos frescos de la fuente externa usando Moralis
+            token_data = None
+            try:
+                token_data = await self.price_client.get_token_price(token_address)
+            except Exception as e:
+                self._logger.debug(f"No se pudo obtener precio desde Moralis para {token_address}: {e}")
 
             if token_data:
                 # Preservar traders existentes
@@ -1168,8 +1172,8 @@ class TokenTraderManager:
     async def close(self) -> None:
         """Cierra el manager y libera recursos."""
         try:
-            if self.trading_data_fetcher:
-                await self.trading_data_fetcher.close()
+            if self.price_client:
+                await self.price_client.stop()
             self._logger.debug("TokenTraderManager cerrado")
         except Exception as e:
             self._logger.error(f"Error cerrando TokenTraderManager: {e}")
