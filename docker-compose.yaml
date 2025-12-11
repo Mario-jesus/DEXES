@@ -59,7 +59,7 @@ services:
       - trading_network
     restart: no
 
-  pdc-agent:
+  pdc-agent-copy-trading:
     image: grafana/pdc-agent:0.0.49
     container_name: pdc-agent
     command:
