@@ -59,6 +59,25 @@ services:
       - trading_network
     restart: no
 
+  pdc-agent:
+    image: grafana/pdc-agent:0.0.49
+    container_name: pdc-agent
+    command:
+      - -token
+      - ${GCLOUD_PDC_SIGNING_TOKEN}
+      - -cluster
+      - "${GCLOUD_PDC_CLUSTER}"
+      - -gcloud-hosted-grafana-id
+      - "${GCLOUD_HOSTED_GRAFANA_ID}"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - trading_network
+    restart: unless-stopped
+
   pumpfun_bridge:
     image: copy-trading-bot:1.0.0
     build:
