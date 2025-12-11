@@ -209,7 +209,8 @@ class CopyTradingConfig:
     min_open_trade_interval_seconds_per_trader: Optional[int] = None    # Minimo de segundos que debe esperar un trader para hacer un trade de apertura de posicion
     min_global_available_balance_threshold_percent: Optional[str] = None    # Porcentaje (0-100) del presupuesto global por debajo del cual se bloquean BUY
     graceful_shutdown_enabled: bool = False                        # Si se habilita el shutdown graceful, se espera a que todas las posiciones se cierren antes de cerrar el sistema
-    min_sol_amount_threshold: Optional[str] = "0.5"                # Solo copiar trades si el monto es mayor a este valor en SOL
+    pump_amm_min_sol_amount_threshold: Optional[str] = None        # Solo copiar trades si el monto es mayor a este valor en SOL para pool pump-amm
+    other_pools_min_sol_amount_threshold: Optional[str] = None     # Mínimo de SOL para pools distintos de pump-amm
     is_trade_activity_filter_enabled: bool = True                  # Si se habilita el filtro de actividad de trades, solo copiar trades si se han observado N trades previos en el token
     trade_activity_window_seconds: int = 60                        # Ventana de tiempo para contar trades
     min_trade_count_threshold: int = 3                             # Número mínimo de trades antes de copiar
@@ -425,7 +426,8 @@ class CopyTradingConfig:
             'min_open_trade_interval_seconds_per_trader': self.min_open_trade_interval_seconds_per_trader,
             'min_global_available_balance_threshold_percent': self.min_global_available_balance_threshold_percent,
             'graceful_shutdown_enabled': self.graceful_shutdown_enabled,
-            'min_sol_amount_threshold': self.min_sol_amount_threshold,
+            'pump_amm_min_sol_amount_threshold': self.pump_amm_min_sol_amount_threshold,
+            'other_pools_min_sol_amount_threshold': self.other_pools_min_sol_amount_threshold,
             'is_trade_activity_filter_enabled': self.is_trade_activity_filter_enabled,
             'trade_activity_window_seconds': self.trade_activity_window_seconds,
             'min_trade_count_threshold': self.min_trade_count_threshold,
@@ -530,7 +532,8 @@ class CopyTradingConfig:
             min_open_trade_interval_seconds_per_trader=data.get('min_open_trade_interval_seconds_per_trader'),
             min_global_available_balance_threshold_percent=data.get('min_global_available_balance_threshold_percent'),
             graceful_shutdown_enabled=data.get('graceful_shutdown_enabled', False),
-            min_sol_amount_threshold=data.get('min_sol_amount_threshold', "0.5"),
+            pump_amm_min_sol_amount_threshold=data.get('pump_amm_min_sol_amount_threshold'),
+            other_pools_min_sol_amount_threshold=data.get('other_pools_min_sol_amount_threshold'),
             is_trade_activity_filter_enabled=data.get('is_trade_activity_filter_enabled', True),
             trade_activity_window_seconds=data.get('trade_activity_window_seconds', 60),
             min_trade_count_threshold=data.get('min_trade_count_threshold', 3),

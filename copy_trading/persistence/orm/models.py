@@ -261,3 +261,15 @@ class PNLRealizedPosition(Base):
     pnl_with_cost_pct_sol: Mapped[Optional[Decimal]] = mapped_column(DEC_SOL, nullable=True)
 
     open_position: Mapped["OpenPosition"] = relationship(back_populates="pnl_realized", uselist=False)
+
+
+class TradingMetrics(Base):
+    __tablename__ = "trading_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    metric_name: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    metric_value: Mapped[Decimal] = mapped_column(DEC_SOL, nullable=False)
+    system_name: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(15), nullable=False)
+    trader: Mapped[str] = mapped_column(String(50), nullable=False, index=True)

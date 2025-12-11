@@ -636,17 +636,22 @@ class PositionNotificationCallback:
 
             total_volume_sol_open_token = _safe_decimal(pnl_data.get('total_volume_sol_open_token', '0'))
             total_volume_sol_closed_token = _safe_decimal(pnl_data.get('total_volume_sol_closed_token', '0'))
-            token_base_amount = total_volume_sol_open_token if total_volume_sol_open_token != Decimal('0') else total_volume_sol_closed_token
+            # Para P&L realizado preferimos el volumen cerrado; si no existe, usamos el abierto
+            token_base_amount = total_volume_sol_closed_token if total_volume_sol_closed_token != Decimal('0') else total_volume_sol_open_token
 
             total_volume_sol_open_total = _safe_decimal(pnl_data.get('total_volume_sol_open_total', '0'))
             total_volume_sol_closed_total = _safe_decimal(pnl_data.get('total_volume_sol_closed_total', '0'))
-            total_base_amount = total_volume_sol_open_total if total_volume_sol_open_total != Decimal('0') else total_volume_sol_closed_total
+            total_base_amount = total_volume_sol_closed_total if total_volume_sol_closed_total != Decimal('0') else total_volume_sol_open_total
 
             pnl_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_token, token_base_amount)
+            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_acc_token: {total_pnl_sol_acc_token}, token_base_amount: {token_base_amount}")
             pnl_with_costs_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_token, token_base_amount)
+            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_with_costs_acc_token: {total_pnl_sol_with_costs_acc_token}, token_base_amount: {token_base_amount}")
 
             pnl_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_total, total_base_amount)
+            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_acc_total: {total_pnl_sol_acc_total}, total_base_amount: {total_base_amount}")
             pnl_with_costs_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_total, total_base_amount)
+            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_with_costs_acc_total: {total_pnl_sol_with_costs_acc_total}, total_base_amount: {total_base_amount}")
 
             # Obtener wallet del trader
             trader_wallet = position.trader_wallet
@@ -659,7 +664,9 @@ class PositionNotificationCallback:
             # Calcular porcentajes de P&L
             original_amount_decimal = Decimal(original_amount or "0.0")
             pnl_percentage = self._calculate_pnl_percentage(total_pnl_sol, original_amount_decimal)
+            self._logger.debug(f"[NOTIFICATION] total_pnl_sol: {total_pnl_sol}, original_amount_decimal: {original_amount_decimal}")
             pnl_with_costs_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs, original_amount_decimal)
+            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_with_costs: {total_pnl_sol_with_costs}, original_amount_decimal: {original_amount_decimal}")
 
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
@@ -1039,6 +1046,7 @@ class PositionNotificationCallback:
         """
         try:
             pnl_percent = self._calculate_pnl_percentage_decimal(pnl_sol, initial_amount_sol)
+            self._logger.debug(f"[NOTIFICATION] pnl_percent: {pnl_percent} | pnl_sol: {pnl_sol} | initial_amount_sol: {initial_amount_sol}")
 
             if pnl_percent is None:
                 return '0.00'

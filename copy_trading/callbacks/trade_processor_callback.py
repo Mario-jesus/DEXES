@@ -145,10 +145,11 @@ class TradeProcessorCallback:
                 return
 
             # Validar que al menos una de las dos condiciones se cumpla (monto mínimo SOL o actividad de trading)
-            min_sol_valid = self._validate_minimum_sol_amount(trade_data)
+            pool_threshold = self._get_min_sol_threshold(trade_data.pool)
+            min_sol_valid = self._validate_minimum_sol_amount(trade_data, pool_threshold)
             activity_valid = self._validate_trade_activity_threshold(trade_data)
 
-            is_min_sol_enabled = self.config.min_sol_amount_threshold is not None
+            is_min_sol_enabled = pool_threshold is not None
             is_activity_enabled = self.config.is_trade_activity_filter_enabled
 
             if is_min_sol_enabled and is_activity_enabled:
@@ -190,18 +191,31 @@ class TradeProcessorCallback:
             self._logger.error(f"Error en procesamiento inicial: {e}", exc_info=True)
             self.stats['trades_rejected'] += 1
 
-    def _validate_minimum_sol_amount(self, trade_data: TraderTradeData) -> bool:
+    def _get_min_sol_threshold(self, pool: Optional[str]) -> Optional[str]:
         """
-        Valida que el trade cumpla con el monto mínimo de SOL configurado
+        Obtiene el umbral mínimo de SOL según el pool del trade.
+        Para pump-amm usa el umbral dedicado; para cualquier otro pool usa el umbral general.
+        """
+        pool_normalized = (pool or "").strip().lower()
+        if pool_normalized == "pump-amm":
+            return self.config.pump_amm_min_sol_amount_threshold
+        return self.config.other_pools_min_sol_amount_threshold
+
+    def _validate_minimum_sol_amount(self, trade_data: TraderTradeData, threshold: Optional[str] = None) -> bool:
+        """
+        Valida que el trade cumpla con el monto mínimo de SOL configurado según el pool
         
         Args:
             trade_data: Datos del trade a validar
+            threshold: Umbral de SOL a utilizar; si no se pasa se determina por pool
             
         Returns:
             True si el monto es mayor o igual al umbral mínimo, False en caso contrario
         """
-        if self.config.min_sol_amount_threshold is None:
-            self._logger.debug("Monto mínimo de SOL deshabilitado")
+        pool_threshold = threshold if threshold is not None else self._get_min_sol_threshold(trade_data.pool)
+
+        if pool_threshold is None:
+            self._logger.debug("Monto mínimo de SOL deshabilitado para el pool actual")
             return True
 
         if trade_data.side == 'sell':
@@ -210,13 +224,16 @@ class TradeProcessorCallback:
 
         try:
             amount_decimal = Decimal(trade_data.amount_sol)
-            if amount_decimal < Decimal(self.config.min_sol_amount_threshold):
-                self._logger.info(f"Trade rechazado - monto {trade_data.amount_sol} SOL < {self.config.min_sol_amount_threshold} SOL (mínimo)")
+            threshold_decimal = Decimal(pool_threshold)
+            pool_name = trade_data.pool or 'desconocido'
+
+            if amount_decimal < threshold_decimal:
+                self._logger.info(f"Trade rechazado - monto {trade_data.amount_sol} SOL < {threshold_decimal} SOL (mínimo) para pool {pool_name}")
                 return False
-            self._logger.debug(f"Trade validado - monto {trade_data.amount_sol} SOL >= {self.config.min_sol_amount_threshold} SOL (mínimo)")
+            self._logger.debug(f"Trade validado - monto {trade_data.amount_sol} SOL >= {threshold_decimal} SOL (mínimo) para pool {pool_name}")
             return True
         except (ValueError, TypeError, Exception):
-            self._logger.warning(f"Error al validar monto mínimo de SOL: {trade_data.amount_sol}")
+            self._logger.warning(f"Error al validar monto mínimo de SOL ({pool_threshold}) para pool {trade_data.pool}: {trade_data.amount_sol}")
             return False
 
     def _validate_trade_activity_threshold(self, trade_data: TraderTradeData) -> bool:

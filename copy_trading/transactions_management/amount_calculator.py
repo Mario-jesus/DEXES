@@ -6,7 +6,7 @@ Este módulo contiene la lógica para calcular los montos a copiar basados
 en diferentes modos de configuración (EXACT, PERCENTAGE, FIXED, DISTRIBUTED).
 """
 import asyncio
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from typing import Dict, cast, Any, Optional, Literal, Tuple, Union, TYPE_CHECKING, Protocol
 from dataclasses import dataclass
 from cachetools import TTLCache
@@ -172,6 +172,60 @@ class CopyAmountCalculator:
                 self._logger.warning(f"Marcado intento de cierre como fallido: {open_position_id} por evento {event.position_id}")
                 break
 
+    def _safe_decimal_conversion(
+        self, 
+        value: Optional[Union[str, int, float, Decimal]], 
+        field_name: str,
+        default: Optional[Decimal] = None,
+        trade_id: Optional[str] = None
+    ) -> Optional[Decimal]:
+        """
+        Convierte un valor a Decimal de forma segura, manejando casos inválidos.
+        
+        Args:
+            value: Valor a convertir (puede ser str, int, float, Decimal, o None)
+            field_name: Nombre del campo para logging
+            default: Valor por defecto si la conversión falla
+            trade_id: ID del trade para logging (opcional)
+            
+        Returns:
+            Decimal convertido o valor por defecto si la conversión falla
+        """
+        if value is None:
+            if trade_id:
+                self._logger.warning(
+                    f"Trade {trade_id}: Campo '{field_name}' es None, usando valor por defecto: {default}"
+                )
+            return default
+
+        # Si ya es Decimal, retornarlo directamente
+        if isinstance(value, Decimal):
+            return value
+
+        # Convertir a string si es necesario
+        if isinstance(value, (int, float)):
+            value = str(value)
+
+        # Validar que no esté vacío
+        if not isinstance(value, str) or not value.strip():
+            if trade_id:
+                self._logger.warning(
+                    f"Trade {trade_id}: Campo '{field_name}' está vacío o no es string, "
+                    f"usando valor por defecto: {default}"
+                )
+            return default
+
+        # Intentar convertir a Decimal
+        try:
+            return Decimal(value.strip())
+        except (InvalidOperation, ValueError, TypeError) as e:
+            if trade_id:
+                self._logger.error(
+                    f"Trade {trade_id}: Error al convertir '{field_name}' a Decimal: "
+                    f"valor='{value}', error={type(e).__name__}, usando valor por defecto: {default}"
+                )
+            return default
+
     async def calculate_copy_amount(self, trade_data: TraderTradeData) -> Tuple[str, CalculationContext]:
         """
         Calcula el monto a copiar basado en la configuración usando Decimal
@@ -240,10 +294,33 @@ class CopyAmountCalculator:
         self._logger.debug(f"Trade {trade_data.id}: Trader encontrado - {trade_data.trader_wallet[:8]}..., acción: {trade_data.side}, monto original: {trade_data.amount_sol}, token: {trade_data.token_address[:8]}...")
 
         trader_config = self._global_config.get_trader_config(trader_info)
-        original_amount_dec = Decimal(trade_data.amount_sol)
-        original_sol_amount_dec = Decimal(trade_data.amount_sol)
-        original_token_amount_dec = Decimal(trade_data.token_amount)
-        original_token_balance_dec = Decimal(trade_data.new_token_balance)
+        trade_id = trade_data.id
+
+        # Convertir valores a Decimal de forma segura
+        original_amount_dec = self._safe_decimal_conversion(
+            trade_data.amount_sol, 
+            "amount_sol", 
+            default=Decimal("0.0"),
+            trade_id=trade_id
+        )
+        original_sol_amount_dec = self._safe_decimal_conversion(
+            trade_data.amount_sol, 
+            "amount_sol", 
+            default=Decimal("0.0"),
+            trade_id=trade_id
+        )
+        original_token_amount_dec = self._safe_decimal_conversion(
+            trade_data.token_amount, 
+            "token_amount", 
+            default=Decimal("0.0"),
+            trade_id=trade_id
+        )
+        original_token_balance_dec = self._safe_decimal_conversion(
+            trade_data.new_token_balance, 
+            "new_token_balance", 
+            default=Decimal("0.0"),
+            trade_id=trade_id
+        )
 
         # Obtener balances propios y del trader si la estrategia es de porcentaje de balance
         if ((trader_config and trader_config.amount_mode and trader_config.amount_mode == AmountMode.PERCENTAGE_OF_BALANCE) or
@@ -254,20 +331,35 @@ class CopyAmountCalculator:
             own_balance = None
             trader_balance = None
 
+        # Convertir balances de forma segura
+        trader_balance_dec = self._safe_decimal_conversion(
+            trader_balance, 
+            "trader_balance", 
+            default=None,
+            trade_id=trade_id
+        ) if trader_balance else None
+
+        own_balance_dec = self._safe_decimal_conversion(
+            own_balance, 
+            "own_balance", 
+            default=None,
+            trade_id=trade_id
+        ) if own_balance else None
+
         return CalculationContext(
             position_id=trade_data.id,
             trader_wallet=trade_data.trader_wallet,
-            original_amount=original_amount_dec,
-            original_sol_amount=original_sol_amount_dec,
-            original_token_amount=original_token_amount_dec,
-            original_token_balance=original_token_balance_dec,
+            original_amount=original_amount_dec if original_amount_dec else Decimal("0.0"),
+            original_sol_amount=original_sol_amount_dec if original_sol_amount_dec else Decimal("0.0"),
+            original_token_amount=original_token_amount_dec if original_token_amount_dec else Decimal("0.0"),
+            original_token_balance=original_token_balance_dec if original_token_balance_dec else Decimal("0.0"),
             token_address=trade_data.token_address,
             action=trade_data.side,
             denominate_in_sol=trade_data.side == "buy",
             trader_config=trader_config,
             global_config=self._global_config,
-            trader_balance=Decimal(trader_balance) if trader_balance else None,
-            own_balance=Decimal(own_balance) if own_balance else None
+            trader_balance=trader_balance_dec,
+            own_balance=own_balance_dec
         )
 
     def _determine_calculation_mode(self, context: CalculationContext) -> AmountMode:

@@ -137,7 +137,7 @@ class ClosedPositionQueue:
                 try:
                     pos.status = ClosePositionStatus.FAILED
                     pos.message_error = "Finalizado por shutdown"
-                    await self._update_token_trader_data(pos, is_failed=True)
+                    #await self._update_token_trader_data(pos, is_failed=True)
                     await self._notify_position(pos)
                 except Exception as e:
                     self._logger.error(f"Error finalizando por shutdown posición {getattr(pos, 'id', '?')}: {e}")
@@ -266,11 +266,12 @@ class ClosedPositionQueue:
                 else:
                     self._logger.warning(f"Position {position.id} not removed from closed positions queue")
 
-                await self._update_token_trader_data(position, is_failed=True)
+                #await self._update_token_trader_data(position, is_failed=True)
 
                 await self._notify_position(position)
             else:
-                await self._update_token_trader_data(position, is_failed=False)
+                #await self._update_token_trader_data(position, is_failed=False)
+                pass
 
             position.is_analyzed = True
             self._logger.info(f"Position {position.id} analysis finished with status {position.status}")
