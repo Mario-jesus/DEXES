@@ -59,9 +59,9 @@ services:
       - trading_network
     restart: no
 
-  pdc-agent-copy-trading:
+  pdc-agent:
     image: grafana/pdc-agent:0.0.49
-    container_name: pdc-agent
+    container_name: pdc-agent-copy-trading
     command:
       - -token
       - ${GCLOUD_PDC_SIGNING_TOKEN}
