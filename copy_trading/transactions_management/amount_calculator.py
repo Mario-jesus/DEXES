@@ -169,7 +169,7 @@ class CopyAmountCalculator:
             if event.position_id == attempt.close_position_id:
                 attempt.status = "failed"
                 position_closure_attempts[open_position_id] = attempt
-                self._logger.warning(f"Marcado intento de cierre como fallido: {open_position_id} por evento {event.position_id}")
+                self._logger.info(f"Marcado intento de cierre como fallido: {open_position_id} por evento {event.position_id}")
                 break
 
     def _safe_decimal_conversion(
@@ -193,7 +193,7 @@ class CopyAmountCalculator:
         """
         if value is None:
             if trade_id:
-                self._logger.warning(
+                self._logger.info(
                     f"Trade {trade_id}: Campo '{field_name}' es None, usando valor por defecto: {default}"
                 )
             return default
@@ -209,7 +209,7 @@ class CopyAmountCalculator:
         # Validar que no esté vacío
         if not isinstance(value, str) or not value.strip():
             if trade_id:
-                self._logger.warning(
+                self._logger.info(
                     f"Trade {trade_id}: Campo '{field_name}' está vacío o no es string, "
                     f"usando valor por defecto: {default}"
                 )

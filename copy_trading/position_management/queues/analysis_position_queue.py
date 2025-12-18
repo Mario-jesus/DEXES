@@ -688,9 +688,10 @@ class AnalysisPositionQueue:
             position = await self._analysis_queue.get()
 
             try:
-                # Implementar backoff exponencial con 3 reintentos
-                max_retries = 3
-                base_delay = 5  # 5 segundos base
+                # Implementar backoff exponencial con 5 reintentos
+                # Los datos en blockchain tardan mínimo 15s en reflejarse
+                max_retries = 5
+                base_delay = 15  # 15 segundos base (tiempo mínimo para reflejo en blockchain)
 
                 for attempt in range(max_retries):
                     try:
@@ -740,7 +741,11 @@ class AnalysisPositionQueue:
 
                         # Calcular delay exponencial para el siguiente intento
                         delay = base_delay * (2 ** attempt)
-                        self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos")
+                        if delay >= 60:
+                            delay_minutes = delay / 60
+                            self._logger.debug(f"Reintentando posición {position.id} en {delay_minutes:.1f} minutos ({delay} segundos)")
+                        else:
+                            self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos")
                         await asyncio.sleep(delay)
 
                     except Exception as e:
@@ -758,7 +763,11 @@ class AnalysisPositionQueue:
 
                         # Calcular delay exponencial para el siguiente intento
                         delay = base_delay * (2 ** attempt)
-                        self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos después de excepción")
+                        if delay >= 60:
+                            delay_minutes = delay / 60
+                            self._logger.debug(f"Reintentando posición {position.id} en {delay_minutes:.1f} minutos ({delay} segundos) después de excepción")
+                        else:
+                            self._logger.debug(f"Reintentando posición {position.id} en {delay} segundos después de excepción")
                         await asyncio.sleep(delay)
             finally:
                 # Siempre marcar la tarea como completada, sin importar el resultado
