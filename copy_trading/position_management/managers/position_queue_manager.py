@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from ..queues import PendingPositionQueue, AnalysisPositionQueue, OpenPositionQueue, ClosedPositionQueue, PositionNotificationQueue
     from copy_trading.protocols import SolanaTxAnalyzerProtocol, SolanaWebsocketProtocol
     from copy_trading.persistence.repositories import PNLRepository
+    from copy_trading.callbacks import PositionNotificationCallback
 
 
 class PositionQueueManager:
@@ -65,6 +66,9 @@ class PositionQueueManager:
         self.open_queue: Optional['OpenPositionQueue'] = None
         self.closed_queue: Optional['ClosedPositionQueue'] = None
         self.notification_queue: Optional['PositionNotificationQueue'] = None
+
+        # Referencia al callback de notificaciones
+        self.notification_callback: Optional[PositionNotificationCallback] = None
 
         # Referencias a managers y procesadores
         self.closure_processor: Optional[PositionClosureProcessor] = None
@@ -114,6 +118,9 @@ class PositionQueueManager:
                 self.open_queue = components['open_queue']
                 self.closed_queue = components['closed_queue']
                 self.notification_queue = components['notification_queue']
+
+                # Asignar referencia al callback de notificaciones
+                self.notification_callback = components['notification_callback']
 
                 # Asignar referencias a managers y procesadores
                 self.closure_processor = components['closure_processor']
@@ -328,9 +335,10 @@ class PositionQueueManager:
 
             pending_stats = { 'count': await self.pending_queue.get_pending_count() if self.pending_queue else 0 }
             analysis_stats = await self.analysis_queue.get_analysis_statistics() if self.analysis_queue else {}
-            notification_stats = await self.notification_queue.get_stats() if self.notification_queue else {}
+            notification_queue_stats = await self.notification_queue.get_stats() if self.notification_queue else {}
             open_closed_stats = await self.open_queue.get_stats() if self.open_queue else {}
             closed_stats = await self.closed_queue.get_stats() if self.closed_queue else {}
+            notification_callback_stats = self.notification_callback.get_stats() if self.notification_callback else {}
 
             total_positions = (
                 pending_stats['count'] +
@@ -344,9 +352,10 @@ class PositionQueueManager:
                 'pending': pending_stats,
                 'analysis': analysis_stats,
                 'open_closed': open_closed_stats,
-                'notifications': notification_stats,
+                'notification_queue': notification_queue_stats,
                 'closed_queue': closed_stats,
-                'total_positions': total_positions
+                'total_positions': total_positions,
+                'notification_callback': notification_callback_stats
             }
         except Exception as e:
             self._logger.error(f"Error obteniendo estadísticas: {e}")

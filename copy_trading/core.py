@@ -47,6 +47,7 @@ from .position_timeout import PositionTimeoutManager
 from .data_management import MoralisPriceClient
 from .persistence.repositories import TraderMintRepository, CopyTradingBotRepository, RunRepository, PNLRepository
 from .persistence.subscribers import attach_position_events_subscriber, attach_mint_events_subscriber
+from .risk_management import DrawdownManager
 
 
 class CopyTrading:
@@ -124,11 +125,23 @@ class CopyTrading:
         )
         self._logger.debug("PositionQueueManager inicializado")
 
+        # Inicializar DrawdownManager antes de ValidationEngine
+        # system_stop_callback se pasa como referencia al método stop() para detener el sistema
+        self.drawdown_manager = DrawdownManager(
+            config=config,
+            balance_manager=self.balance_manager,
+            position_event_bus=self.position_event_bus,
+            system_stop_callback=self.stop,
+            notification_manager=self.notification_manager
+        )
+        self._logger.debug("DrawdownManager inicializado")
+
         self.validation_engine = ValidationEngine(
             config=config,
             graceful_shutdown_event=self.graceful_shutdown_event,
             token_trader_manager=self.token_trader_manager,
-            balance_manager=self.balance_manager
+            balance_manager=self.balance_manager,
+            drawdown_manager=self.drawdown_manager
         )
         self._logger.debug("ValidationEngine inicializado")
 
@@ -311,6 +324,17 @@ class CopyTrading:
             self._logger.debug("Inicializando BalanceManager...")
             await self.balance_manager.start(system_wallet_address=self.wallet_data.wallet_public_key)
             self._logger.debug("BalanceManager inicializado")
+
+            # Establecer balance inicial en caso de que no se haya configurado
+            if self.config.general_available_balance_to_invest is None:
+                self.config.general_available_balance_to_invest = await self.balance_manager.get_sol_balance()
+                self._logger.debug(f"Balance inicial establecido: {self.config.general_available_balance_to_invest}")
+
+            # Inicializar DrawdownManager
+            if self.drawdown_manager:
+                initial_balance = self.config.general_available_balance_to_invest or "0.0"
+                await self.drawdown_manager.start(initial_balance)
+                self._logger.debug("DrawdownManager iniciado")
 
             # Inicializar MoralisPriceClient
             await self.moralis_client.start()
@@ -524,6 +548,14 @@ class CopyTrading:
                     self._logger.debug("PositionTimeoutManager detenido")
                 except Exception as e:
                     self._logger.error(f"Error deteniendo PositionTimeoutManager: {e}")
+
+            # Detener DrawdownManager
+            if self.drawdown_manager:
+                try:
+                    await self.drawdown_manager.stop()
+                    self._logger.debug("DrawdownManager detenido")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo DrawdownManager: {e}")
 
             self.is_running = False
 
@@ -1102,7 +1134,7 @@ class CopyTrading:
         if not self.moralis_client:
             self._logger.warning("MoralisPriceClient no está disponible para obtener el precio SOL/USD")
             return None
-        
+
         try:
             # Dirección del token SOL en Solana
             SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"

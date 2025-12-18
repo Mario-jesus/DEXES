@@ -5,19 +5,15 @@ Lee capital inicial y PnL desde las tablas correspondientes.
 """
 import uuid
 from typing import List, Optional, Dict, Any
-from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from logging_system import AppLogger
 from ..persistence.session import get_session
 from ..persistence.orm.models import (
     Run,
-    PNLRealizedPosition,
-    OpenPosition,
-    Position,
+    PNLRealizedTrader,
 )
 
 
@@ -49,68 +45,45 @@ class TradingDataReader:
 
             return run.initial_capital_sol
 
-    async def get_pnl_realized_positions(
+    async def get_pnl_realized_traders(
         self,
         runs_id: uuid.UUID,
-        *,
-        last_timestamp: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Obtiene PnL realizado de posiciones con sus timestamps.
+        Obtiene PnL acumulado por trader desde PNLRealizedTrader.
 
-        Adapta la consulta SQL:
-        SELECT p.created_at::timestamptz AS time, 
-                prp.pnl_without_cost_sol, 
-                prp.pnl_with_cost_sol
-            FROM pnl_realized_position AS prp
-        INNER JOIN open_positions AS op ON prp.open_positions_id = op.positions_id
-        INNER JOIN positions AS p ON op.positions_id = p.id
-        WHERE p.runs_id = runs_id
-        [AND p.created_at > last_timestamp]
+        Los datos en PNLRealizedTrader ya están acumulados por trader,
+        por lo que este método retorna un snapshot de los valores actuales.
 
         Args:
             runs_id: ID del run
-            last_timestamp: Timestamp opcional para lectura incremental
 
         Returns:
-            Lista de diccionarios con: timestamp, trader_wallet, pnl_without_cost_sol, pnl_with_cost_sol
+            Lista de diccionarios con: trader_wallet, pnl_with_cost_sol
         """
         async with (await self._get_session()) as session:
-            # Construir query con joins (incluyendo traders_id)
             query = (
                 select(
-                    Position.created_at.label("timestamp"),
-                    Position.traders_id.label("trader_wallet"),
-                    PNLRealizedPosition.pnl_without_cost_sol,
-                    PNLRealizedPosition.pnl_with_cost_sol,
+                    PNLRealizedTrader.traders_id.label("trader_wallet"),
+                    PNLRealizedTrader.pnl_with_cost_sol,
                 )
-                .select_from(PNLRealizedPosition)
-                .join(OpenPosition, PNLRealizedPosition.open_positions_id == OpenPosition.positions_id)
-                .join(Position, OpenPosition.positions_id == Position.id)
-                .where(Position.runs_id == runs_id)
+                .where(PNLRealizedTrader.runs_id == runs_id)
             )
-
-            # Filtrar por timestamp si se proporciona
-            if last_timestamp:
-                query = query.where(Position.created_at > last_timestamp)
-
-            # Ordenar por timestamp ascendente
-            query = query.order_by(Position.created_at.asc())
 
             result = await session.execute(query)
             rows = result.all()
 
             pnl_data = []
             for row in rows:
-                pnl_data.append({
-                    "timestamp": row.timestamp,
-                    "trader_wallet": row.trader_wallet,
-                    "pnl_without_cost_sol": row.pnl_without_cost_sol,
-                    "pnl_with_cost_sol": row.pnl_with_cost_sol,
-                })
+                # Solo incluir traders con PnL válido
+                if row.pnl_with_cost_sol is not None:
+                    pnl_data.append({
+                        "trader_wallet": row.trader_wallet,
+                        "pnl_with_cost_sol": row.pnl_with_cost_sol,
+                    })
 
             self._logger.debug(
-                f"Obtenidos {len(pnl_data)} registros de PnL para run {runs_id}"
+                f"Obtenidos {len(pnl_data)} traders con PnL acumulado para run {runs_id}"
             )
 
             return pnl_data

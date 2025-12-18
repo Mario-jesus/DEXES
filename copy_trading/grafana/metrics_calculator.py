@@ -52,19 +52,23 @@ class TradingMetricsCalculator:
         self.max_capital_total = None
         self._logger.debug("Estado del calculador reseteado")
 
-    def process_pnl_data(
+    def process_pnl_snapshot(
         self,
         pnl_data: List[Dict[str, Any]],
+        *,
+        current_timestamp: datetime,
+        current_capital_onchain: Optional[Decimal] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Procesa datos de PnL y genera métricas acumuladas.
+        Procesa un snapshot de PnL acumulado por trader y genera métricas.
 
-        Cada registro de PnL debe incluir su trader_wallet. Si es None (liquidaciones),
-        se usa "UNKNOWN_TRADER" para agrupar.
+        Compara los valores actuales con los valores en memoria y genera métricas
+        solo cuando hay cambios. Los datos ya vienen acumulados desde PNLRealizedTrader.
 
         Args:
-            pnl_data: Lista de diccionarios con timestamp, trader_wallet, 
-            pnl_without_cost_sol, pnl_with_cost_sol
+            pnl_data: Lista de diccionarios con trader_wallet, pnl_with_cost_sol
+            current_timestamp: Timestamp a usar para las métricas generadas
+            current_capital_onchain: Capital actual obtenido on-chain (balance SOL de la wallet)
 
         Returns:
             Lista de métricas generadas
@@ -73,87 +77,95 @@ class TradingMetricsCalculator:
             return []
 
         metrics = []
+        has_changes = False
 
+        # Procesar cada trader del snapshot
         for pnl_record in pnl_data:
-            timestamp = pnl_record["timestamp"]
             trader_wallet = pnl_record.get("trader_wallet")
+            if not trader_wallet:
+                continue
 
-            # Usar "UNKNOWN_TRADER" para liquidaciones sin trader
-            trader_key = trader_wallet if trader_wallet else "UNKNOWN_TRADER"
+            trader_key = trader_wallet
 
-            # Inicializar acumulador si no existe
-            if trader_key not in self.cumulative_pnl_by_trader:
-                self.cumulative_pnl_by_trader[trader_key] = Decimal("0.0")
+            # Obtener PnL acumulado del snapshot
+            pnl_with_cost = pnl_record.get("pnl_with_cost_sol")
+            if pnl_with_cost is None:
+                continue
 
-            pnl_with_cost = pnl_record.get("pnl_with_cost_sol") or Decimal("0.0")
-            pnl_without_cost = pnl_record.get("pnl_without_cost_sol") or Decimal("0.0")
+            current_pnl = Decimal(str(pnl_with_cost))
 
-            # Usar PnL con costos por defecto
-            pnl_value = pnl_with_cost if pnl_with_cost else pnl_without_cost
+            # Obtener PnL anterior en memoria (si existe)
+            previous_pnl = self.cumulative_pnl_by_trader.get(trader_key, Decimal("0.0"))
 
-            # Acumular PnL por trader específico
-            self.cumulative_pnl_by_trader[trader_key] += pnl_value
+            # Solo generar métricas si el valor cambió
+            if current_pnl != previous_pnl:
+                has_changes = True
+                # Actualizar valor en memoria
+                self.cumulative_pnl_by_trader[trader_key] = current_pnl
 
-            # Actualizar último timestamp
-            if self.last_pnl_timestamp is None or timestamp > self.last_pnl_timestamp:
-                self.last_pnl_timestamp = timestamp
+                # Actualizar máximo PnL histórico del trader
+                if trader_key not in self.max_capital_by_trader:
+                    self.max_capital_by_trader[trader_key] = current_pnl
+                else:
+                    if current_pnl > self.max_capital_by_trader[trader_key]:
+                        self.max_capital_by_trader[trader_key] = current_pnl
 
-            # Calcular drawdown individual basado en el máximo PnL del trader
-            # El drawdown individual representa la caída desde el máximo PnL alcanzado
-            trader_pnl = self.cumulative_pnl_by_trader[trader_key]
+                # Calcular drawdown individual
+                # El drawdown se calcula desde el máximo entre 0 y el máximo histórico del trader
+                # - Si el trader ha tenido ganancias: drawdown desde el máximo histórico
+                # - Si el trader nunca ha tenido ganancias: drawdown desde 0 (pérdidas desde inicio)
+                max_trader_pnl = self.max_capital_by_trader[trader_key]
+                reference_point = max(Decimal("0.0"), max_trader_pnl)
+                drawdown_individual = reference_point - current_pnl
 
-            # Actualizar máximo PnL histórico del trader
-            if trader_key not in self.max_capital_by_trader:
-                # Inicializar con el PnL actual (puede ser negativo)
-                self.max_capital_by_trader[trader_key] = trader_pnl
-            else:
-                # Actualizar máximo si el PnL actual es mayor
-                if trader_pnl > self.max_capital_by_trader[trader_key]:
-                    self.max_capital_by_trader[trader_key] = trader_pnl
-
-            # Calcular drawdown individual (diferencia entre máximo PnL y PnL actual)
-            max_trader_pnl = self.max_capital_by_trader[trader_key]
-            drawdown_individual = max_trader_pnl - trader_pnl
-
-            # Solo generar métrica si hay drawdown (PnL actual < máximo PnL)
-            if drawdown_individual > 0:
+                # Generar métrica de PnL acumulado individual
                 metrics.append({
-                    "timestamp": timestamp,
-                    "metric_name": "Drawdown_Individual",
-                    "metric_value": float(drawdown_individual),
+                    "timestamp": current_timestamp,
+                    "metric_name": "PNL_Individual_Cumulative",
+                    "metric_value": float(current_pnl),
                     "trader": trader_key,
                 })
 
-            # Generar métrica de PnL acumulado individual
-            metrics.append({
-                "timestamp": timestamp,
-                "metric_name": "PNL_Individual_Cumulative",
-                "metric_value": float(self.cumulative_pnl_by_trader[trader_key]),
-                "trader": trader_key,
-            })
+                # Generar métrica de drawdown si hay drawdown (diferencia positiva)
+                if drawdown_individual > 0:
+                    metrics.append({
+                        "timestamp": current_timestamp,
+                        "metric_name": "Drawdown_Individual",
+                        "metric_value": float(drawdown_individual),
+                        "trader": trader_key,
+                    })
 
-        # Calcular PnL total acumulado (suma de todos los traders, excluyendo "ALL_TRADERS" si existe)
-        # Filtrar traders reales (no "ALL_TRADERS" que es solo una métrica calculada)
-        traders_only = {
-            k: v for k, v in self.cumulative_pnl_by_trader.items() 
-            if k != "ALL_TRADERS"
-        }
-        total_pnl = sum(traders_only.values())
+        # Si hubo cambios, calcular y generar métricas agregadas
+        if has_changes:
+            # Actualizar último timestamp
+            if self.last_pnl_timestamp is None or current_timestamp > self.last_pnl_timestamp:
+                self.last_pnl_timestamp = current_timestamp
 
-        # Agregar métrica de PnL total acumulado (usando el último timestamp)
-        if pnl_data:
-            last_timestamp = pnl_data[-1]["timestamp"]
+            # Calcular PnL total acumulado (suma de todos los traders, excluyendo "ALL_TRADERS")
+            traders_only = {
+                k: v for k, v in self.cumulative_pnl_by_trader.items() 
+                if k != "ALL_TRADERS"
+            }
+            total_pnl = sum(traders_only.values()) if traders_only else Decimal("0.0")
+
+            # Agregar métrica de PnL total acumulado
             metrics.append({
-                "timestamp": last_timestamp,
+                "timestamp": current_timestamp,
                 "metric_name": "PNL_Total_Cumulative",
                 "metric_value": float(total_pnl),
                 "trader": "ALL_TRADERS",
             })
 
             # Calcular y actualizar capital actual
-            if self.initial_capital is not None:
+            # Usar capital on-chain si está disponible, de lo contrario calcular desde PnL
+            if current_capital_onchain is not None:
+                self.current_capital = current_capital_onchain
+            elif self.initial_capital is not None:
                 self.current_capital = self.initial_capital + total_pnl
+            else:
+                self.current_capital = None
 
+            if self.current_capital is not None:
                 # Actualizar máximo histórico total
                 if self.max_capital_total is None:
                     self.max_capital_total = self.current_capital
@@ -166,7 +178,7 @@ class TradingMetricsCalculator:
 
                 # Agregar métrica de Capital_Current
                 metrics.append({
-                    "timestamp": last_timestamp,
+                    "timestamp": current_timestamp,
                     "metric_name": "Capital_Current",
                     "metric_value": float(self.current_capital),
                     "trader": "ALL_TRADERS",
@@ -174,14 +186,14 @@ class TradingMetricsCalculator:
 
                 # Agregar métrica de Drawdown_Total
                 metrics.append({
-                    "timestamp": last_timestamp,
+                    "timestamp": current_timestamp,
                     "metric_name": "Drawdown_Total",
                     "metric_value": float(drawdown_total),
                     "trader": "ALL_TRADERS",
                 })
 
         self._logger.debug(
-            f"Procesados {len(pnl_data)} registros de PnL, "
+            f"Procesado snapshot de {len(pnl_data)} traders, "
             f"generadas {len(metrics)} métricas"
         )
 
@@ -191,12 +203,14 @@ class TradingMetricsCalculator:
         self,
         *,
         current_timestamp: Optional[datetime] = None,
+        current_capital_onchain: Optional[Decimal] = None,
     ) -> List[Dict[str, Any]]:
         """
         Genera métricas actuales con los valores acumulados más recientes.
 
         Args:
             current_timestamp: Timestamp a usar (por defecto datetime.now())
+            current_capital_onchain: Capital actual obtenido on-chain (balance SOL de la wallet)
 
         Returns:
             Lista de métricas actuales
@@ -230,10 +244,16 @@ class TradingMetricsCalculator:
             "trader": "ALL_TRADERS",
         })
 
-        # Calcular y agregar métrica de Capital_Current si tenemos capital inicial
-        if self.initial_capital is not None:
+        # Calcular y agregar métrica de Capital_Current
+        # Usar capital on-chain si está disponible, de lo contrario calcular desde PnL
+        if current_capital_onchain is not None:
+            self.current_capital = current_capital_onchain
+        elif self.initial_capital is not None:
             self.current_capital = self.initial_capital + total_pnl
+        else:
+            self.current_capital = None
 
+        if self.current_capital is not None:
             # Actualizar máximo histórico total si es necesario
             if self.max_capital_total is None:
                 self.max_capital_total = self.current_capital
@@ -268,11 +288,15 @@ class TradingMetricsCalculator:
                     if pnl > self.max_capital_by_trader[trader]:
                         self.max_capital_by_trader[trader] = pnl
 
-                # Calcular drawdown individual (diferencia entre máximo PnL y PnL actual)
+                # Calcular drawdown individual
+                # El drawdown se calcula desde el máximo entre 0 y el máximo histórico del trader
+                # - Si el trader ha tenido ganancias: drawdown desde el máximo histórico
+                # - Si el trader nunca ha tenido ganancias: drawdown desde 0 (pérdidas desde inicio)
                 max_trader_pnl = self.max_capital_by_trader[trader]
-                drawdown_individual = max_trader_pnl - pnl
+                reference_point = max(Decimal("0.0"), max_trader_pnl)
+                drawdown_individual = reference_point - pnl
 
-                # Solo generar métrica si hay drawdown
+                # Solo generar métrica si hay drawdown (diferencia positiva)
                 if drawdown_individual > 0:
                     metrics.append({
                         "timestamp": timestamp,
@@ -292,17 +316,6 @@ class TradingMetricsCalculator:
         Obtiene el capital actual del sistema.
         
         Returns:
-            Capital actual (initial_capital + total_pnl) o None si no hay capital inicial
+            Capital actual (ya calculado desde on-chain o PnL) o None si no hay capital
         """
-        if self.initial_capital is None:
-            return None
-
-        # Calcular capital actual si no está actualizado
-        traders_only = {
-            k: v for k, v in self.cumulative_pnl_by_trader.items() 
-            if k != "ALL_TRADERS"
-        }
-        total_pnl = sum(traders_only.values()) if traders_only else Decimal("0.0")
-        self.current_capital = self.initial_capital + total_pnl
-
         return self.current_capital

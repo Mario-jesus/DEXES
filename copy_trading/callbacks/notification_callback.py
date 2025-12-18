@@ -11,6 +11,7 @@ from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from cachetools import TTLCache
 
 from logging_system import AppLogger
+from ..config import CopyTradingConfig
 from ..notifications import NotificationManager
 from ..data_management.moralis.price_client import MoralisPriceClient
 from ..data_management import TokenTraderManager
@@ -40,6 +41,7 @@ class PositionNotificationCallback:
     def __init__(
         self,
         run_id: uuid.UUID,
+        config: CopyTradingConfig,
         notification_manager: Optional[NotificationManager] = None,
         price_client: Optional[MoralisPriceClient] = None,
         token_trader_manager: Optional[TokenTraderManager] = None,
@@ -50,12 +52,14 @@ class PositionNotificationCallback:
         
         Args:
             run_id: ID del run al que pertenecen las posiciones
+            config: Configuración del sistema
             notification_manager: Manager de notificaciones
             price_client: Cliente de Moralis para obtener precios
             token_trader_manager: Manager de traders y tokens
             pnl_repository: Repositorio para almacenar PNL realizado
         """
         self.run_id = run_id
+        self.config = config
         self.notification_manager = notification_manager
         self.price_client = price_client
         self.token_trader_manager = token_trader_manager
@@ -76,6 +80,11 @@ class PositionNotificationCallback:
             'success_notifications': 0,
             'failed_notifications': 0,
             'error_notifications': 0,
+            'open_notifications': 0,
+            'close_notifications': 0,
+            'open_failed_notifications': 0,
+            'partial_close_success_notifications': 0,
+            'partial_close_failed_notifications': 0,
             'last_notification_time': None
         }
 
@@ -573,6 +582,7 @@ class PositionNotificationCallback:
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "success")
+                self.stats['open_notifications'] += 1
                 self._logger.debug(f"Notificación de posición abierta enviada: {position.id}")
 
         except Exception as e:
@@ -605,6 +615,9 @@ class PositionNotificationCallback:
             # Obtener precio del SOL en USD
             sol_price_usd = await self._get_sol_price_usd()
 
+            # Obtener el capital inicial del sistema
+            initial_capital = Decimal(self.config.general_available_balance_to_invest or "0.0")
+
             # Calcular métricas usando el servicio de cálculo de posición
             total_closed_sol, total_closed_tokens, _ = self.position_calculation_service.calculate_total_closed_amounts(position)
 
@@ -636,22 +649,15 @@ class PositionNotificationCallback:
 
             total_volume_sol_open_token = _safe_decimal(pnl_data.get('total_volume_sol_open_token', '0'))
             total_volume_sol_closed_token = _safe_decimal(pnl_data.get('total_volume_sol_closed_token', '0'))
-            # Para P&L realizado preferimos el volumen cerrado; si no existe, usamos el abierto
-            token_base_amount = total_volume_sol_closed_token if total_volume_sol_closed_token != Decimal('0') else total_volume_sol_open_token
 
             total_volume_sol_open_total = _safe_decimal(pnl_data.get('total_volume_sol_open_total', '0'))
             total_volume_sol_closed_total = _safe_decimal(pnl_data.get('total_volume_sol_closed_total', '0'))
-            total_base_amount = total_volume_sol_closed_total if total_volume_sol_closed_total != Decimal('0') else total_volume_sol_open_total
 
-            pnl_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_token, token_base_amount)
-            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_acc_token: {total_pnl_sol_acc_token}, token_base_amount: {token_base_amount}")
-            pnl_with_costs_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_token, token_base_amount)
-            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_with_costs_acc_token: {total_pnl_sol_with_costs_acc_token}, token_base_amount: {token_base_amount}")
+            pnl_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_token, initial_capital)
+            pnl_with_costs_acc_token_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_token, initial_capital)
 
-            pnl_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_total, total_base_amount)
-            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_acc_total: {total_pnl_sol_acc_total}, total_base_amount: {total_base_amount}")
-            pnl_with_costs_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_total, total_base_amount)
-            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_with_costs_acc_total: {total_pnl_sol_with_costs_acc_total}, total_base_amount: {total_base_amount}")
+            pnl_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_acc_total, initial_capital)
+            pnl_with_costs_acc_total_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs_acc_total, initial_capital)
 
             # Obtener wallet del trader
             trader_wallet = position.trader_wallet
@@ -664,9 +670,7 @@ class PositionNotificationCallback:
             # Calcular porcentajes de P&L
             original_amount_decimal = Decimal(original_amount or "0.0")
             pnl_percentage = self._calculate_pnl_percentage(total_pnl_sol, original_amount_decimal)
-            self._logger.debug(f"[NOTIFICATION] total_pnl_sol: {total_pnl_sol}, original_amount_decimal: {original_amount_decimal}")
             pnl_with_costs_percentage = self._calculate_pnl_percentage(total_pnl_sol_with_costs, original_amount_decimal)
-            self._logger.debug(f"[NOTIFICATION] total_pnl_sol_with_costs: {total_pnl_sol_with_costs}, original_amount_decimal: {original_amount_decimal}")
 
             # Preparar indicadores de P&L
             pnl_indicator = '🟢' if total_pnl_sol > 0 else '🔴'
@@ -741,6 +745,7 @@ class PositionNotificationCallback:
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "success")
+                self.stats['close_notifications'] += 1
                 self._logger.debug(f"Notificación de posición cerrada enviada: {position.id}")
 
             # Almacenar PNL en la base de datos
@@ -762,6 +767,32 @@ class PositionNotificationCallback:
 
             sol_price_usd = await self._get_sol_price_usd()
             amount_sol_usd = float(amount_sol or "0.0") * float(sol_price_usd or "0.0")
+
+            pnl_data = None
+            pnl_section = ""
+
+            # Calcular P&L como pérdida total si no hay historial de cierres (removida de cola por no poder cerrarse)
+            if not position.close_history:
+                self._logger.debug(f"Posición {position.id} sin historial de cierres, calculando P&L como pérdida total")
+                pnl_data = await self._calculate_pnl_and_register_trader_stats(position)
+
+                # Formatear sección de P&L
+                total_pnl_sol = Decimal(pnl_data.get('pnl_sol', '0.0'))
+                total_pnl_usd = Decimal(pnl_data.get('pnl_usd', '0.0'))
+                total_pnl_sol_with_costs = Decimal(pnl_data.get('pnl_sol_with_costs', '0.0'))
+                total_pnl_usd_with_costs = Decimal(pnl_data.get('pnl_usd_with_costs', '0.0'))
+
+                pnl_indicator = "📉" if total_pnl_sol < 0 else "📈"
+                pnl_with_costs_indicator = "📉" if total_pnl_sol_with_costs < 0 else "📈"
+
+                pnl_section = (
+                    f"📉 <b>P&L (Total Loss)</b>\n"
+                    f"{'─'*12}\n"
+                    f"{pnl_indicator} <b>Without Costs:</b> {self._format_amount(str(total_pnl_sol))} SOL ({self._format_amount(str(total_pnl_usd))} USD)\n"
+                    f"{pnl_with_costs_indicator} <b>With Costs:</b> {self._format_amount(str(total_pnl_sol_with_costs))} SOL ({self._format_amount(str(total_pnl_usd_with_costs))} USD)\n\n"
+                )
+            else:
+                self._logger.warning(f"Posición {position.id} tiene historial de cierres, no calculando P&L")
 
             # Verificar si fue fallo por timeout
             is_timeout, timeout_info = self._is_timeout_liquidation(position)
@@ -793,11 +824,13 @@ class PositionNotificationCallback:
                 f"🪙 <b>Tokens:</b> {self._format_amount(amount_tokens)}\n"
                 f"⚠️ <b>Error:</b> {error_message}\n\n"
 
+                f"{pnl_section}"
                 f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "error")
+                self.stats['open_failed_notifications'] += 1
                 self._logger.debug(f"Notificación de posición fallida enviada: {position.id}")
 
         except Exception as e:
@@ -886,6 +919,7 @@ class PositionNotificationCallback:
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "info")
+                self.stats['partial_close_success_notifications'] += 1
                 self._logger.debug(f"Notificación de cierre parcial exitoso enviada: {position_id}")
 
         except Exception as e:
@@ -960,6 +994,7 @@ class PositionNotificationCallback:
 
             if self.notification_manager:
                 await self.notification_manager.notify(message, "error")
+                self.stats['partial_close_failed_notifications'] += 1
                 self._logger.debug(f"Notificación de cierre parcial fallido enviada: {position_id}")
 
         except Exception as e:
@@ -1049,13 +1084,12 @@ class PositionNotificationCallback:
             self._logger.debug(f"[NOTIFICATION] pnl_percent: {pnl_percent} | pnl_sol: {pnl_sol} | initial_amount_sol: {initial_amount_sol}")
 
             if pnl_percent is None:
-                return '0.00'
+                return '0.0'
 
-            pnl_percent_str = format(pnl_percent.quantize(Decimal('0.01'), rounding=ROUND_DOWN).normalize(), "f")
-            return pnl_percent_str.rstrip('0').rstrip('.') if pnl_percent_str else '0.00'
+            return format(pnl_percent.quantize(Decimal('0.01'), rounding=ROUND_DOWN).normalize(), "f")
         except Exception as e:
             self._logger.error(f"Error calculando porcentaje de P&L: {e}")
-            return '0.00'
+            return '0.0'
 
     async def _get_percentage_info(self, position: Union[OpenPosition, ClosePosition, SubClosePosition]) -> str:
         try:
@@ -1120,6 +1154,11 @@ class PositionNotificationCallback:
             'success_notifications': 0,
             'failed_notifications': 0,
             'error_notifications': 0,
+            'open_notifications': 0,
+            'close_notifications': 0,
+            'open_failed_notifications': 0,
+            'partial_close_success_notifications': 0,
+            'partial_close_failed_notifications': 0,
             'last_notification_time': None
         }
         self._logger.debug("Estadísticas del callback reseteadas")

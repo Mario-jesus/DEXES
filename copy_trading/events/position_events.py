@@ -37,6 +37,9 @@ PositionEventName = Literal[
     "position.trader_trade_data",
     "position.failed",
     "mint.metadata.updated",
+    "drawdown.threshold_exceeded",
+    "drawdown.recovered",
+    "drawdown.peak_updated",
 ]
 
 
@@ -191,6 +194,40 @@ class MintMetadataUpdatedEvent:
     timestamp: datetime = field(default_factory=datetime.now)
 
 
+@dataclass(slots=True)
+class DrawdownThresholdExceededEvent:
+    """Evento cuando se excede el umbral de drawdown."""
+    drawdown_percent: str
+    drawdown_sol: str
+    peak_capital_sol: str
+    current_capital_sol: str
+    threshold_type: Literal["percent", "sol", "both"]
+    action: Literal["block_buys", "stop_trading", "notify_only"]
+    timestamp: datetime = field(default_factory=datetime.now)
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass(slots=True)
+class DrawdownRecoveredEvent:
+    """Evento cuando el drawdown se recupera por debajo del umbral."""
+    drawdown_percent: str
+    drawdown_sol: str
+    peak_capital_sol: str
+    current_capital_sol: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass(slots=True)
+class DrawdownPeakUpdatedEvent:
+    """Evento cuando se actualiza un nuevo peak de capital."""
+    old_peak_sol: str
+    new_peak_sol: str
+    current_capital_sol: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
 # Handlers tipados
 TEvent = TypeVar("TEvent", bound=BasePositionEvent, contravariant=True)
 
@@ -225,6 +262,9 @@ class PositionEventBus:
     EVT_TRADER_TRADE_DATA: Final[PositionEventName] = "position.trader_trade_data"
     EVT_FAILED: Final[PositionEventName] = "position.failed"
     EVT_MINT_METADATA_UPDATED: Final[PositionEventName] = "mint.metadata.updated"
+    EVT_DRAWDOWN_THRESHOLD_EXCEEDED: Final[PositionEventName] = "drawdown.threshold_exceeded"
+    EVT_DRAWDOWN_RECOVERED: Final[PositionEventName] = "drawdown.recovered"
+    EVT_DRAWDOWN_PEAK_UPDATED: Final[PositionEventName] = "drawdown.peak_updated"
 
     def __init__(self, emitter: Optional[AsyncIOEventEmitter] = None, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self._loop = loop or asyncio.get_event_loop()
@@ -283,6 +323,16 @@ class PositionEventBus:
     def on_mint_metadata_updated(self, handler: Callable[[MintMetadataUpdatedEvent], Any]) -> None:
         self._emitter.on(self.EVT_MINT_METADATA_UPDATED, handler)
 
+    # Drawdown events
+    def on_drawdown_threshold_exceeded(self, handler: Callable[[DrawdownThresholdExceededEvent], Any]) -> None:
+        self._emitter.on(self.EVT_DRAWDOWN_THRESHOLD_EXCEEDED, handler)
+
+    def on_drawdown_recovered(self, handler: Callable[[DrawdownRecoveredEvent], Any]) -> None:
+        self._emitter.on(self.EVT_DRAWDOWN_RECOVERED, handler)
+
+    def on_drawdown_peak_updated(self, handler: Callable[[DrawdownPeakUpdatedEvent], Any]) -> None:
+        self._emitter.on(self.EVT_DRAWDOWN_PEAK_UPDATED, handler)
+
     # Emisores
     def emit_position_validation_failed(self, event: PositionValidationFailedEvent) -> None:
         self._emitter.emit(self.EVT_VALIDATION_FAILED, event)
@@ -334,6 +384,15 @@ class PositionEventBus:
 
     def emit_mint_metadata_updated(self, event: MintMetadataUpdatedEvent) -> None:
         self._emitter.emit(self.EVT_MINT_METADATA_UPDATED, event)
+
+    def emit_drawdown_threshold_exceeded(self, event: DrawdownThresholdExceededEvent) -> None:
+        self._emitter.emit(self.EVT_DRAWDOWN_THRESHOLD_EXCEEDED, event)
+
+    def emit_drawdown_recovered(self, event: DrawdownRecoveredEvent) -> None:
+        self._emitter.emit(self.EVT_DRAWDOWN_RECOVERED, event)
+
+    def emit_drawdown_peak_updated(self, event: DrawdownPeakUpdatedEvent) -> None:
+        self._emitter.emit(self.EVT_DRAWDOWN_PEAK_UPDATED, event)
 
     # Utilidades
     def off(self, event_name: PositionEventName, handler: Callable[..., Any]) -> None:

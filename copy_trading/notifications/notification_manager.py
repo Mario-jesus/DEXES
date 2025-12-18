@@ -397,7 +397,7 @@ class NotificationManager:
                 display_level = "info"
 
             emoji = emoji_map.get(level, "📢")
-            formatted_message = f"{emoji} <b>{display_level.upper()}</b>\n\n🔧 Sistema: {message}"
+            formatted_message = f"{emoji} <b>{display_level.upper()}</b>\n\n🔧 System: {message}"
 
             self._logger.debug(f"Notificación del sistema formateada: {level}")
             await self.notify(formatted_message, display_level)

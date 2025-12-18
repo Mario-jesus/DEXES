@@ -118,8 +118,29 @@ class PnLCalculationService:
         _logger.debug(f"Calculando P&L realizado para posición {position.id}, incluir_costos={include_transaction_costs}")
 
         if not position.close_history:
-            _logger.debug(f"Posición {position.id} no tiene historial de cierres, retornando 0.0")
-            return "0.0", "0.0"
+            _logger.debug(f"Posición {position.id} no tiene historial de cierres, calculando como pérdida total")
+
+            # Para posiciones sin cierres, se calcula como pérdida total
+            amount_sol_executed = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')
+
+            if include_transaction_costs:
+                total_cost_sol = Decimal(position.total_cost_sol) if position.total_cost_sol else Decimal('0')
+                if total_cost_sol < 0:
+                    _logger.warning(f"Costo negativo en posición {position.id}: {total_cost_sol}. Normalizando.")
+                    total_cost_sol = -total_cost_sol
+                # P&L neto: pérdida total = -(amount_sol_executed + total_cost_sol)
+                pnl_sol = -(amount_sol_executed + total_cost_sol)
+                _logger.debug(f"P&L neto (con costos) como pérdida total: {pnl_sol} SOL (amount={amount_sol_executed}, cost={total_cost_sol})")
+            else:
+                # P&L base: pérdida total = -amount_sol_executed
+                pnl_sol = -amount_sol_executed
+                _logger.debug(f"P&L base (sin costos) como pérdida total: {pnl_sol} SOL (amount={amount_sol_executed})")
+
+            # Convertir a USD
+            pnl_usd = pnl_sol * Decimal(sol_price_usd)
+            _logger.debug(f"P&L final como pérdida total: {pnl_sol} SOL = {pnl_usd} USD (precio SOL: {sol_price_usd})")
+
+            return format(pnl_sol, "f"), format(pnl_usd, "f")
 
         # Valor de entrada (cuánto valían los tokens cuando se compraron)
         entry_value = Decimal(position.amount_sol_executed) if position.amount_sol_executed else Decimal('0')

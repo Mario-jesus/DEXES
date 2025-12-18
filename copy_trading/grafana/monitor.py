@@ -18,6 +18,7 @@ from ..persistence.repositories import (
     RunRepository,
     CopyTradingBotRepository,
 )
+from ..data_management.solana_manager import SolanaTxAnalyzer
 
 
 class SystemMonitor:
@@ -30,6 +31,7 @@ class SystemMonitor:
         execution_mode: str,
         data_reader: TradingDataReader,
         metrics_repository: TradingMetricsRepository,
+        solana_manager: SolanaTxAnalyzer,
     ):
         self.system_wallet_address = system_wallet_address
         self.runs_id = runs_id
@@ -38,6 +40,7 @@ class SystemMonitor:
         self.metrics_repository = metrics_repository
         self.metrics_calculator = TradingMetricsCalculator()
         self._logger = AppLogger(f"{self.__class__.__name__}[{system_wallet_address[:8]}]")
+        self.solana_manager = solana_manager
 
     async def initialize(self) -> None:
         """Inicializa el monitor del sistema."""
@@ -72,19 +75,35 @@ class SystemMonitor:
         """
         metrics_to_write = []
 
-        # Leer nuevos datos de PnL
-        last_timestamp = self.metrics_calculator.get_last_pnl_timestamp()
-        pnl_data = await self.data_reader.get_pnl_realized_positions(
+        # Leer datos acumulados de PnL por trader
+        pnl_data = await self.data_reader.get_pnl_realized_traders(
             self.runs_id,
-            last_timestamp=last_timestamp,
         )
 
-        # Procesar PnL y generar métricas
+        # Obtener balance SOL on-chain de la wallet del sistema
+        current_capital_onchain: Optional[Decimal] = None
+        try:
+            sol_balance_str = await self.solana_manager.get_sol_balance(self.system_wallet_address)
+            current_capital_onchain = Decimal(sol_balance_str)
+            self._logger.debug(
+                f"Balance on-chain obtenido para {self.system_wallet_address[:8]}...: {current_capital_onchain} SOL"
+            )
+        except Exception as e:
+            self._logger.warning(
+                f"Error obteniendo balance on-chain para {self.system_wallet_address[:8]}...: {e}"
+            )
+
+        # Procesar PnL y generar métricas (comparando con valores anteriores)
         if pnl_data:
-            pnl_metrics = self.metrics_calculator.process_pnl_data(pnl_data)
+            current_timestamp = datetime.now()
+            pnl_metrics = self.metrics_calculator.process_pnl_snapshot(
+                pnl_data,
+                current_timestamp=current_timestamp,
+                current_capital_onchain=current_capital_onchain,
+            )
             metrics_to_write.extend(pnl_metrics)
             self._logger.debug(
-                f"Procesados {len(pnl_data)} registros de PnL, "
+                f"Procesados {len(pnl_data)} traders con PnL acumulado, "
                 f"generadas {len(pnl_metrics)} métricas"
             )
 
@@ -100,7 +119,23 @@ class SystemMonitor:
         Returns:
             Lista de métricas actuales
         """
-        return self.metrics_calculator.get_current_metrics(current_timestamp=current_timestamp)
+        # Obtener balance SOL on-chain de la wallet del sistema
+        current_capital_onchain: Optional[Decimal] = None
+        try:
+            sol_balance_str = await self.solana_manager.get_sol_balance(self.system_wallet_address)
+            current_capital_onchain = Decimal(sol_balance_str)
+            self._logger.debug(
+                f"Balance on-chain obtenido para métricas actuales {self.system_wallet_address[:8]}...: {current_capital_onchain} SOL"
+            )
+        except Exception as e:
+            self._logger.warning(
+                f"Error obteniendo balance on-chain para métricas actuales {self.system_wallet_address[:8]}...: {e}"
+            )
+
+        return self.metrics_calculator.get_current_metrics(
+            current_timestamp=current_timestamp,
+            current_capital_onchain=current_capital_onchain,
+        )
 
     def get_total_pnl(self) -> Decimal:
         """Obtiene el PnL total acumulado del sistema."""
@@ -144,6 +179,7 @@ class TradingMetricsMonitor:
         self._is_running = False
         self._monitor_task: Optional[asyncio.Task] = None
         self._system_monitors: Dict[str, SystemMonitor] = {}
+        self.solana_manager = SolanaTxAnalyzer(base_rpc_url="https://api.mainnet-beta.solana.com")
 
     async def start(
         self,
@@ -277,6 +313,7 @@ class TradingMetricsMonitor:
                         execution_mode=execution_mode,
                         data_reader=self.data_reader,
                         metrics_repository=self.metrics_repository,
+                        solana_manager=self.solana_manager,
                     )
                     await monitor.initialize()
                     self._system_monitors[system_address] = monitor

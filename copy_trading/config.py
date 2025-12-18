@@ -185,8 +185,8 @@ class CopyTradingConfig:
     rpc_url: str = "https://api.mainnet-beta.solana.com/"
     rpc_api_key: Optional[str] = None
     websocket_url: str = "wss://api.mainnet-beta.solana.com/"
-
-    general_available_balance_to_invest: str = "0.0"
+	
+    general_available_balance_to_invest: Optional[str] = None
 
     # Modo de copia y valor
     amount_mode: AmountMode = AmountMode.EXACT
@@ -256,6 +256,14 @@ class CopyTradingConfig:
     position_timeout_check_interval: int = 300  # Intervalo de verificación en segundos (default: 5 minutos)
     position_timeout_max_retry_attempts: int = 3  # Máximo número de reintentos antes de remover de cola de abiertas
 
+    # Drawdown (gestión de riesgo)
+    drawdown_enabled: bool = True  # Habilitar monitoreo de drawdown
+    max_drawdown_percent: Optional[str] = None  # Máximo drawdown porcentual permitido (ej: "20.0" = 20%)
+    max_drawdown_sol: Optional[str] = None  # Máximo drawdown en SOL permitido (ej: "5.0" = 5 SOL)
+    drawdown_check_interval: int = 60  # Intervalo de verificación en segundos (default: 60 segundos)
+    drawdown_action: Literal["block_buys", "stop_trading", "notify_only"] = "block_buys"  # Acción cuando se excede el umbral
+    drawdown_recovery_threshold_percent: Optional[str] = None  # Umbral de recuperación porcentual para reactivar trading (ej: "10.0" = 10%)
+
     # Persistencia
     data_path: str = "copy_trading/data"
     save_interval_seconds: int = 300  # 5 minutos
@@ -293,8 +301,8 @@ class CopyTradingConfig:
         # Validar que el balance por trader sea valido, si se configura
         if self.max_amount_to_invest_per_trader is not None:
             total_amount_per_trader = Decimal(self.max_amount_to_invest_per_trader) * Decimal(len(self.traders))
-            if total_amount_per_trader > Decimal(self.general_available_balance_to_invest):
-                error_msg = f"El balance disponible para invertir ({self.general_available_balance_to_invest} SOL) es menor al balance por trader ({total_amount_per_trader} SOL)"
+            if total_amount_per_trader > Decimal(self.general_available_balance_to_invest or "0.0"):
+                error_msg = f"El balance disponible para invertir ({self.general_available_balance_to_invest or "0.0"} SOL) es menor al balance por trader ({total_amount_per_trader} SOL)"
                 _logger.error(error_msg)
                 raise ValueError(error_msg)
 
@@ -455,6 +463,12 @@ class CopyTradingConfig:
             'max_position_age_seconds': self.max_position_age_seconds,
             'position_timeout_check_interval': self.position_timeout_check_interval,
             'position_timeout_max_retry_attempts': self.position_timeout_max_retry_attempts,
+            'drawdown_enabled': self.drawdown_enabled,
+            'max_drawdown_percent': self.max_drawdown_percent,
+            'max_drawdown_sol': self.max_drawdown_sol,
+            'drawdown_check_interval': self.drawdown_check_interval,
+            'drawdown_action': self.drawdown_action,
+            'drawdown_recovery_threshold_percent': self.drawdown_recovery_threshold_percent,
             'data_path': self.data_path,
             'save_interval_seconds': self.save_interval_seconds,
             'websocket_reconnect_delay': self.websocket_reconnect_delay,
@@ -509,7 +523,7 @@ class CopyTradingConfig:
             rpc_url=data.get('rpc_url', 'https://api.mainnet-beta.solana.com/'),
             rpc_api_key=data.get('rpc_api_key'),
             websocket_url=data.get('websocket_url', 'wss://api.mainnet-beta.solana.com/'),
-            general_available_balance_to_invest=data.get('general_available_balance_to_invest', "0.0"),
+            general_available_balance_to_invest=data.get('general_available_balance_to_invest'),
 
             # Modo de copia y valor
             amount_mode=AmountMode(data.get('amount_mode', AmountMode.PERCENTAGE.value)),
@@ -576,6 +590,12 @@ class CopyTradingConfig:
             max_position_age_seconds=data.get('max_position_age_seconds'),
             position_timeout_check_interval=data.get('position_timeout_check_interval', 300),
             position_timeout_max_retry_attempts=data.get('position_timeout_max_retry_attempts', 3),
+            drawdown_enabled=data.get('drawdown_enabled', True),
+            max_drawdown_percent=data.get('max_drawdown_percent'),
+            max_drawdown_sol=data.get('max_drawdown_sol'),
+            drawdown_check_interval=data.get('drawdown_check_interval', 60),
+            drawdown_action=data.get('drawdown_action', 'block_buys'),
+            drawdown_recovery_threshold_percent=data.get('drawdown_recovery_threshold_percent'),
             data_path=data.get('data_path', 'copy_trading/data'),
             save_interval_seconds=data.get('save_interval_seconds', 300),
 

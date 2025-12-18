@@ -24,7 +24,7 @@ class SolanaRPCClient:
 
     def __init__(
         self,
-        base_rpc_url: str = "https://mainnet.helius-rpc.com",
+        base_rpc_url: str = "https://api.mainnet-beta.solana.com",
         *,
         api_key: Optional[str] = RPC_API_KEY,
         session: Optional[aiohttp.ClientSession] = None,
@@ -69,6 +69,9 @@ class SolanaRPCClient:
 
         Si endpoint se pasa, se agrega al path; se normalizan los slashes.
         """
+        if self._base_rpc_url == "https://api.mainnet-beta.solana.com":
+            return "https://api.mainnet-beta.solana.com"
+
         if self._api_key is None:
             raise ValueError("api_key is not set")
 

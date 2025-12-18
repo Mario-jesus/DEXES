@@ -23,7 +23,9 @@ from .position_events import (
     PositionPartialClosedEvent,
     PositionTraderTradeDataEvent,
     PositionFailedEvent,
-    MintMetadataUpdatedEvent,
+    DrawdownThresholdExceededEvent,
+    DrawdownRecoveredEvent,
+    DrawdownPeakUpdatedEvent,
 )
 
 __all__ = [
@@ -46,5 +48,7 @@ __all__ = [
     "PositionPartialClosedEvent",
     "PositionTraderTradeDataEvent",
     "PositionFailedEvent",
-    "MintMetadataUpdatedEvent",
+    "DrawdownThresholdExceededEvent",
+    "DrawdownRecoveredEvent",
+    "DrawdownPeakUpdatedEvent",
 ]

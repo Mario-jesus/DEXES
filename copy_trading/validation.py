@@ -4,7 +4,7 @@ Motor de validaciones para trades
 """
 from enum import Enum
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from decimal import Decimal, getcontext
 from asyncio import TaskGroup, CancelledError
@@ -15,6 +15,10 @@ from logging_system import AppLogger
 from .config import CopyTradingConfig
 from .data_management.token_trader_manager import TokenTraderManager
 from .balance_management import BalanceManager
+from .risk_management.drawdown_validator import DrawdownValidator
+
+if TYPE_CHECKING:
+    from .risk_management.drawdown_manager import DrawdownManager
 
 getcontext().prec = 26
 
@@ -66,7 +70,8 @@ class ValidationEngine:
                     config: CopyTradingConfig,
                     graceful_shutdown_event: asyncio.Event,
                     token_trader_manager: Optional[TokenTraderManager] = None,
-                    balance_manager: Optional[BalanceManager] = None):
+                    balance_manager: Optional[BalanceManager] = None,
+                    drawdown_manager: Optional["DrawdownManager"] = None):
         """
         Inicializa el motor de validaciones
         
@@ -80,6 +85,7 @@ class ValidationEngine:
         self.graceful_shutdown_event = graceful_shutdown_event
         self.token_trader_manager = token_trader_manager
         self.balance_manager = balance_manager
+        self.drawdown_manager = drawdown_manager
 
         # Estado para validaciones
         self.daily_volume: Dict[str, float] = {}  # {trader: volume}
@@ -236,6 +242,9 @@ class ValidationEngine:
             tasks['max_positions'] = tg.create_task(self.check_max_open_positions_per_token_per_trader(trader_wallet, token_address, side))
             tasks['amount'] = tg.create_task(self.check_amount(amount_sol))
             tasks['graceful_shutdown'] = tg.create_task(self.check_graceful_shutdown(side))
+            # Añadir validación de drawdown si está habilitada
+            if self.config.drawdown_enabled and self.drawdown_manager:
+                tasks['drawdown'] = tg.create_task(self.check_drawdown(side))
         else:
             tasks['token_balance'] = tg.create_task(self.check_token_balance(token_address, amount_tokens))
             tasks['amount'] = tg.create_task(self.check_amount(amount_tokens))
@@ -1202,6 +1211,25 @@ class ValidationEngine:
             })
         return check
 
+    async def check_drawdown(self, side: str) -> ValidationCheck:
+        """Verifica si el drawdown permite ejecutar un trade."""
+        check = ValidationCheck(name="DrawdownCheck")
+
+        if not self.config.drawdown_enabled:
+            check.passthrough("Drawdown deshabilitado")
+            return check
+
+        if not self.drawdown_manager:
+            check.warning("DrawdownManager no disponible, saltando validación de drawdown")
+            return check
+
+        try:
+            return await DrawdownValidator.check_drawdown(self.drawdown_manager, side)
+        except Exception as e:
+            self._logger.error(f"Error verificando drawdown: {e}")
+            check.fail(f"Error verificando drawdown: {str(e)}", {'error': str(e), 'side': side})
+            return check
+
     def _get_trader_config_value(self, trader_wallet: str, attr_name: str, global_default: Any = None) -> Any:
         """
         Obtiene un valor de configuración con prioridad trader > global > default.
@@ -1322,7 +1350,8 @@ class ValidationEngine:
             'SolBalanceCheck',           # Sin SOL no se puede hacer nada
             'TokenBalanceCheck',         # Sin tokens no se puede vender
             'PositionSizeCheck',         # Tamaño de posición inválido es crítico
-            'MinAvailableGlobalBudgetThresholdCheck'  # Umbral mínimo global para BUY
+            'MinAvailableGlobalBudgetThresholdCheck',  # Umbral mínimo global para BUY
+            'DrawdownCheck'              # Drawdown excedido bloquea trades
         }
         return validation_name in critical_validations
 
@@ -1341,7 +1370,8 @@ class ValidationEngine:
             'SolBalanceCheck',
             'TokenBalanceCheck', 
             'PositionSizeCheck',
-            'MinAvailableGlobalBudgetThresholdCheck'
+            'MinAvailableGlobalBudgetThresholdCheck',
+            'DrawdownCheck'
         }
         return validation_name in critical_validations
 

@@ -159,6 +159,7 @@ class QueueInitializationManager:
             if self.notification_manager:
                 self.notification_callback = PositionNotificationCallback(
                     run_id=self._config.system_run_id,
+                    config=self._config,
                     notification_manager=self.notification_manager,
                     price_client=self.price_client,
                     token_trader_manager=self.token_trader_manager,
