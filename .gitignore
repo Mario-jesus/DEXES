@@ -206,3 +206,6 @@ copy_trading/configs_in_json/
 
 # Mac OS
 .DS_Store
+
+# Datos de Moralis
+/data_moralis/
