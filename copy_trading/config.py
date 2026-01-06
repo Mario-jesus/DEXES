@@ -211,6 +211,8 @@ class CopyTradingConfig:
     graceful_shutdown_enabled: bool = False                        # Si se habilita el shutdown graceful, se espera a que todas las posiciones se cierren antes de cerrar el sistema
     pump_amm_min_sol_amount_threshold: Optional[str] = None        # Solo copiar trades si el monto es mayor a este valor en SOL para pool pump-amm
     other_pools_min_sol_amount_threshold: Optional[str] = None     # Mínimo de SOL para pools distintos de pump-amm
+    pump_amm_max_sol_amount_threshold: Optional[str] = None        # Solo copiar trades si el monto es menor o igual a este valor en SOL para pool pump-amm
+    other_pools_max_sol_amount_threshold: Optional[str] = None     # Máximo de SOL para pools distintos de pump-amm
     is_trade_activity_filter_enabled: bool = True                  # Si se habilita el filtro de actividad de trades, solo copiar trades si se han observado N trades previos en el token
     trade_activity_window_seconds: int = 60                        # Ventana de tiempo para contar trades
     min_trade_count_threshold: int = 3                             # Número mínimo de trades antes de copiar
@@ -436,6 +438,8 @@ class CopyTradingConfig:
             'graceful_shutdown_enabled': self.graceful_shutdown_enabled,
             'pump_amm_min_sol_amount_threshold': self.pump_amm_min_sol_amount_threshold,
             'other_pools_min_sol_amount_threshold': self.other_pools_min_sol_amount_threshold,
+            'pump_amm_max_sol_amount_threshold': self.pump_amm_max_sol_amount_threshold,
+            'other_pools_max_sol_amount_threshold': self.other_pools_max_sol_amount_threshold,
             'is_trade_activity_filter_enabled': self.is_trade_activity_filter_enabled,
             'trade_activity_window_seconds': self.trade_activity_window_seconds,
             'min_trade_count_threshold': self.min_trade_count_threshold,
@@ -548,6 +552,8 @@ class CopyTradingConfig:
             graceful_shutdown_enabled=data.get('graceful_shutdown_enabled', False),
             pump_amm_min_sol_amount_threshold=data.get('pump_amm_min_sol_amount_threshold'),
             other_pools_min_sol_amount_threshold=data.get('other_pools_min_sol_amount_threshold'),
+            pump_amm_max_sol_amount_threshold=data.get('pump_amm_max_sol_amount_threshold'),
+            other_pools_max_sol_amount_threshold=data.get('other_pools_max_sol_amount_threshold'),
             is_trade_activity_filter_enabled=data.get('is_trade_activity_filter_enabled', True),
             trade_activity_window_seconds=data.get('trade_activity_window_seconds', 60),
             min_trade_count_threshold=data.get('min_trade_count_threshold', 3),

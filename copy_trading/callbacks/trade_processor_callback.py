@@ -54,8 +54,10 @@ class TradeDataWithValidation:
     """Datos del trade con las validaciones"""
     trade_data: TraderTradeData
     min_sol_amount_valid: bool
+    max_sol_amount_valid: bool
     activity_valid: bool
     is_min_sol_enabled: bool
+    is_max_sol_enabled: bool
     is_activity_enabled: bool
 
 
@@ -144,13 +146,22 @@ class TradeProcessorCallback:
                 asyncio.create_task(self._log_async("Trade rechazado - validación básica", data.get('signature', 'N/A')))
                 return
 
-            # Validar que al menos una de las dos condiciones se cumpla (monto mínimo SOL o actividad de trading)
-            pool_threshold = self._get_min_sol_threshold(trade_data.pool)
-            min_sol_valid = self._validate_minimum_sol_amount(trade_data, pool_threshold)
+            # Validar montos mínimo y máximo de SOL según el pool
+            pool_min_threshold = self._get_min_sol_threshold(trade_data.pool)
+            pool_max_threshold = self._get_max_sol_threshold(trade_data.pool)
+            min_sol_valid = self._validate_minimum_sol_amount(trade_data, pool_min_threshold)
+            max_sol_valid = self._validate_maximum_sol_amount(trade_data, pool_max_threshold)
             activity_valid = self._validate_trade_activity_threshold(trade_data)
 
-            is_min_sol_enabled = pool_threshold is not None
+            is_min_sol_enabled = pool_min_threshold is not None
+            is_max_sol_enabled = pool_max_threshold is not None
             is_activity_enabled = self.config.is_trade_activity_filter_enabled
+
+            # Validar monto máximo (si está habilitado, debe cumplirse siempre)
+            if is_max_sol_enabled and not max_sol_valid:
+                self.stats['trades_rejected'] += 1
+                asyncio.create_task(self._log_async("Trade rechazado - monto máximo de SOL excedido", data.get('signature', 'N/A')))
+                return
 
             if is_min_sol_enabled and is_activity_enabled:
                 if not (min_sol_valid or activity_valid):
@@ -177,8 +188,10 @@ class TradeProcessorCallback:
                 self._processing_queue.put_nowait(TradeDataWithValidation(
                     trade_data=trade_data,
                     min_sol_amount_valid=min_sol_valid,
+                    max_sol_amount_valid=max_sol_valid,
                     activity_valid=activity_valid,
                     is_min_sol_enabled=is_min_sol_enabled,
+                    is_max_sol_enabled=is_max_sol_enabled,
                     is_activity_enabled=is_activity_enabled,
                 ))
 
@@ -200,6 +213,16 @@ class TradeProcessorCallback:
         if pool_normalized == "pump-amm":
             return self.config.pump_amm_min_sol_amount_threshold
         return self.config.other_pools_min_sol_amount_threshold
+
+    def _get_max_sol_threshold(self, pool: Optional[str]) -> Optional[str]:
+        """
+        Obtiene el umbral máximo de SOL según el pool del trade.
+        Para pump-amm usa el umbral dedicado; para cualquier otro pool usa el umbral general.
+        """
+        pool_normalized = (pool or "").strip().lower()
+        if pool_normalized == "pump-amm":
+            return self.config.pump_amm_max_sol_amount_threshold
+        return self.config.other_pools_max_sol_amount_threshold
 
     def _validate_minimum_sol_amount(self, trade_data: TraderTradeData, threshold: Optional[str] = None) -> bool:
         """
@@ -234,6 +257,41 @@ class TradeProcessorCallback:
             return True
         except (ValueError, TypeError, Exception):
             self._logger.warning(f"Error al validar monto mínimo de SOL ({pool_threshold}) para pool {trade_data.pool}: {trade_data.amount_sol}")
+            return False
+
+    def _validate_maximum_sol_amount(self, trade_data: TraderTradeData, threshold: Optional[str] = None) -> bool:
+        """
+        Valida que el trade cumpla con el monto máximo de SOL configurado según el pool
+        
+        Args:
+            trade_data: Datos del trade a validar
+            threshold: Umbral de SOL a utilizar; si no se pasa se determina por pool
+            
+        Returns:
+            True si el monto es menor o igual al umbral máximo, False en caso contrario
+        """
+        pool_threshold = threshold if threshold is not None else self._get_max_sol_threshold(trade_data.pool)
+
+        if pool_threshold is None:
+            self._logger.debug("Monto máximo de SOL deshabilitado para el pool actual")
+            return True
+
+        if trade_data.side == 'sell':
+            self._logger.debug("Operación de tipo 'sell', no se valida monto máximo de SOL para esta operación")
+            return True
+
+        try:
+            amount_decimal = Decimal(trade_data.amount_sol)
+            threshold_decimal = Decimal(pool_threshold)
+            pool_name = trade_data.pool or 'desconocido'
+
+            if amount_decimal > threshold_decimal:
+                self._logger.info(f"Trade rechazado - monto {trade_data.amount_sol} SOL > {threshold_decimal} SOL (máximo) para pool {pool_name}")
+                return False
+            self._logger.debug(f"Trade validado - monto {trade_data.amount_sol} SOL <= {threshold_decimal} SOL (máximo) para pool {pool_name}")
+            return True
+        except (ValueError, TypeError, Exception):
+            self._logger.warning(f"Error al validar monto máximo de SOL ({pool_threshold}) para pool {trade_data.pool}: {trade_data.amount_sol}")
             return False
 
     def _validate_trade_activity_threshold(self, trade_data: TraderTradeData) -> bool:
@@ -304,8 +362,10 @@ class TradeProcessorCallback:
             # Obtener datos del trade con validaciones
             trade_data = trade_data_with_validation.trade_data
             min_sol_amount_valid = trade_data_with_validation.min_sol_amount_valid
+            max_sol_amount_valid = trade_data_with_validation.max_sol_amount_valid
             activity_valid = trade_data_with_validation.activity_valid
             is_min_sol_enabled = trade_data_with_validation.is_min_sol_enabled
+            is_max_sol_enabled = trade_data_with_validation.is_max_sol_enabled
             is_activity_enabled = trade_data_with_validation.is_activity_enabled
 
             # Calcular montos de copia
@@ -355,8 +415,10 @@ class TradeProcessorCallback:
 
             # Añadir metadata a la posición
             position.add_metadata("min_sol_amount_valid", min_sol_amount_valid)
+            position.add_metadata("max_sol_amount_valid", max_sol_amount_valid)
             position.add_metadata("activity_valid", activity_valid)
             position.add_metadata("is_min_sol_enabled", is_min_sol_enabled)
+            position.add_metadata("is_max_sol_enabled", is_max_sol_enabled)
             position.add_metadata("is_activity_enabled", is_activity_enabled)
 
             # Encolar posición
