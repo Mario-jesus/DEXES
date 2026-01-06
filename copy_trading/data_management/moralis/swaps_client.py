@@ -25,6 +25,7 @@ class MoralisSwapsClient:
     """Cliente HTTP asíncrono para obtener swaps de wallets desde Moralis API"""
 
     BASE_URL = "https://solana-gateway.moralis.io"
+    _accumulated_swaps = []
 
     def __init__(self, api_key: Optional[str] = None, network: str = "mainnet"):
         """
@@ -66,6 +67,11 @@ class MoralisSwapsClient:
         if self.session and not self.session.closed:
             await self.session.close()
             self.session = None
+
+
+    def get_accumulated_swaps(self) -> List[Dict[str, Any]]:
+        """Obtiene los swaps acumulados hasta el momento"""
+        return self._accumulated_swaps
 
     def _get_headers(self) -> Dict[str, str]:
         """Construye los headers necesarios para las peticiones"""
@@ -313,7 +319,7 @@ class MoralisSwapsClient:
         Returns:
             Tupla con (lista de datos acumulados, número de páginas procesadas)
         """
-        accumulated = []
+        self._accumulated_swaps = []
         cursor = None
         page_count = 0
 
@@ -340,9 +346,9 @@ class MoralisSwapsClient:
                 if process_page:
                     processed = process_page(response, page_count)
                     if processed is not None:
-                        accumulated.append(processed)
+                        self._accumulated_swaps.append(processed)
                 else:
-                    accumulated.append(response)
+                    self._accumulated_swaps.append(response)
 
                 # Verificar si hay más páginas
                 result = response.get("result", [])
@@ -356,12 +362,13 @@ class MoralisSwapsClient:
                     break
 
                 page_count += 1
+        except asyncio.CancelledError:
+            logger.warning("Iteración de páginas cancelada")
         except Exception as e:
             logger.error(f"Error al iterar páginas: {e}")
             logger.debug(f"Ultimo cursor: {cursor!r}")
-            raise
 
-        return accumulated, page_count + 1
+        return self._accumulated_swaps, page_count + 1
 
     async def fetch_all_swaps(
         self,
