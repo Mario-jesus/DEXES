@@ -235,6 +235,88 @@ services:
       - trading_network
     restart: unless-stopped
 
+  COPY_TRADING_BOT_F:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_F
+    ports:
+      - "7783:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-F.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_G:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_G
+    ports:
+      - "7784:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-G.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_H:
+
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_H
+    ports:
+      - "7785:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-H.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
