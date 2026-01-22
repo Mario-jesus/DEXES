@@ -216,6 +216,7 @@ class CopyTradingConfig:
     is_trade_activity_filter_enabled: bool = True                  # Si se habilita el filtro de actividad de trades, solo copiar trades si se han observado N trades previos en el token
     trade_activity_window_seconds: int = 60                        # Ventana de tiempo para contar trades
     min_trade_count_threshold: int = 3                             # Número mínimo de trades antes de copiar
+    allowed_pools: Optional[List[str]] = None                      # Pools permitidos para copiar trades
 
     # Configuración de Transacciones
     transaction_type: TransactionType = TransactionType.LIGHTNING_TRADE
@@ -452,6 +453,7 @@ class CopyTradingConfig:
             'is_trade_activity_filter_enabled': self.is_trade_activity_filter_enabled,
             'trade_activity_window_seconds': self.trade_activity_window_seconds,
             'min_trade_count_threshold': self.min_trade_count_threshold,
+            'allowed_pools': self.allowed_pools,
             'transaction_type': self.transaction_type.value,
             'pool_type': self.pool_type,
             'skip_preflight': self.skip_preflight,
@@ -573,7 +575,7 @@ class CopyTradingConfig:
             is_trade_activity_filter_enabled=data.get('is_trade_activity_filter_enabled', True),
             trade_activity_window_seconds=data.get('trade_activity_window_seconds', 60),
             min_trade_count_threshold=data.get('min_trade_count_threshold', 3),
-
+            allowed_pools=data.get('allowed_pools'),
             # Configuración de Transacciones
             transaction_type=TransactionType(data.get('transaction_type', TransactionType.LIGHTNING_TRADE.value)),
             pool_type=data.get('pool_type', 'auto'),

@@ -141,6 +141,11 @@ class TradeProcessorCallback:
             # Validación básica síncrona (rápida)
             trade_data = self._create_trade_data_from_pumpfun(data)
 
+            if isinstance(self.config.allowed_pools, list) and trade_data.pool not in self.config.allowed_pools:
+                self.stats['trades_rejected'] += 1
+                asyncio.create_task(self._log_async("Trade rechazado - pool no permitido", data.get('signature', 'N/A')))
+                return
+
             if not self._validate_trade_data_basic(trade_data):
                 self.stats['trades_rejected'] += 1
                 asyncio.create_task(self._log_async("Trade rechazado - validación básica", data.get('signature', 'N/A')))

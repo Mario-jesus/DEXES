@@ -588,6 +588,29 @@ class TokenPriceRiskManager:
                         f"Descartando de _positions_being_liquidated"
                     )
 
+                    # Obtener la posición para incrementar contador de reintentos
+                    position = None
+                    if self.position_queue_manager and self.position_queue_manager.open_queue:
+                        position = await self.position_queue_manager.open_queue.get_position_by_id(position_id)
+
+                    # Incrementar contador de reintentos solo cuando el análisis falla
+                    if position:
+                        retry_count = self._increment_liquidation_retry_count(position)
+                        max_retries = self.config.risk_management_max_liquidation_retries
+
+                        self._logger.warning(
+                            f"Reintento de liquidación incrementado para posición {position_id}: "
+                            f"{retry_count}/{max_retries}"
+                        )
+
+                        # Si se alcanzó el máximo de reintentos, descartar la posición
+                        if retry_count >= max_retries:
+                            await self._discard_position(position, f"Error en análisis de liquidación: {event.error_kind} - {event.error_message}")
+                    else:
+                        self._logger.warning(
+                            f"No se pudo obtener posición {position_id} para incrementar contador de reintentos"
+                        )
+
                     # Remover de set de liquidaciones
                     self._positions_being_liquidated.discard(position_id)
 
@@ -1232,6 +1255,14 @@ class TokenPriceRiskManager:
                     f"(Entrada: {entry_price:.10f} SOL/token, Actual: {current_price:.10f} SOL/token)"
                 )
 
+            # Si se alcanzó el máximo de reintentos, intentar liquidar el 100% del token
+            retry_count = self._get_liquidation_retry_count(position)
+            max_retries = self.config.risk_management_max_liquidation_retries
+            if retry_count == max_retries:
+                token_amount = "100%"
+            else:
+                token_amount = position.amount_tokens_executed.strip() or position.amount_tokens.strip() or "100%"
+
             # Crear PositionTraderTradeData para liquidación
             trader_trade_data = TraderTradeData(
                 trader_wallet=position.trader_wallet,
@@ -1239,7 +1270,7 @@ class TokenPriceRiskManager:
                 token_address=position.token_address,
                 amount_sol="",
                 signature="",
-                token_amount=position.amount_tokens_executed or position.amount_tokens,
+                token_amount=token_amount,
                 tokens_in_pool="",
                 sol_in_pool="",
                 new_token_balance="",
@@ -1253,7 +1284,7 @@ class TokenPriceRiskManager:
 
             position_trader_trade_data = PositionTraderTradeData(
                 trader_trade_data=trader_trade_data,
-                copy_amount_tokens=position.amount_tokens_executed or position.amount_tokens,
+                copy_amount_tokens=token_amount,
                 denominate_in_sol=False,
                 is_liquidation=True
             )
@@ -1306,7 +1337,8 @@ class TokenPriceRiskManager:
                         peak_display = f"${peak_price_usd:.10f}" if peak_price_usd else f"{peak_price:.10f} SOL/token"
                         message = (
                             f"🛑 Trailing Stop Loss triggered\n"
-                            f"Position: {position.id[:8]}...\n"
+                            f"Position: {position.id}\n"
+                            f"Mint: {position.token_address}\n"
                             f"Loss from peak: {loss_from_peak:.2f}%\n"
                             f"Entry: {entry_display}\n"
                             f"Peak: {peak_display}\n"
@@ -1316,7 +1348,8 @@ class TokenPriceRiskManager:
                     else:
                         message = (
                             f"🎯 Take Profit triggered\n"
-                            f"Position: {position.id[:8]}...\n"
+                            f"Position: {position.id}\n"
+                            f"Mint: {position.token_address}\n"
                             f"Gain: {change_percentage:.2f}%\n"
                             f"Entry: {entry_display}\n"
                             f"Current: {current_display}\n"
