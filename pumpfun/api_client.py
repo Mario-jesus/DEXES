@@ -465,8 +465,6 @@ class PumpFunWebSocketApiClient():
         websocket_base_url: str = "wss://pumpportal.fun/api/data",
         api_key: Optional[str] = None,
         websocket_timeout: int = 60,
-        max_retries: int = 3,
-        retry_delay: float = 1.0,
         inactivity_watch_seconds: int = 3600,
         # Parámetros para reconexión exponencial
         max_reconnect_attempts: int = 10,
@@ -481,10 +479,9 @@ class PumpFunWebSocketApiClient():
             websocket_base_url: URL del WebSocket
             api_key: API key para autenticación
             websocket_timeout: Timeout para WebSocket (segundos)
-            max_retries: Máximo número de reintentos
-            retry_delay: Delay base entre reintentos
             inactivity_watch_seconds: Segundos de inactividad antes de reconectar
-            max_reconnect_attempts: Máximo número de intentos de reconexión exponencial
+            max_reconnect_attempts: Máximo número de intentos de reconexión exponencial.
+                                Usa -1 para reconexiones infinitas.
             base_reconnect_delay: Delay base para reconexión exponencial (segundos)
             max_reconnect_delay: Delay máximo para reconexión exponencial (segundos)
             reconnect_jitter: Si True, añade jitter aleatorio para evitar thundering herd
@@ -492,8 +489,6 @@ class PumpFunWebSocketApiClient():
         self._websocket_base_url = websocket_base_url
         self._api_key = api_key
         self._websocket_timeout = websocket_timeout
-        self._max_retries = max_retries
-        self._retry_delay = retry_delay
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
         # Parámetros de reconexión exponencial
@@ -590,8 +585,12 @@ class PumpFunWebSocketApiClient():
         if self._is_running:
             return
 
+        # Determinar si hay límite de intentos
+        infinite_retries = self._max_reconnect_attempts == -1
+
         # Implementar reconexión exponencial
-        for attempt in range(self._max_reconnect_attempts):
+        attempt = 0
+        while True:
             try:
                 self._metrics['connection_attempts'] += 1
                 self._reconnect_attempts = attempt
@@ -604,7 +603,11 @@ class PumpFunWebSocketApiClient():
                 if self._api_key:
                     ws_url = f"{self._websocket_base_url}?api-key={self._api_key}"
 
-                self._logger.debug(f"Conectando WebSocket... (intento {attempt + 1}/{self._max_reconnect_attempts})")
+                if infinite_retries:
+                    self._logger.debug(f"Conectando WebSocket... (intento {attempt + 1}, sin límite)")
+                else:
+                    self._logger.debug(f"Conectando WebSocket... (intento {attempt + 1}/{self._max_reconnect_attempts})")
+
                 if self._api_key:
                     self._logger.debug(f"Usando API key para PumpSwap data")
 
@@ -637,14 +640,21 @@ class PumpFunWebSocketApiClient():
                 self._metrics['error_count'] += 1
                 self._metrics['exponential_reconnect_count'] += 1
 
-                if attempt < self._max_reconnect_attempts - 1:
+                # Determinar si debemos continuar reintentando
+                should_retry = infinite_retries or attempt < self._max_reconnect_attempts - 1
+
+                if should_retry:
                     # Calcular delay exponencial con jitter
                     delay = self._calculate_exponential_delay(attempt)
-                    self._logger.warning(f"Error conectando WebSocket (intento {attempt + 1}/{self._max_reconnect_attempts}): {e}")
+                    if infinite_retries:
+                        self._logger.warning(f"Error conectando WebSocket (intento {attempt + 1}, sin límite): {e}")
+                    else:
+                        self._logger.warning(f"Error conectando WebSocket (intento {attempt + 1}/{self._max_reconnect_attempts}): {e}")
                     self._logger.info(f"Reintentando en {delay:.2f} segundos...")
                     await asyncio.sleep(delay)
+                    attempt += 1
                 else:
-                    # Último intento fallido
+                    # Último intento fallido (solo cuando hay límite finito)
                     self._logger.error(f"Error conectando WebSocket después de {self._max_reconnect_attempts} intentos: {e}")
                     raise WebSocketConnectionError(f"Error conectando WebSocket después de {self._max_reconnect_attempts} intentos: {e}")
 

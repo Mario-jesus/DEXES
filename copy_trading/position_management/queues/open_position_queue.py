@@ -427,8 +427,8 @@ class OpenPositionQueue:
             if token_address:
                 token_positions: List[OpenPosition] = []
                 for _, tokens in self.open_positions_queue.items():
-                    for token_address, queue in tokens.items():
-                        if token_address == token_address:
+                    for token_addr, queue in tokens.items():
+                        if token_addr == token_address:
                             token_positions.extend(queue)
                 return token_positions
 

@@ -14,8 +14,10 @@ from logging_system import AppLogger
 class PumpFunRedisSubscriptions:
     """Cliente consumidor que interactúa con el PumpFunRedisBridgeService."""
 
-    _ACTION_SUBSCRIBE = "subscribe_account_trade"
-    _ACTION_UNSUBSCRIBE = "unsubscribe_account_trade"
+    _ACTION_SUBSCRIBE_ACCOUNT = "subscribe_account_trade"
+    _ACTION_UNSUBSCRIBE_ACCOUNT = "unsubscribe_account_trade"
+    _ACTION_SUBSCRIBE_TOKEN = "subscribe_token_trade"
+    _ACTION_UNSUBSCRIBE_TOKEN = "unsubscribe_token_trade"
     _ACTION_UNSUBSCRIBE_ALL = "unsubscribe_all"
     _ACTION_PING = "ping"
 
@@ -41,10 +43,12 @@ class PumpFunRedisSubscriptions:
         self._pending_requests: Dict[str, asyncio.Future[Any]] = {}
 
         self._account_callback: Optional[Callable[[Any], Any]] = None
+        self._token_callback: Optional[Callable[[Any], Any]] = None
         self._error_callback: Optional[Callable[[Any], Any]] = None
         self._global_callback: Optional[Callable[[Any], Any]] = None
 
         self._active_accounts: Set[str] = set()
+        self._active_tokens: Set[str] = set()
         self._running = False
 
         self._lock = asyncio.Lock()
@@ -160,7 +164,7 @@ class PumpFunRedisSubscriptions:
             self._account_callback = callback
             self._logger.debug("Callback de cuenta registrado")
 
-        await self._send_command(self._ACTION_SUBSCRIBE, keys=keys)
+        await self._send_command(self._ACTION_SUBSCRIBE_ACCOUNT, keys=keys)
         async with self._lock:
             self._active_accounts.update(keys)
 
@@ -174,21 +178,59 @@ class PumpFunRedisSubscriptions:
 
         self._logger.debug(f"Solicitando desuscripción de {len(keys)} cuenta(s)")
 
-        await self._send_command(self._ACTION_UNSUBSCRIBE, keys=keys)
+        await self._send_command(self._ACTION_UNSUBSCRIBE_ACCOUNT, keys=keys)
         async with self._lock:
             self._active_accounts.difference_update(keys)
 
         self._logger.info(f"Desuscrito de {len(keys)} cuenta(s), total activas: {len(self._active_accounts)}")
 
+    async def subscribe_token_trade(
+        self,
+        token_addresses: List[str],
+        callback: Optional[Callable[[Any], Any]] = None,
+    ) -> None:
+        keys = self._normalize_keys(token_addresses)
+        if not keys:
+            self._logger.debug("Lista de tokens vacía, no se procesa suscripción")
+            return
+
+        self._logger.debug(f"Solicitando suscripción a {len(keys)} token(s)")
+
+        if callback:
+            self._token_callback = callback
+            self._logger.debug("Callback de token registrado")
+
+        await self._send_command(self._ACTION_SUBSCRIBE_TOKEN, keys=keys)
+        async with self._lock:
+            self._active_tokens.update(keys)
+
+        self._logger.info(f"Suscrito a {len(keys)} token(s), total activos: {len(self._active_tokens)}")
+
+    async def unsubscribe_token_trade(self, token_addresses: List[str]) -> None:
+        keys = self._normalize_keys(token_addresses)
+        if not keys:
+            self._logger.debug("Lista de tokens vacía, no se procesa desuscripción")
+            return
+
+        self._logger.debug(f"Solicitando desuscripción de {len(keys)} token(s)")
+
+        await self._send_command(self._ACTION_UNSUBSCRIBE_TOKEN, keys=keys)
+        async with self._lock:
+            self._active_tokens.difference_update(keys)
+
+        self._logger.info(f"Desuscrito de {len(keys)} token(s), total activos: {len(self._active_tokens)}")
+
     async def unsubscribe_all(self) -> None:
-        count = len(self._active_accounts)
-        self._logger.debug(f"Solicitando desuscripción de todas las cuentas ({count})")
+        account_count = len(self._active_accounts)
+        token_count = len(self._active_tokens)
+        self._logger.debug(f"Solicitando desuscripción de todas las suscripciones ({account_count} cuentas, {token_count} tokens)")
 
         await self._send_command(self._ACTION_UNSUBSCRIBE_ALL, keys=[])
         async with self._lock:
             self._active_accounts.clear()
+            self._active_tokens.clear()
 
-        self._logger.info(f"Desuscrito de todas las cuentas (eran {count})")
+        self._logger.info(f"Desuscrito de todas las suscripciones (eran {account_count} cuentas, {token_count} tokens)")
 
     async def disconnect(self) -> None:
         await self.stop()
@@ -200,10 +242,12 @@ class PumpFunRedisSubscriptions:
             "client_id": self._client_id,
             "running": self._running,
             "active_accounts": list(self._active_accounts),
+            "active_tokens": list(self._active_tokens),
             "pending_requests": len(self._pending_requests),
         }
         self._logger.debug(
             f"Estado consultado: {len(self._active_accounts)} cuentas activas, "
+            f"{len(self._active_tokens)} tokens activos, "
             f"{status['pending_requests']} solicitudes pendientes"
         )
         return status
@@ -278,6 +322,10 @@ class PumpFunRedisSubscriptions:
             trader = payload.get("trader")
             self._logger.debug(f"Evento account_trade para trader {trader[:8] if trader else 'unknown'}...")
             await self._dispatch_callback(self._account_callback, payload.get("data"))
+        elif event_type == "token_trade":
+            token = payload.get("token")
+            self._logger.debug(f"Evento token_trade para token {token[:8] if token else 'unknown'}...")
+            await self._dispatch_callback(self._token_callback, payload.get("data"))
         elif event_type == "error":
             self._logger.warning(f"Evento de error recibido: {payload.get('data')}")
             await self._dispatch_callback(self._error_callback, payload.get("data"))

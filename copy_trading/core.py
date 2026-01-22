@@ -47,7 +47,7 @@ from .position_timeout import PositionTimeoutManager
 from .data_management import MoralisPriceClient
 from .persistence.repositories import TraderMintRepository, CopyTradingBotRepository, RunRepository, PNLRepository
 from .persistence.subscribers import attach_position_events_subscriber, attach_mint_events_subscriber
-from .risk_management import DrawdownManager
+from .risk_management import DrawdownManager, TokenPriceRiskManager
 
 
 class CopyTrading:
@@ -135,6 +135,9 @@ class CopyTrading:
             notification_manager=self.notification_manager
         )
         self._logger.debug("DrawdownManager inicializado")
+
+        # Token Price Risk Manager (Stop Loss y Take Profit) - se inicializará después de transaction_executor y subscription_manager
+        self.token_price_risk_manager: Optional[TokenPriceRiskManager] = None
 
         self.validation_engine = ValidationEngine(
             config=config,
@@ -389,6 +392,26 @@ class CopyTrading:
                 await self.position_timeout_manager.start()
                 self._logger.debug("PositionTimeoutManager inicializado y ejecutándose")
 
+            # Inicializar TokenPriceRiskManager (Stop Loss y Take Profit)
+            # Requiere subscription_manager (redis_subscriptions o subscriptions)
+            subscription_manager = None
+            if self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
+                subscription_manager = self.redis_subscriptions
+            elif self.subscriptions:
+                subscription_manager = self.subscriptions
+
+            if (self.config.stop_loss_enabled or self.config.take_profit_enabled) and self.transaction_executor and subscription_manager:
+                self.token_price_risk_manager = TokenPriceRiskManager(
+                    config=self.config,
+                    position_queue_manager=self.queue_manager,
+                    transaction_executor=self.transaction_executor,
+                    price_client=self.moralis_client,
+                    position_event_bus=self.position_event_bus,
+                    notification_manager=self.notification_manager,
+                    subscription_manager=subscription_manager
+                )
+                await self.token_price_risk_manager.start()
+                self._logger.debug("TokenPriceRiskManager inicializado y ejecutándose")
 
             if not self.queue_manager.pending_queue:
                 error_msg = "PendingPositionQueue no inicializado"
@@ -517,10 +540,22 @@ class CopyTrading:
             # Desuscribir y desconectar WebSocket de PumpFun para detener pings
             try:
                 if self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
+                    self._logger.debug("Desuscribiendo traders del consumidor Redis de PumpFun...")
+                    # Desuscribir todos los traders antes de desconectar
+                    if self.config.traders:
+                        trader_addresses = [trader.wallet_address for trader in self.config.traders]
+                        await self.redis_subscriptions.unsubscribe_account_trade(trader_addresses)
+                        self._logger.debug(f"Desuscrito de {len(trader_addresses)} traders")
                     self._logger.debug("Desconectando consumidor Redis de PumpFun...")
                     await self.redis_subscriptions.disconnect()
                     self._logger.debug("Consumidor Redis de PumpFun desconectado")
                 elif self.subscriptions and self.ws_client:
+                    self._logger.debug("Desuscribiendo traders del cliente WebSocket de PumpFun...")
+                    # Desuscribir todos los traders antes de desconectar
+                    if self.config.traders:
+                        trader_addresses = [trader.wallet_address for trader in self.config.traders]
+                        await self.subscriptions.unsubscribe_account_trade(trader_addresses)
+                        self._logger.debug(f"Desuscrito de {len(trader_addresses)} traders")
                     self._logger.debug("Desconectando cliente WebSocket de PumpFun...")
                     await self.subscriptions.disconnect()
                     self._logger.debug("Interfaz de suscripciones PumpFun desconectada")
@@ -548,6 +583,14 @@ class CopyTrading:
                     self._logger.debug("PositionTimeoutManager detenido")
                 except Exception as e:
                     self._logger.error(f"Error deteniendo PositionTimeoutManager: {e}")
+
+            # Detener TokenPriceRiskManager
+            if self.token_price_risk_manager:
+                try:
+                    await self.token_price_risk_manager.stop()
+                    self._logger.debug("TokenPriceRiskManager detenido")
+                except Exception as e:
+                    self._logger.error(f"Error deteniendo TokenPriceRiskManager: {e}")
 
             # Detener DrawdownManager
             if self.drawdown_manager:

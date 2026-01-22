@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 import redis.asyncio as aioredis
+from cachetools import TTLCache
 
 from logging_system import AppLogger
 from .api_client import PumpFunWebSocketApiClient
@@ -25,7 +26,7 @@ class RedisBridgeConfig:
     api_key: Optional[str] = None
     inactivity_watch_seconds: int = 600
     websocket_timeout: int = 60
-    keep_new_token_subscription_active: bool = False
+    duplicate_signature_cache_ttl: int = 60  # TTL para cache de firmas duplicadas en segundos (default: 60s)
 
 
 class PumpFunRedisBridgeService:
@@ -33,12 +34,15 @@ class PumpFunRedisBridgeService:
 
     COMMAND_SUBSCRIBE_ACCOUNT = "subscribe_account_trade"
     COMMAND_UNSUBSCRIBE_ACCOUNT = "unsubscribe_account_trade"
+    COMMAND_SUBSCRIBE_TOKEN = "subscribe_token_trade"
+    COMMAND_UNSUBSCRIBE_TOKEN = "unsubscribe_token_trade"
     COMMAND_SUBSCRIBE_NEW_TOKEN = "subscribe_new_token"
     COMMAND_UNSUBSCRIBE_NEW_TOKEN = "unsubscribe_new_token"
     COMMAND_UNSUBSCRIBE_ALL = "unsubscribe_all"
     COMMAND_PING = "ping"
 
     EVENT_ACCOUNT_TRADE = "account_trade"
+    EVENT_TOKEN_TRADE = "token_trade"
     EVENT_NEW_TOKEN = "new_token"
     EVENT_ERROR = "error"
     EVENT_SYSTEM = "system"
@@ -54,6 +58,7 @@ class PumpFunRedisBridgeService:
             api_key=config.api_key,
             websocket_timeout=config.websocket_timeout,
             inactivity_watch_seconds=config.inactivity_watch_seconds,
+            max_reconnect_attempts=-1
         )
         self._subscriptions = PumpFunSubscriptions(ws_client=self._ws_client)
 
@@ -64,10 +69,23 @@ class PumpFunRedisBridgeService:
         self._client_accounts: defaultdict[str, Set[str]] = defaultdict(set)
         # Mapea account address → set de client_ids que siguen esa cuenta (índice inverso)
         self._account_clients: defaultdict[str, Set[str]] = defaultdict(set)
+        # Mapea client_id → set de token addresses que sigue ese cliente
+        self._client_tokens: defaultdict[str, Set[str]] = defaultdict(set)
+        # Mapea token address → set de client_ids que siguen ese token (índice inverso)
+        self._token_clients: defaultdict[str, Set[str]] = defaultdict(set)
         # Set de client_ids suscritos a nuevos tokens (suscripción global, sin keys)
         self._new_token_clients: Set[str] = set()
         # Flag para saber si ya estamos suscritos a nuevos tokens en el WebSocket
         self._new_token_subscribed = False
+
+        # Cache de firmas procesadas para evitar mensajes duplicados
+        # Cuando un trade llega tanto por subscribeAccountTrade como subscribeTokenTrade,
+        # solo se procesa una vez usando la signature como clave
+        signature_cache_ttl = self._config.duplicate_signature_cache_ttl
+        self._processed_signatures: TTLCache[str, bool] = TTLCache(
+            maxsize=10000,  # Manejar hasta 10000 firmas únicas
+            ttl=signature_cache_ttl
+        )
 
         # Locks
         self._subscription_lock = asyncio.Lock()
@@ -109,16 +127,6 @@ class PumpFunRedisBridgeService:
         await self._ws_client.connect()
         self._ws_client.set_error_callback(self._handle_ws_error_event)
         self._logger.debug("Cliente WebSocket PumpFun conectado")
-
-        # Si la bandera está activa, suscribirse automáticamente a nuevos tokens
-        # para mantener el WebSocket activo incluso sin consumidores
-        if self._config.keep_new_token_subscription_active:
-            self._logger.info("Bandera keep_new_token_subscription_active activa: suscribiendo a nuevos tokens automáticamente")
-            await self._subscriptions.subscribe_new_token(
-                callback=self._handle_new_token_event,
-            )
-            self._new_token_subscribed = True
-            self._logger.debug("Suscripción automática a nuevos tokens activada para mantener WebSocket vivo")
 
         self._command_task = asyncio.create_task(self._command_loop())
         self._running = True
@@ -166,6 +174,8 @@ class PumpFunRedisBridgeService:
 
         self._client_accounts.clear()
         self._account_clients.clear()
+        self._client_tokens.clear()
+        self._token_clients.clear()
         self._new_token_clients.clear()
         self._new_token_subscribed = False
         self._running = False
@@ -227,6 +237,12 @@ class PumpFunRedisBridgeService:
         elif action == self.COMMAND_UNSUBSCRIBE_ACCOUNT:
             keys = self._sanitize_keys(payload.get("keys", []))
             await self._handle_unsubscribe_account_trade(client_id, keys, request_id)
+        elif action == self.COMMAND_SUBSCRIBE_TOKEN:
+            keys = self._sanitize_keys(payload.get("keys", []))
+            await self._handle_subscribe_token_trade(client_id, keys, request_id)
+        elif action == self.COMMAND_UNSUBSCRIBE_TOKEN:
+            keys = self._sanitize_keys(payload.get("keys", []))
+            await self._handle_unsubscribe_token_trade(client_id, keys, request_id)
         elif action == self.COMMAND_SUBSCRIBE_NEW_TOKEN:
             await self._handle_subscribe_new_token(client_id, request_id)
         elif action == self.COMMAND_UNSUBSCRIBE_NEW_TOKEN:
@@ -293,7 +309,7 @@ class PumpFunRedisBridgeService:
             self._logger.debug(f"Suscribiendo {len(new_keys)} cuentas nuevas al WebSocket de PumpFun")
             await self._subscriptions.subscribe_account_trade(
                 account_addresses=new_keys,
-                callback=self._handle_account_trade_event,
+                callback=self._handle_trade_event,  # Usar handler común
             )
             self._logger.debug(
                 f"Suscripción PumpFun agregada para {len(new_keys)} cuentas nuevas"
@@ -318,21 +334,23 @@ class PumpFunRedisBridgeService:
         client_id: str,
         keys: Iterable[str],
         request_id: Optional[str],
+        skip_response: bool = False,
     ) -> None:
         keys = list({key for key in keys if key})
         self._logger.debug(f"Procesando desuscripción de {len(keys)} cuentas para cliente {client_id}")
 
         if not keys:
             self._logger.debug(f"Lista de keys vacía para desuscripción de cliente {client_id}")
-            await self._send_response(
-                client_id,
-                {
-                    "type": "subscription",
-                    "request_id": request_id,
-                    "status": "error",
-                    "message": "Lista de keys vacía",
-                },
-            )
+            if not skip_response and request_id is not None:
+                await self._send_response(
+                    client_id,
+                    {
+                        "type": "subscription",
+                        "request_id": request_id,
+                        "status": "error",
+                        "message": "Lista de keys vacía",
+                    },
+                )
             return
 
         to_unsubscribe: List[str] = []
@@ -361,17 +379,137 @@ class PumpFunRedisBridgeService:
         else:
             self._logger.debug(f"Ninguna cuenta requiere desuscripción del WebSocket")
 
+        if not skip_response and request_id is not None:
+            await self._send_response(
+                client_id,
+                {
+                    "type": "subscription",
+                    "request_id": request_id,
+                    "status": "ok",
+                    "action": self.COMMAND_UNSUBSCRIBE_ACCOUNT,
+                    "keys": keys,
+                    "released_keys": to_unsubscribe,
+                },
+            )
+
+    async def _handle_subscribe_token_trade(
+        self,
+        client_id: str,
+        keys: Iterable[str],
+        request_id: Optional[str],
+    ) -> None:
+        keys = list({key for key in keys if key})
+        self._logger.debug(f"Procesando suscripción de {len(keys)} tokens para cliente {client_id}")
+
+        if not keys:
+            self._logger.debug(f"Lista de keys vacía para cliente {client_id}")
+            await self._send_response(
+                client_id,
+                {
+                    "type": "subscription",
+                    "request_id": request_id,
+                    "status": "error",
+                    "message": "Lista de keys vacía",
+                },
+            )
+            return
+
+        new_keys: List[str] = []
+        async with self._subscription_lock:
+            for key in keys:
+                self._client_tokens[client_id].add(key)
+                clients = self._token_clients[key]
+                was_empty = not clients
+                clients.add(client_id)
+                if was_empty:
+                    new_keys.append(key)
+
+        if new_keys:
+            self._logger.debug(f"Suscribiendo {len(new_keys)} tokens nuevos al WebSocket de PumpFun")
+            await self._subscriptions.subscribe_token_trade(
+                token_addresses=new_keys,
+                callback=self._handle_trade_event,  # Usar handler común
+            )
+            self._logger.debug(
+                f"Suscripción PumpFun agregada para {len(new_keys)} tokens nuevos"
+            )
+        else:
+            self._logger.debug(f"Todos los tokens solicitados ya estaban suscritos")
+
         await self._send_response(
             client_id,
             {
                 "type": "subscription",
                 "request_id": request_id,
                 "status": "ok",
-                "action": self.COMMAND_UNSUBSCRIBE_ACCOUNT,
+                "action": self.COMMAND_SUBSCRIBE_TOKEN,
                 "keys": keys,
-                "released_keys": to_unsubscribe,
+                "new_keys": new_keys,
             },
         )
+
+    async def _handle_unsubscribe_token_trade(
+        self,
+        client_id: str,
+        keys: Iterable[str],
+        request_id: Optional[str],
+        skip_response: bool = False,
+    ) -> None:
+        keys = list({key for key in keys if key})
+        self._logger.debug(f"Procesando desuscripción de {len(keys)} tokens para cliente {client_id}")
+
+        if not keys:
+            self._logger.debug(f"Lista de keys vacía para desuscripción de cliente {client_id}")
+            if not skip_response and request_id is not None:
+                await self._send_response(
+                    client_id,
+                    {
+                        "type": "subscription",
+                        "request_id": request_id,
+                        "status": "error",
+                        "message": "Lista de keys vacía",
+                    },
+                )
+            return
+
+        to_unsubscribe: List[str] = []
+        async with self._subscription_lock:
+            for key in keys:
+                clients = self._token_clients.get(key)
+                if not clients or client_id not in clients:
+                    continue
+                clients.discard(client_id)
+                if not clients:
+                    to_unsubscribe.append(key)
+                    self._token_clients.pop(key, None)
+
+            client_keys = self._client_tokens.get(client_id)
+            if client_keys:
+                client_keys.difference_update(keys)
+                if not client_keys:
+                    self._client_tokens.pop(client_id, None)
+
+        if to_unsubscribe:
+            self._logger.debug(f"Desuscribiendo {len(to_unsubscribe)} tokens del WebSocket de PumpFun")
+            await self._subscriptions.unsubscribe_token_trade(to_unsubscribe)
+            self._logger.debug(
+                f"Suscripción PumpFun removida para {len(to_unsubscribe)} tokens"
+            )
+        else:
+            self._logger.debug(f"Ningún token requiere desuscripción del WebSocket")
+
+        if not skip_response and request_id is not None:
+            await self._send_response(
+                client_id,
+                {
+                    "type": "subscription",
+                    "request_id": request_id,
+                    "status": "ok",
+                    "action": self.COMMAND_UNSUBSCRIBE_TOKEN,
+                    "keys": keys,
+                    "released_keys": to_unsubscribe,
+                },
+            )
 
     async def _handle_subscribe_new_token(
         self,
@@ -380,13 +518,11 @@ class PumpFunRedisBridgeService:
     ) -> None:
         self._logger.debug(f"Procesando suscripción a nuevos tokens para cliente {client_id}")
 
-        was_empty = False
         needs_subscription = False
         async with self._subscription_lock:
             was_empty = not self._new_token_clients
             self._new_token_clients.add(client_id)
-            # Solo necesitamos suscribirnos si no hay clientes previos Y no está ya suscrito
-            # (puede estar suscrito por la bandera keep_new_token_subscription_active)
+            # Solo necesitamos suscribirnos si no hay clientes previos y no está ya suscrito
             needs_subscription = was_empty and not self._new_token_subscribed
 
         if needs_subscription:
@@ -396,10 +532,8 @@ class PumpFunRedisBridgeService:
             )
             self._new_token_subscribed = True
             self._logger.debug("Suscripción PumpFun agregada para nuevos tokens")
-        elif self._new_token_subscribed:
-            self._logger.debug("Cliente agregado a suscripción existente de nuevos tokens")
         else:
-            self._logger.debug("Ya había clientes suscritos a nuevos tokens")
+            self._logger.debug("Cliente agregado a suscripción existente de nuevos tokens")
 
         await self._send_response(
             client_id,
@@ -415,6 +549,7 @@ class PumpFunRedisBridgeService:
         self,
         client_id: str,
         request_id: Optional[str],
+        skip_response: bool = False,
     ) -> None:
         self._logger.debug(f"Procesando desuscripción de nuevos tokens para cliente {client_id}")
 
@@ -422,8 +557,8 @@ class PumpFunRedisBridgeService:
         async with self._subscription_lock:
             if client_id in self._new_token_clients:
                 self._new_token_clients.discard(client_id)
-                # Solo desuscribir si no hay más clientes Y la bandera no está activa
-                if not self._new_token_clients and not self._config.keep_new_token_subscription_active:
+                # Solo desuscribir si no hay más clientes
+                if not self._new_token_clients:
                     should_unsubscribe = True
 
         if should_unsubscribe:
@@ -431,95 +566,163 @@ class PumpFunRedisBridgeService:
             await self._subscriptions.unsubscribe_new_token()
             self._new_token_subscribed = False
             self._logger.debug("Suscripción PumpFun removida para nuevos tokens")
-        elif self._config.keep_new_token_subscription_active and not self._new_token_clients:
-            self._logger.debug("Cliente desuscrito, pero manteniendo suscripción activa por bandera keep_new_token_subscription_active")
+        elif client_id not in self._new_token_clients:
+            self._logger.debug("Cliente no estaba suscrito a nuevos tokens")
         else:
-            self._logger.debug("Cliente no estaba suscrito o aún hay otros clientes suscritos")
+            self._logger.debug("Aún hay otros clientes suscritos a nuevos tokens")
 
-        await self._send_response(
-            client_id,
-            {
-                "type": "subscription",
-                "request_id": request_id,
-                "status": "ok",
-                "action": self.COMMAND_UNSUBSCRIBE_NEW_TOKEN,
-            },
-        )
-
-    async def _handle_unsubscribe_all(self, client_id: str, request_id: Optional[str]) -> None:
-        async with self._subscription_lock:
-            keys = list(self._client_accounts.get(client_id, set()))
-            was_subscribed_new_token = client_id in self._new_token_clients
-
-        self._logger.debug(
-            f"Desuscribiendo todas las suscripciones del cliente {client_id} "
-            f"({len(keys)} cuentas, nuevos tokens: {was_subscribed_new_token})"
-        )
-
-        # Desuscribir de cuentas
-        if keys:
-            await self._handle_unsubscribe_account_trade(client_id, keys, None)
-
-        # Desuscribir de nuevos tokens
-        if was_subscribed_new_token:
-            await self._handle_unsubscribe_new_token(client_id, None)
-
-        # Si no había suscripciones, enviar respuesta
-        if not keys and not was_subscribed_new_token:
-            self._logger.debug(f"Cliente {client_id} no tenía suscripciones activas")
+        if not skip_response and request_id is not None:
             await self._send_response(
                 client_id,
                 {
                     "type": "subscription",
                     "request_id": request_id,
                     "status": "ok",
-                    "action": self.COMMAND_UNSUBSCRIBE_ALL,
-                    "keys": [],
-                    "released_keys": [],
+                    "action": self.COMMAND_UNSUBSCRIBE_NEW_TOKEN,
                 },
             )
+
+    async def _handle_unsubscribe_all(self, client_id: str, request_id: Optional[str]) -> None:
+        async with self._subscription_lock:
+            account_keys = list(self._client_accounts.get(client_id, set()))
+            token_keys = list(self._client_tokens.get(client_id, set()))
+            was_subscribed_new_token = client_id in self._new_token_clients
+
+        self._logger.debug(
+            f"Desuscribiendo todas las suscripciones del cliente {client_id} "
+            f"({len(account_keys)} cuentas, {len(token_keys)} tokens, nuevos tokens: {was_subscribed_new_token})"
+        )
+
+        # Desuscribir de cuentas (skip_response=True para evitar respuestas intermedias)
+        if account_keys:
+            await self._handle_unsubscribe_account_trade(client_id, account_keys, None, skip_response=True)
+
+        # Desuscribir de tokens (skip_response=True para evitar respuestas intermedias)
+        if token_keys:
+            await self._handle_unsubscribe_token_trade(client_id, token_keys, None, skip_response=True)
+
+        # Desuscribir de nuevos tokens (skip_response=True para evitar respuestas intermedias)
+        if was_subscribed_new_token:
+            await self._handle_unsubscribe_new_token(client_id, None, skip_response=True)
+
+        # Siempre enviar respuesta final con el request_id original
+        self._logger.debug(f"Enviando respuesta final de unsubscribe_all para cliente {client_id}")
+        await self._send_response(
+            client_id,
+            {
+                "type": "subscription",
+                "request_id": request_id,
+                "status": "ok",
+                "action": self.COMMAND_UNSUBSCRIBE_ALL,
+                "keys": account_keys + token_keys,
+                "released_keys": account_keys + token_keys,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Eventos
     # ------------------------------------------------------------------
 
-    async def _handle_account_trade_event(self, data: Dict[str, Any]) -> None:
+    async def _handle_trade_event(self, data: Dict[str, Any]) -> None:
+        """
+        Handler común para eventos de trades que determina automáticamente
+        si el trade viene de subscribeAccountTrade o subscribeTokenTrade.
+        
+        Los mensajes de ambos métodos llegan en el mismo formato, por lo que
+        verificamos si el traderPublicKey está en _account_clients o si el
+        mint está en _token_clients para determinar la fuente.
+        
+        Evita duplicados usando una cache de firmas (signature) para que el mismo
+        trade no se procese múltiples veces cuando llega tanto por AccountTrade
+        como por TokenTrade.
+        
+        Args:
+            data: Datos del trade recibido
+        """
+        # Verificar si este trade ya fue procesado (evitar duplicados)
+        signature = data.get("signature")
+        if signature:
+            if signature in self._processed_signatures:
+                self._logger.debug(
+                    f"Trade duplicado detectado y descartado (signature: {signature[:16]}...)"
+                )
+                return
+
+            # Marcar esta firma como procesada
+            self._processed_signatures[signature] = True
+
         trader = data.get("traderPublicKey")
-        if not trader:
-            self._logger.debug("Evento sin traderPublicKey recibido, se ignora")
+        token = data.get("mint")
+
+        if not trader and not token:
+            self._logger.debug("Evento de trade sin traderPublicKey ni mint, se ignora")
             return
+
+        # Determinar tipo de evento y consumidores
+        account_consumers: List[str] = []
+        token_consumers: List[str] = []
 
         async with self._subscription_lock:
-            consumers = list(self._account_clients.get(trader, set()))
+            # Verificar si es un AccountTrade
+            if trader and trader in self._account_clients:
+                account_consumers = list(self._account_clients[trader])
 
-        if not consumers:
-            self._logger.debug(f"Evento de trade recibido para {trader[:8]}... pero sin consumidores")
-            return
+            # Verificar si es un TokenTrade
+            if token and token in self._token_clients:
+                token_consumers = list(self._token_clients[token])
 
-        self._logger.debug(f"Evento de trade para {trader[:8]}... distribuido a {len(consumers)} cliente(s)")
+        # Procesar AccountTrade si hay consumidores
+        if account_consumers and trader:
+            trader_preview = trader[:8] if trader else "N/A"
+            self._logger.debug(
+                f"Evento de trade para cuenta {trader_preview}... "
+                f"distribuido a {len(account_consumers)} cliente(s) como AccountTrade"
+            )
+            account_message = json.dumps(
+                {
+                    "event": self.EVENT_ACCOUNT_TRADE,
+                    "trader": trader,
+                    "data": data,
+                }
+            )
+            await asyncio.gather(
+                *[self._publish_event(client_id, account_message) for client_id in account_consumers],
+                return_exceptions=True,
+            )
 
-        message = json.dumps(
-            {
-                "event": self.EVENT_ACCOUNT_TRADE,
-                "trader": trader,
-                "data": data,
-            }
-        )
+        # Procesar TokenTrade si hay consumidores
+        if token_consumers and token:
+            token_preview = token[:8] if token else "N/A"
+            self._logger.debug(
+                f"Evento de trade para token {token_preview}... "
+                f"distribuido a {len(token_consumers)} cliente(s) como TokenTrade"
+            )
+            token_message = json.dumps(
+                {
+                    "event": self.EVENT_TOKEN_TRADE,
+                    "token": token,
+                    "data": data,
+                }
+            )
+            await asyncio.gather(
+                *[self._publish_event(client_id, token_message) for client_id in token_consumers],
+                return_exceptions=True,
+            )
 
-        await asyncio.gather(
-            *[self._publish_event(client_id, message) for client_id in consumers],
-            return_exceptions=True,
-        )
+        # Si no hay consumidores para ninguno de los dos, log de advertencia
+        if not account_consumers and not token_consumers:
+            self._logger.debug(
+                f"Evento de trade recibido pero sin consumidores. "
+                f"Trader: {trader[:8] if trader else 'N/A'}..., "
+                f"Token: {token[:8] if token else 'N/A'}..."
+            )
 
     async def _handle_new_token_event(self, data: Dict[str, Any]) -> None:
         async with self._subscription_lock:
             consumers = list(self._new_token_clients)
 
         if not consumers:
-            if self._config.keep_new_token_subscription_active:
-                pass # La suscripción se mantiene activa para mantener el WebSocket vivo
-            else:
-                self._logger.debug("Evento de nuevo token recibido pero sin consumidores")
+            self._logger.debug("Evento de nuevo token recibido pero sin consumidores")
             return
 
         self._logger.debug(f"Evento de nuevo token distribuido a {len(consumers)} cliente(s)")
@@ -551,8 +754,8 @@ class PumpFunRedisBridgeService:
 
     async def _handle_ws_error_event(self, data: Dict[str, Any]) -> None:
         async with self._subscription_lock:
-            # Obtener todos los clientes (tanto de cuentas como de nuevos tokens)
-            clients = set(self._client_accounts.keys()) | self._new_token_clients
+            # Obtener todos los clientes (tanto de cuentas, tokens como de nuevos tokens)
+            clients = set(self._client_accounts.keys()) | set(self._client_tokens.keys()) | self._new_token_clients
             clients = list(clients)
 
         if not clients:
@@ -594,16 +797,19 @@ class PumpFunRedisBridgeService:
             "running": self._running,
             "redis_url": self._config.redis_url,
             "namespace": self._config.namespace,
-            "clients": len(self._client_accounts),
+            "clients_accounts": len(self._client_accounts),
             "accounts": len(self._account_clients),
+            "clients_tokens": len(self._client_tokens),
+            "tokens": len(self._token_clients),
             "new_token_clients": len(self._new_token_clients),
             "new_token_subscribed": self._new_token_subscribed,
-            "keep_new_token_subscription_active": self._config.keep_new_token_subscription_active,
+            "processed_signatures_count": len(self._processed_signatures),
         }
         self._logger.debug(
-            f"Estado del servicio consultado: {status['clients']} clientes, "
-            f"{status['accounts']} cuentas, {status['new_token_clients']} clientes de nuevos tokens, "
-            f"keep_active={status['keep_new_token_subscription_active']}"
+            f"Estado del servicio consultado: {status['clients_accounts']} clientes de cuentas, "
+            f"{status['accounts']} cuentas, {status['clients_tokens']} clientes de tokens, "
+            f"{status['tokens']} tokens, {status['new_token_clients']} clientes de nuevos tokens, "
+            f"{status['processed_signatures_count']} firmas en cache"
         )
         return status
 
@@ -641,13 +847,10 @@ async def run_service(config: RedisBridgeConfig) -> None:
 def from_env() -> RedisBridgeConfig:
     import os
 
-    keep_new_token_active = os.getenv("PUMPFUN_KEEP_NEW_TOKEN_ACTIVE", "false").lower() in ("true", "1", "yes")
-
     return RedisBridgeConfig(
         redis_url=os.getenv("PUMPFUN_REDIS_URL", "redis://localhost:6379/0"),
         namespace=os.getenv("PUMPFUN_REDIS_NAMESPACE", "pumpfun"),
         api_key=os.getenv("PUMPFUN_API_KEY"),
-        keep_new_token_subscription_active=keep_new_token_active,
     )
 
 

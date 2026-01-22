@@ -266,6 +266,15 @@ class CopyTradingConfig:
     drawdown_action: Literal["block_buys", "stop_trading", "notify_only"] = "block_buys"  # Acción cuando se excede el umbral
     drawdown_recovery_threshold_percent: Optional[str] = None  # Umbral de recuperación porcentual para reactivar trading (ej: "10.0" = 10%)
 
+    # Stop Loss y Take Profit (gestión de riesgo por posición)
+    stop_loss_enabled: bool = False  # Habilitar trailing stop loss
+    stop_loss_percentage: Optional[str] = None  # Porcentaje de pérdida para liquidar (ej: "10.0" = 10%)
+    take_profit_enabled: bool = False  # Habilitar take profit
+    take_profit_percentage: Optional[str] = None  # Porcentaje de ganancia para liquidar (ej: "20.0" = 20%)
+    risk_management_max_liquidation_retries: int = 3  # Máximo número de reintentos de liquidación antes de descartar posición
+    risk_management_max_concurrent_check_positions: int = 10  # Máximo número de verificaciones de posiciones concurrentes (default: 10)
+    risk_management_sol_price_cache_ttl: int = 3600  # TTL del cache de precio SOL/USD en segundos (default: 1h, solo para notificaciones)
+
     # Persistencia
     data_path: str = "copy_trading/data"
     save_interval_seconds: int = 300  # 5 minutos
@@ -473,6 +482,13 @@ class CopyTradingConfig:
             'drawdown_check_interval': self.drawdown_check_interval,
             'drawdown_action': self.drawdown_action,
             'drawdown_recovery_threshold_percent': self.drawdown_recovery_threshold_percent,
+            'stop_loss_enabled': self.stop_loss_enabled,
+            'stop_loss_percentage': self.stop_loss_percentage,
+            'take_profit_enabled': self.take_profit_enabled,
+            'take_profit_percentage': self.take_profit_percentage,
+            'risk_management_max_liquidation_retries': self.risk_management_max_liquidation_retries,
+            'risk_management_max_concurrent_check_positions': self.risk_management_max_concurrent_check_positions,
+            'risk_management_sol_price_cache_ttl': self.risk_management_sol_price_cache_ttl,
             'data_path': self.data_path,
             'save_interval_seconds': self.save_interval_seconds,
             'websocket_reconnect_delay': self.websocket_reconnect_delay,
@@ -602,6 +618,13 @@ class CopyTradingConfig:
             drawdown_check_interval=data.get('drawdown_check_interval', 60),
             drawdown_action=data.get('drawdown_action', 'block_buys'),
             drawdown_recovery_threshold_percent=data.get('drawdown_recovery_threshold_percent'),
+            stop_loss_enabled=data.get('stop_loss_enabled', False),
+            stop_loss_percentage=data.get('stop_loss_percentage'),
+            take_profit_enabled=data.get('take_profit_enabled', False),
+            take_profit_percentage=data.get('take_profit_percentage'),
+            risk_management_max_liquidation_retries=data.get('risk_management_max_liquidation_retries', 3),
+            risk_management_max_concurrent_check_positions=data.get('risk_management_max_concurrent_check_positions', 10),
+            risk_management_sol_price_cache_ttl=data.get('risk_management_sol_price_cache_ttl', 3600),
             data_path=data.get('data_path', 'copy_trading/data'),
             save_interval_seconds=data.get('save_interval_seconds', 300),
 
