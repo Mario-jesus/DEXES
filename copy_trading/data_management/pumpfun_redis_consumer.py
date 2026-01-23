@@ -45,6 +45,8 @@ class PumpFunRedisSubscriptions:
         self._account_callback: Optional[Callable[[Any], Any]] = None
         self._token_callback: Optional[Callable[[Any], Any]] = None
         self._error_callback: Optional[Callable[[Any], Any]] = None
+        self._disconnect_time_exceeded_callback: Optional[Callable[[Any], Any]] = None
+        self._reconnect_after_disconnect_time_exceeded_callback: Optional[Callable[[Any], Any]] = None
         self._global_callback: Optional[Callable[[Any], Any]] = None
 
         self._active_accounts: Set[str] = set()
@@ -256,6 +258,16 @@ class PumpFunRedisSubscriptions:
         self._error_callback = callback
         self._logger.debug("Callback de error registrado")
 
+    def set_disconnect_time_exceeded_callback(self, callback: Callable[[Any], Any]) -> None:
+        """Establece callback para eventos de desconexión excedida"""
+        self._disconnect_time_exceeded_callback = callback
+        self._logger.debug("Callback de desconexión excedida registrado")
+
+    def set_reconnect_after_disconnect_time_exceeded_callback(self, callback: Callable[[Any], Any]) -> None:
+        """Establece callback para eventos de reconexión después de desconexión excedida"""
+        self._reconnect_after_disconnect_time_exceeded_callback = callback
+        self._logger.debug("Callback de reconexión después de desconexión excedida registrado")
+
     def set_global_callback(self, callback: Callable[[Any], Any]) -> None:
         self._global_callback = callback
         self._logger.debug("Callback global registrado")
@@ -329,6 +341,12 @@ class PumpFunRedisSubscriptions:
         elif event_type == "error":
             self._logger.warning(f"Evento de error recibido: {payload.get('data')}")
             await self._dispatch_callback(self._error_callback, payload.get("data"))
+        elif event_type == "disconnect_time_exceeded":
+            self._logger.warning(f"Evento de desconexión excedida recibido: {payload.get('data')}")
+            await self._dispatch_callback(self._disconnect_time_exceeded_callback, payload.get("data"))
+        elif event_type == "reconnect_after_disconnect_time_exceeded":
+            self._logger.warning(f"Evento de reconexión después de desconexión excedida recibido: {payload.get('data')}")
+            await self._dispatch_callback(self._reconnect_after_disconnect_time_exceeded_callback, payload.get("data"))
         else:
             self._logger.debug(f"Evento no clasificado: {event_type}")
             await self._dispatch_callback(self._global_callback, payload)

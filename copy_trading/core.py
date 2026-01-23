@@ -470,6 +470,16 @@ class CopyTrading:
             if self.config.use_pumpfun_redis_bridge and self.redis_subscriptions:
                 #self.redis_subscriptions.set_error_callback(self.minimum_balance_handler)
                 #self._logger.debug("Callback de errores registrado en consumidor Redis")
+
+                # Configurar callbacks para eventos de desconexión
+                self.redis_subscriptions.set_disconnect_time_exceeded_callback(
+                    self._handle_disconnect_time_exceeded
+                )
+                self.redis_subscriptions.set_reconnect_after_disconnect_time_exceeded_callback(
+                    self._handle_reconnect_after_disconnect_time_exceeded
+                )
+                self._logger.debug("Callbacks de desconexión registrados en consumidor Redis")
+
                 # Suscribirse a trades de los traders
                 self._logger.debug(f"Suscribiendo a {len(trader_addresses)} traders: {[addr[:8] + '...' for addr in trader_addresses]}")
                 await self.redis_subscriptions.subscribe_account_trade(
@@ -480,6 +490,15 @@ class CopyTrading:
             elif self.subscriptions and self.ws_client:
                 self.ws_client.set_error_callback(self.minimum_balance_handler)
                 self._logger.debug("Callback de errores en WebSocket registrado")
+                # Configurar callbacks para eventos de desconexión
+                self.subscriptions.set_callback_on_disconnect_time_exceeded(
+                    self._handle_disconnect_time_exceeded
+                )
+                self.subscriptions.set_callback_on_reconnect_after_disconnect_time_exceeded(
+                    self._handle_reconnect_after_disconnect_time_exceeded
+                )
+                self._logger.debug("Callbacks de desconexión registrados en suscripciones WebSocket")
+
                 # Suscribirse a trades de los traders
                 self._logger.debug(f"Suscribiendo a {len(trader_addresses)} traders: {[addr[:8] + '...' for addr in trader_addresses]}")
                 await self.subscriptions.subscribe_account_trade(
@@ -1294,3 +1313,75 @@ class CopyTrading:
 
         except Exception as e:
             self._logger.warning(f"No se pudieron persistir entidades iniciales (traders/mints): {e}")
+
+    # ------------------------------------------------------------------
+    # Handlers de eventos de desconexión
+    # ------------------------------------------------------------------
+
+    async def _handle_disconnect_time_exceeded(self, data: Dict[str, Any]) -> None:
+        """
+        Maneja el evento de desconexión excedida.
+        Notifica y liquida todas las posiciones.
+        """
+        disconnect_time = data.get('disconnect_time', 0)
+        last_closed_time = data.get('last_connection_closed_time')
+
+        self._logger.warning(
+            f"Tiempo de desconexión excedido: {disconnect_time:.2f}s desde {last_closed_time}"
+        )
+
+        # Notificar a través de notification_manager
+        if self.notification_manager:
+            notification_msg = (
+                f"⚠️ DISCONNECTION EXCEEDED\n"
+                f"The WebSocket has been disconnected for {disconnect_time:.2f}s\n"
+                f"Liquidating all positions for safety"
+            )
+            await self.notification_manager.notify_system(notification_msg, "error")
+
+        # Liquidar todas las posiciones
+        if self.liquidations:
+            try:
+                self._logger.info("Iniciando liquidación de todas las posiciones debido a desconexión excedida")
+                await self.liquidations.run()
+                self._logger.info("Liquidación completada después de desconexión excedida")
+
+                if self.notification_manager:
+                    await self.notification_manager.notify_system(
+                        "✅ Position liquidation completed after disconnection exceeded",
+                        "success"
+                    )
+            except Exception as e:
+                self._logger.error(f"Error durante liquidación por desconexión excedida: {e}", exc_info=True)
+                if self.notification_manager:
+                    await self.notification_manager.notify_system(
+                        f"❌ Error during liquidation: {str(e)}",
+                        "error"
+                    )
+        else:
+            self._logger.warning("Liquidations no disponible, no se pueden liquidar posiciones")
+
+    async def _handle_reconnect_after_disconnect_time_exceeded(self, data: Dict[str, Any]) -> None:
+        """
+        Maneja el evento de reconexión después de desconexión excedida.
+        Solo notifica, no liquida posiciones.
+        """
+        disconnect_time = data.get('disconnect_time', 0)
+        last_closed_time = data.get('last_connection_closed_time')
+        last_connected_time = data.get('last_connection_connected_time')
+
+        self._logger.warning(
+            f"Reconexión después de desconexión excedida: "
+            f"desconectado por {disconnect_time:.2f}s, "
+            f"reconectado en {last_connected_time}"
+        )
+
+        # Solo notificar
+        if self.notification_manager:
+            notification_msg = (
+                f"🔄 RECONNECTION AFTER DISCONNECTION EXCEEDED\n"
+                f"The WebSocket reconnected after being disconnected for {disconnect_time:.2f}s\n"
+                f"Disconnection: {last_closed_time}\n"
+                f"Reconnection: {last_connected_time}"
+            )
+            await self.notification_manager.notify_system(notification_msg, "warning")

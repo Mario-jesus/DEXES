@@ -3,7 +3,7 @@
 PumpFun Subscriptions - Clase de alto nivel para gestionar suscripciones WebSocket
 Proporciona métodos convenientes para suscribirse/desuscribirse de eventos de PumpPortal.
 """
-from typing import List, Callable, Optional, Set, Type, Any, TYPE_CHECKING
+from typing import List, Callable, Optional, Set, Type, Any, Dict, TYPE_CHECKING
 
 from logging_system import AppLogger
 from .api_client import PumpFunWebSocketApiClient, WebSocketMethod
@@ -45,6 +45,36 @@ class PumpFunSubscriptions:
         # Desconectar cliente
         await self.disconnect()
         self._logger.debug("Sesión cerrada correctamente")
+
+    def set_callback_on_disconnect_time_exceeded(self, callback: Callable[[Dict[str, Optional[float]]], Any]):
+        """
+        Establece callback que se ejecuta cuando se excede el tiempo máximo de desconexión.
+        
+        Se ejecuta cuando el WebSocket permanece desconectado por más tiempo del configurado
+        en `max_disconnect_time_seconds`, sin que se haya reconectado.
+        
+        Args:
+            callback: Función (síncrona) que recibe un dict con:
+                - `last_connection_closed_time` (float): Timestamp del cierre de conexión
+                - `last_connection_connected_time` (None): Siempre None (aún no reconectado)
+                - `disconnect_time` (float): Segundos transcurridos desde el cierre
+        """
+        self.ws_client.set_callback_on_disconnect_time_exceeded(callback)
+
+    def set_callback_on_reconnect_after_disconnect_time_exceeded(self, callback: Callable[[Dict[str, Optional[float]]], Any]):
+        """
+        Establece callback que se ejecuta al reconectar DESPUÉS de exceder el tiempo máximo.
+        
+        Se ejecuta cuando: 1) se desconecta, 2) se excede `max_disconnect_time_seconds`,
+        3) se reconecta exitosamente.
+        
+        Args:
+            callback: Función (síncrona) que recibe un dict con:
+                - `last_connection_closed_time` (float): Timestamp del cierre original
+                - `last_connection_connected_time` (float): Timestamp de la reconexión
+                - `disconnect_time` (float): Duración total de desconexión en segundos
+        """
+        self.ws_client.set_callback_on_reconnect_after_disconnect_time_exceeded(callback)
 
     # ==========================================================================
     # MÉTODOS DE SUSCRIPCIÓN

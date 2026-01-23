@@ -1328,33 +1328,37 @@ class TokenPriceRiskManager:
                 )
                 self._logger.debug(f"Posición de liquidación procesada exitosamente")
 
-                # Notificar (usar USD solo para mostrar)
+                # Notificar con formato estructurado
                 if self.notification_manager:
-                    entry_display = f"${entry_price_usd:.10f}" if entry_price_usd else f"{entry_price:.10f} SOL/token"
-                    current_display = f"${current_price_usd:.10f}" if current_price_usd else f"{current_price:.10f} SOL/token"
+                    entry_display = f"${entry_price_usd:.10f} USD" if entry_price_usd else f"{entry_price:.10f} SOL/token"
+                    current_display = f"${current_price_usd:.10f} USD" if current_price_usd else f"{current_price:.10f} SOL/token"
+                    peak_display = f"${peak_price_usd:.10f} USD" if peak_price_usd else f"{peak_price:.10f} SOL/token"
 
                     if reason == "stop_loss":
-                        peak_display = f"${peak_price_usd:.10f}" if peak_price_usd else f"{peak_price:.10f} SOL/token"
-                        message = (
-                            f"🛑 Trailing Stop Loss triggered\n"
-                            f"Position: {position.id}\n"
-                            f"Mint: {position.token_address}\n"
-                            f"Loss from peak: {loss_from_peak:.2f}%\n"
-                            f"Entry: {entry_display}\n"
-                            f"Peak: {peak_display}\n"
-                            f"Current: {current_display}\n"
-                            f"Signature: {liquidation_signature[:16]}..."
-                        )
+                        title = "🛑 <b>Trailing Stop Loss Triggered</b>"
+                        reason_info = f"📉 <b>Loss from peak:</b> {loss_from_peak:.2f}%\n"
                     else:
-                        message = (
-                            f"🎯 Take Profit triggered\n"
-                            f"Position: {position.id}\n"
-                            f"Mint: {position.token_address}\n"
-                            f"Gain: {change_percentage:.2f}%\n"
-                            f"Entry: {entry_display}\n"
-                            f"Current: {current_display}\n"
-                            f"Signature: {liquidation_signature[:16]}..."
-                        )
+                        title = "🎯 <b>Take Profit Triggered</b>"
+                        reason_info = f"📈 <b>Gain:</b> {change_percentage:.2f}%\n"
+
+                    message = (
+                        f"{title}\n\n"
+                        f"📊 <b>Trade Summary</b>\n"
+                        f"{'─'*12}\n"
+                        f"💎 <b>Token:</b> {position.token_address}\n"
+                        f"🔗 <b>Address:</b> {position.token_address}\n\n"
+
+                        f"💰 <b>Liquidation Details</b>\n"
+                        f"{'─'*12}\n"
+                        f"🔑 <b>ID Position:</b> {position.id}\n"
+                        f"🔗 <b>Signature:</b> {liquidation_signature or 'N/A'}\n"
+                        f"📤 <b>Entry Price:</b> {entry_display}\n"
+                        f"📈 <b>Peak Price:</b> {peak_display}\n"
+                        f"📊 <b>Current Price:</b> {current_display}\n"
+                        f"{reason_info}\n"
+                        f"⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+
                     await self.notification_manager.notify_system(message, "warning" if reason == "stop_loss" else "success")
 
             else:

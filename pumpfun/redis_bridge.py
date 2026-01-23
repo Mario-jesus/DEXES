@@ -25,6 +25,7 @@ class RedisBridgeConfig:
     namespace: str = "pumpfun"
     api_key: Optional[str] = None
     inactivity_watch_seconds: int = 600
+    max_disconnect_time_seconds: int = 300
     websocket_timeout: int = 60
     duplicate_signature_cache_ttl: int = 60  # TTL para cache de firmas duplicadas en segundos (default: 60s)
 
@@ -46,6 +47,8 @@ class PumpFunRedisBridgeService:
     EVENT_NEW_TOKEN = "new_token"
     EVENT_ERROR = "error"
     EVENT_SYSTEM = "system"
+    EVENT_DISCONNECT_TIME_EXCEEDED = "disconnect_time_exceeded"
+    EVENT_RECONNECT_AFTER_DISCONNECT_TIME_EXCEEDED = "reconnect_after_disconnect_time_exceeded"
 
     def __init__(self, config: RedisBridgeConfig):
         self._config = config
@@ -58,6 +61,7 @@ class PumpFunRedisBridgeService:
             api_key=config.api_key,
             websocket_timeout=config.websocket_timeout,
             inactivity_watch_seconds=config.inactivity_watch_seconds,
+            max_disconnect_time_seconds=config.max_disconnect_time_seconds,
             max_reconnect_attempts=-1
         )
         self._subscriptions = PumpFunSubscriptions(ws_client=self._ws_client)
@@ -89,6 +93,56 @@ class PumpFunRedisBridgeService:
 
         # Locks
         self._subscription_lock = asyncio.Lock()
+
+    async def _on_disconnect_time_exceeded(self, data: Dict[str, Any]) -> None:
+        """Notifica a todos los clientes cuando se excede el tiempo de desconexión"""
+        async with self._subscription_lock:
+            # Obtener todos los clientes activos
+            clients = set(self._client_accounts.keys()) | set(self._client_tokens.keys()) | self._new_token_clients
+            clients = list(clients)
+
+        if not clients:
+            self._logger.debug("Evento de desconexión excedida recibido pero sin clientes conectados")
+            return
+
+        self._logger.warning(f"Tiempo de desconexión excedido, notificando a {len(clients)} cliente(s): {data}")
+
+        message = json.dumps(
+            {
+                "event": self.EVENT_DISCONNECT_TIME_EXCEEDED,
+                "data": data,
+            }
+        )
+
+        await asyncio.gather(
+            *[self._publish_event(client_id, message) for client_id in clients],
+            return_exceptions=True,
+        )
+
+    async def _on_reconnect_after_disconnect_time_exceeded(self, data: Dict[str, Any]) -> None:
+        """Notifica a todos los clientes cuando se reconecta después de exceder el tiempo"""
+        async with self._subscription_lock:
+            # Obtener todos los clientes activos
+            clients = set(self._client_accounts.keys()) | set(self._client_tokens.keys()) | self._new_token_clients
+            clients = list(clients)
+
+        if not clients:
+            self._logger.debug("Evento de reconexión después de desconexión excedida recibido pero sin clientes conectados")
+            return
+
+        self._logger.warning(f"Reconexión después de tiempo de desconexión excedido, notificando a {len(clients)} cliente(s): {data}")
+
+        message = json.dumps(
+            {
+                "event": self.EVENT_RECONNECT_AFTER_DISCONNECT_TIME_EXCEEDED,
+                "data": data,
+            }
+        )
+
+        await asyncio.gather(
+            *[self._publish_event(client_id, message) for client_id in clients],
+            return_exceptions=True,
+        )
 
     # ---------------------------------------------------------------------
     # Propiedades útiles
@@ -126,6 +180,9 @@ class PumpFunRedisBridgeService:
 
         await self._ws_client.connect()
         self._ws_client.set_error_callback(self._handle_ws_error_event)
+        # Configurar callbacks para eventos de desconexión (deben ser async)
+        self._ws_client.set_callback_on_disconnect_time_exceeded(self._on_disconnect_time_exceeded)
+        self._ws_client.set_callback_on_reconnect_after_disconnect_time_exceeded(self._on_reconnect_after_disconnect_time_exceeded)
         self._logger.debug("Cliente WebSocket PumpFun conectado")
 
         self._command_task = asyncio.create_task(self._command_loop())

@@ -4,7 +4,7 @@ PumpFun API Client - Cliente centralizado para todas las llamadas a APIs
 con soporte async/await, WebSocket y HTTP
 """
 import asyncio, aiohttp, json, websockets, time, random
-from typing import Dict, Any, Optional, Union, Type, Tuple, Callable, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, Union, Type, Tuple, Callable, List, Awaitable, TYPE_CHECKING
 from solders.commitment_config import CommitmentLevel
 from solders.rpc.requests import SendVersionedTransaction
 from solders.rpc.config import RpcSendTransactionConfig
@@ -466,11 +466,15 @@ class PumpFunWebSocketApiClient():
         api_key: Optional[str] = None,
         websocket_timeout: int = 60,
         inactivity_watch_seconds: int = 3600,
+        max_disconnect_time_seconds: int = 300,
         # Parámetros para reconexión exponencial
         max_reconnect_attempts: int = 10,
         base_reconnect_delay: float = 15.0,
         max_reconnect_delay: float = 300.0,
-        reconnect_jitter: bool = True
+        reconnect_jitter: bool = True,
+        # Parámetros de optimización
+        max_background_tasks: int = 100,
+        message_receive_timeout: Optional[int] = None
     ):
         """
         Inicializa el cliente API
@@ -480,6 +484,7 @@ class PumpFunWebSocketApiClient():
             api_key: API key para autenticación
             websocket_timeout: Timeout para WebSocket (segundos)
             inactivity_watch_seconds: Segundos de inactividad antes de reconectar
+            max_disconnect_time_seconds: Segundos de desconexión antes de reconectar
             max_reconnect_attempts: Máximo número de intentos de reconexión exponencial.
                                 Usa -1 para reconexiones infinitas.
             base_reconnect_delay: Delay base para reconexión exponencial (segundos)
@@ -490,6 +495,8 @@ class PumpFunWebSocketApiClient():
         self._api_key = api_key
         self._websocket_timeout = websocket_timeout
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._max_background_tasks = max_background_tasks
+        self._message_receive_timeout = message_receive_timeout or (websocket_timeout * 2)
 
         # Parámetros de reconexión exponencial
         self._max_reconnect_attempts = max_reconnect_attempts
@@ -504,13 +511,27 @@ class PumpFunWebSocketApiClient():
         self._inactivity_task: Optional[asyncio.Task[Any]] = None
 
         self._is_running = False
+        self._is_websocket_connected = False
         self._is_reconnecting = False
         self._reconnect_attempts = 0
+        self._reconnect_lock = asyncio.Lock()
 
         self._logger = AppLogger(self.__class__.__name__)
 
         # Config watchdog
         self._inactivity_watch_seconds = inactivity_watch_seconds
+
+        # Parámetros de desconexión
+        self._max_disconnect_time_seconds = max_disconnect_time_seconds
+        self._disconnect_task: Optional[asyncio.Task[bool]] = None
+        self._callback_on_disconnect_time_exceeded: Optional[Union[
+            Callable[[Dict[str, Optional[float]]], Any],
+            Callable[[Dict[str, Optional[float]]], Awaitable[Any]]
+        ]] = None
+        self._callback_on_reconnect_after_disconnect_time_exceeded: Optional[Union[
+            Callable[[Dict[str, Optional[float]]], Any],
+            Callable[[Dict[str, Optional[float]]], Awaitable[Any]]
+        ]] = None
 
         # Métricas básicas
         self._metrics: Dict[str, Any] = {
@@ -538,7 +559,10 @@ class PumpFunWebSocketApiClient():
             'last_trade_time': None,
             'total_trade_intervals': 0.0,
             'min_trade_interval': float('inf'),
-            'max_trade_interval': 0.0
+            'max_trade_interval': 0.0,
+            # Métricas de desconexión
+            'last_connection_closed_time': None,
+            'last_connection_connected_time': None,
         }
 
     async def __aenter__(self):
@@ -553,6 +577,148 @@ class PumpFunWebSocketApiClient():
     @property
     def is_running(self) -> bool:
         return self._is_running
+
+    def set_callback_on_disconnect_time_exceeded(
+        self, 
+        callback: Union[
+            Callable[[Dict[str, Optional[float]]], Any],
+            Callable[[Dict[str, Optional[float]]], Awaitable[Any]]
+        ]
+    ):
+        """
+        Establece callback que se ejecuta cuando se excede el tiempo máximo de desconexión.
+        
+        Se ejecuta cuando el WebSocket permanece desconectado por más tiempo del configurado
+        en `max_disconnect_time_seconds`, sin que se haya reconectado.
+        
+        Args:
+            callback: Función (síncrona o asíncrona) que recibe un dict con:
+                - `last_connection_closed_time` (float): Timestamp del cierre de conexión
+                - `last_connection_connected_time` (None): Siempre None (aún no reconectado)
+                - `disconnect_time` (float): Segundos transcurridos desde el cierre
+        """
+        self._callback_on_disconnect_time_exceeded = callback
+
+    def set_callback_on_reconnect_after_disconnect_time_exceeded(
+        self, 
+        callback: Union[
+            Callable[[Dict[str, Optional[float]]], Any],
+            Callable[[Dict[str, Optional[float]]], Awaitable[Any]]
+        ]
+    ):
+        """
+        Establece callback que se ejecuta al reconectar DESPUÉS de exceder el tiempo máximo.
+        
+        Se ejecuta cuando: 1) se desconecta, 2) se excede `max_disconnect_time_seconds`,
+        3) se reconecta exitosamente.
+        
+        Args:
+            callback: Función (síncrona o asíncrona) que recibe un dict con:
+                - `last_connection_closed_time` (float): Timestamp del cierre original
+                - `last_connection_connected_time` (float): Timestamp de la reconexión
+                - `disconnect_time` (float): Duración total de desconexión en segundos
+        """
+        self._callback_on_reconnect_after_disconnect_time_exceeded = callback
+
+    def _on_connection_closed(self):
+        """Marca la conexión como cerrada e inicia el contador de tiempo de desconexión"""
+        self._is_websocket_connected = False
+        self._metrics['last_connection_closed_time'] = time.time()
+
+        # Si ya hay un task corriendo, cancelarlo primero
+        if self._disconnect_task is not None and not self._disconnect_task.done():
+            self._disconnect_task.cancel()
+
+        # Crear nuevo task para verificar tiempo de desconexión
+        self._disconnect_task = asyncio.create_task(self._check_disconnect_time_exceeded())
+
+    async def _on_connection_connected(self):
+        """Marca la conexión como establecida y cancela el task de desconexión si existe"""
+        self._is_websocket_connected = True
+        self._metrics['last_connection_connected_time'] = time.time()
+
+        if self._disconnect_task is None:
+            return
+
+        is_reconnection_exceeded = False
+        disconnect_task = self._disconnect_task
+        self._disconnect_task = None  # Limpiar inmediatamente para evitar race conditions
+
+        try:
+            # Si el task ya completó, obtener su resultado
+            if disconnect_task.done():
+                try:
+                    is_reconnection_exceeded = await disconnect_task
+                except asyncio.CancelledError:
+                    # Si fue cancelado antes, significa que no se excedió el tiempo
+                    is_reconnection_exceeded = False
+            else:
+                # Si el task aún está corriendo, cancelarlo
+                disconnect_task.cancel()
+                try:
+                    # Esperar a que se cancele y obtener el resultado
+                    is_reconnection_exceeded = await disconnect_task
+                except asyncio.CancelledError:
+                    # Si fue cancelado, significa que NO se excedió el tiempo
+                    is_reconnection_exceeded = False
+
+            # Si el tiempo se excedió antes de reconectar, ejecutar callback
+            if is_reconnection_exceeded:
+                last_closed_time = self._metrics.get('last_connection_closed_time')
+                last_connected_time = self._metrics.get('last_connection_connected_time')
+
+                if last_closed_time is not None and last_connected_time is not None:
+                    if self._callback_on_reconnect_after_disconnect_time_exceeded is not None:
+                        await self._execute_callback(
+                            self._callback_on_reconnect_after_disconnect_time_exceeded,
+                            {
+                                'last_connection_closed_time': last_closed_time,
+                                'last_connection_connected_time': last_connected_time,
+                                'disconnect_time': last_connected_time - last_closed_time
+                            },
+                            "callback de reconexión después de desconexión excedida"
+                        )
+        except Exception as e:
+            self._logger.error(f"Error cancelando task de desconexión: {e}", exc_info=True)
+
+    async def _check_disconnect_time_exceeded(self) -> bool:
+        """
+        Verifica si el tiempo de desconexión se excedió.
+        
+        Returns:
+            True si el tiempo se excedió (callback ejecutado)
+            False si fue cancelado antes de que se excediera el tiempo
+        """
+        try:
+            last_closed_time = self._metrics.get('last_connection_closed_time')
+            if last_closed_time is None:
+                # Si no hay tiempo de cierre registrado, no se puede calcular
+                return False
+
+            elapsed_time = time.time() - last_closed_time
+            available_time = self._max_disconnect_time_seconds - elapsed_time
+
+            if available_time > 0:
+                await asyncio.sleep(available_time)
+
+            # Si llegamos aquí, el tiempo se excedió
+            if self._callback_on_disconnect_time_exceeded is not None:
+                await self._execute_callback(
+                    self._callback_on_disconnect_time_exceeded,
+                    {
+                        'last_connection_closed_time': last_closed_time,
+                        'last_connection_connected_time': None,
+                        'disconnect_time': time.time() - last_closed_time
+                    },
+                    "callback de desconexión excedida"
+                )
+
+            # Retornar True porque el tiempo se excedió
+            return True
+
+        except asyncio.CancelledError:
+            # Si fue cancelado, significa que se reconectó antes de que se excediera el tiempo
+            return False
 
     # ============================================================================
     # MÉTODOS DE CONEXIÓN
@@ -621,6 +787,7 @@ class PumpFunWebSocketApiClient():
 
                 self._is_running = True
                 self._reconnect_attempts = 0  # Resetear contador en conexión exitosa
+                await self._on_connection_connected()
 
                 # Iniciar listener en background
                 self._listener_task = asyncio.create_task(self._websocket_listener())
@@ -659,31 +826,60 @@ class PumpFunWebSocketApiClient():
                     raise WebSocketConnectionError(f"Error conectando WebSocket después de {self._max_reconnect_attempts} intentos: {e}")
 
     async def disconnect(self):
+        """Desconecta el WebSocket y limpia todos los recursos"""
         try:
-            if self._listener_task:
-                self._listener_task.cancel()
-                try:
-                    await self._listener_task
-                except asyncio.CancelledError:
-                    pass
-            if self._inactivity_task:
-                self._inactivity_task.cancel()
-                try:
-                    await self._inactivity_task
-                except asyncio.CancelledError:
-                    pass
+            # Cancelar tareas en paralelo
+            tasks_to_cancel = []
+            if self._listener_task and not self._listener_task.done():
+                tasks_to_cancel.append(self._listener_task)
+            if self._inactivity_task and not self._inactivity_task.done():
+                tasks_to_cancel.append(self._inactivity_task)
+
+            if tasks_to_cancel:
+                for task in tasks_to_cancel:
+                    task.cancel()
+                # Esperar a que se cancelen
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+            # Esperar a que las tareas en background se completen (con timeout)
+            if self._background_tasks:
+                self._logger.debug(f"Esperando {len(self._background_tasks)} tareas en background...")
+                done, pending = await asyncio.wait(
+                    self._background_tasks,
+                    timeout=5.0,
+                    return_when=asyncio.ALL_COMPLETED
+                )
+                if pending:
+                    self._logger.warning(f"{len(pending)} tareas en background no completadas a tiempo")
+                    for task in pending:
+                        task.cancel()
+                self._background_tasks.clear()
 
             await self._unsubscribe_all_events()
 
             if self._websocket:
-                await self._websocket.close()
-                self._websocket = None
+                try:
+                    await self._websocket.close()
+                except Exception as e:
+                    self._logger.debug(f"Error cerrando WebSocket (puede estar ya cerrado): {e}")
+                finally:
+                    self._websocket = None
+
+            # Cancelar y limpiar el task de desconexión si existe
+            if self._disconnect_task is not None and not self._disconnect_task.done():
+                self._disconnect_task.cancel()
+                try:
+                    await self._disconnect_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                finally:
+                    self._disconnect_task = None
 
             self._is_running = False
-
-            # WebSocket desconectado
+            self._on_connection_closed()
+            self._logger.debug("WebSocket desconectado correctamente")
         except Exception as e:
-            self._logger.error(f"Error desconectando WebSocket: {e}")
+            self._logger.error(f"Error desconectando WebSocket: {e}", exc_info=True)
 
     # ============================================================================
     # MÉTODOS AUXILIARES DE MÉTRICAS
@@ -768,22 +964,45 @@ class PumpFunWebSocketApiClient():
                         self._logger.warning("No se encontró el WebSocket")
                         break
 
-                    # Escuchar mensaje SIN timeout para no perder trades
+                    # Escuchar mensaje con timeout configurable (más largo para no perder trades)
                     try:
-                        async with asyncio.timeout(self._websocket_timeout):
+                        async with asyncio.timeout(self._message_receive_timeout):
                             message = await self._websocket.recv()
                     except asyncio.TimeoutError:
+                        # Timeout es normal durante períodos sin mensajes, continuar escuchando
                         continue
 
                     self._metrics['message_count'] += 1
                     self._metrics['last_message_time'] = time.time()
 
+                    # Limpiar tareas completadas antes de agregar nuevas
+                    self._background_tasks = {t for t in self._background_tasks if not t.done()}
+
+                    # Limitar número de tareas en background para evitar acumulación
+                    if len(self._background_tasks) >= self._max_background_tasks:
+                        self._logger.warning(
+                            f"Límite de tareas en background alcanzado ({self._max_background_tasks}), "
+                            f"esperando que se completen algunas..."
+                        )
+                        # Esperar a que al menos una tarea se complete
+                        done, pending = await asyncio.wait(
+                            self._background_tasks,
+                            return_when=asyncio.FIRST_COMPLETED,
+                            timeout=1.0
+                        )
+                        # Limpiar las completadas
+                        self._background_tasks = {t for t in pending if not t.done()}
+
+                    # Decodificar mensaje una sola vez
+                    message_str = message if isinstance(message, str) else message.decode('utf-8')
+
                     # Procesar mensaje en background para no bloquear la escucha
-                    task = asyncio.create_task(self._process_websocket_message(message if isinstance(message, str) else message.decode('utf-8')))
+                    task = asyncio.create_task(self._process_websocket_message(message_str))
                     self._background_tasks.add(task)
                     task.add_done_callback(self._background_tasks.discard)
                 except websockets.ConnectionClosed as e:
                     self._logger.warning(f"WebSocket desconectado: {e}")
+                    self._on_connection_closed()
                     break
                 except asyncio.CancelledError:
                     was_cancelled = True
@@ -843,6 +1062,7 @@ class PumpFunWebSocketApiClient():
                             consecutive_ping_failures = 0  # Resetear después de reconectar
 
                     except websockets.ConnectionClosed as e:
+                        self._on_connection_closed()
                         self._logger.warning(f"WebSocket cerrado durante ping, iniciando reconexión...: {e}")
                         if not self._is_reconnecting:
                             self._metrics['ping_reconnects'] += 1
@@ -918,7 +1138,7 @@ class PumpFunWebSocketApiClient():
             return True
         return False
 
-    async def _execute_callback(self, callback: Callable[[Any], Any], data: Dict[str, Any], callback_type: str = "callback"):
+    async def _execute_callback(self, callback: Union[Callable[[Any], Any], Callable[[Any], Awaitable[Any]]], data: Dict[str, Any], callback_type: str = "callback"):
         """
         Ejecuta un callback de forma segura, manejando tanto sync como async
         
@@ -929,91 +1149,83 @@ class PumpFunWebSocketApiClient():
         """
         try:
             if self._is_async_callback(callback):
-                # Ejecutar callback asíncrono en background para no bloquear
-                asyncio.create_task(callback(data))
+                # Ejecutar callback asíncrono directamente (ya estamos en contexto async)
+                # No crear tarea adicional para evitar sobrecarga
+                await callback(data)
             elif callable(callback):
                 # Ejecutar callback síncrono directamente
                 callback(data)
             else:
                 self._logger.warning(f"{callback_type} no es callable: {type(callback)}")
         except Exception as e:
-            self._logger.error(f"Error en {callback_type}: {e}")
+            self._logger.error(f"Error en {callback_type}: {e}", exc_info=True)
 
     async def _process_websocket_message(self, message: str):
         """
         Procesa mensajes recibidos del WebSocket de forma optimizada
         Maneja callbacks síncronos y asíncronos eficientemente
-        Añade logs detallados para facilitar el diagnóstico.
         """
-        self._logger.debug(f"[WS] Mensaje recibido")
         try:
+            # Validar que el mensaje no esté vacío
+            if not message or not message.strip():
+                self._logger.debug("[WS] Mensaje vacío recibido, ignorando")
+                return
+
             data = json.loads(message)
-            self._logger.debug(f"[WS] Mensaje decodificado correctamente")
 
             # Si el mensaje es de confirmación, solo lo mostramos y salimos
             if 'message' in data:
-                self._logger.info(f"[WS] Mensaje del servidor: {data['message']}")
+                self._logger.debug(f"[WS] Mensaje del servidor: {data.get('message')}")
                 return
 
-            # Determinar tipo de evento
-            if 'txType' in data:
-                event_type = data['txType']
-                self._logger.debug(f"[WS] 'txType' detectado: {event_type}")
-            elif 'errors' in data:
+            # Determinar tipo de evento de forma eficiente
+            event_type = data.get('txType')
+            if not event_type and 'errors' in data:
                 event_type = 'error'
-                self._logger.debug(f"[WS] 'errors' detectado en el mensaje: {data['errors']}")
-            else:
-                self._logger.error(f"[WS] Mensaje no válido o inesperado: {data}")
+
+            if not event_type:
+                # Mensaje sin tipo reconocido, intentar callback genérico
+                on_message_cb = self._websocket_callbacks.get('on_message')
+                if on_message_cb:
+                    await self._execute_callback(on_message_cb, data, "callback genérico")
+                else:
+                    self._logger.debug(f"[WS] Mensaje sin txType reconocido: {str(data)[:200]}")
                 return
 
+            # Determinar callback según el tipo de evento (optimizado)
             callback = None
-
-            # Determinar callback según el tipo de evento y loggear detalles
             if event_type == 'create':
                 callback = self._websocket_callbacks.get('subscribeNewToken')
-                self._logger.debug(f"[WS] Callback asociado para 'create': {'encontrado' if callback else 'no encontrado'}")
             elif event_type in ['buy', 'sell']:
-                self._logger.debug(f"[WS] Mensaje de trade recibido: {data}")
                 callback = self._websocket_callbacks.get('subscribeTokenTrade') or self._websocket_callbacks.get('subscribeAccountTrade')
-                self._logger.debug(f"[WS] Callback asociado para '{event_type}': {'encontrado' if callback else 'no encontrado'}")
                 self._update_trade_metrics()
-                self._logger.debug(f"[WS] Métricas de trade actualizadas (event_type: {event_type})")
             elif event_type == 'migrate':
                 callback = self._websocket_callbacks.get('subscribeMigration')
-                self._logger.debug(f"[WS] Callback asociado para 'migrate': {'encontrado' if callback else 'no encontrado'}")
             elif event_type == 'error':
                 callback = self._websocket_callbacks.get('on_error')
-                if callback:
-                    self._logger.debug(f"[WS] Ejecutando callback de error para: {data}")
-                else:
-                    self._logger.error(f"[WS] No se encontró callback para errores. Data: {data}")
+                if not callback:
+                    self._logger.warning(f"[WS] Error recibido sin callback: {data.get('errors', 'unknown')}")
 
             # Ejecutar callback principal
             if callback:
-                self._logger.info(f"[WS] Ejecutando callback principal para event_type='{event_type}'.")
-                await self._execute_callback(callback, data, f"callback principal para {event_type}")
+                await self._execute_callback(callback, data, f"callback para {event_type}")
             else:
-                # Usar callback por defecto si existe uno para eventos no manejados
+                # Usar callback por defecto si existe
                 default_cb = self._websocket_callbacks.get('default')
                 if default_cb:
-                    self._logger.info(f"[WS] Ejecutando callback por defecto para evento no manejado: '{event_type}'.")
                     await self._execute_callback(default_cb, data, "callback por defecto")
-                else:
-                    if event_type != 'error':  # Ya logueamos los errores arriba
-                        self._logger.warning(f"[WS] Evento no manejado o sin callback para txType '{event_type}'. Data: {str(data)[:250]}")
+                elif event_type != 'error':
+                    self._logger.debug(f"[WS] Evento '{event_type}' sin callback específico")
 
-            # Callback genérico para todos los mensajes (si existe)
+            # Callback genérico para todos los mensajes (si existe y no es el mismo que el principal)
             on_message_cb = self._websocket_callbacks.get('on_message')
-            if on_message_cb:
-                self._logger.debug(f"[WS] Ejecutando callback genérico para mensaje recibido.")
+            if on_message_cb and on_message_cb != callback:
                 await self._execute_callback(on_message_cb, data, "callback genérico")
-            else:
-                self._logger.debug(f"[WS] No hay callback genérico configurado ('on_message').")
 
-        except json.JSONDecodeError:
-            self._logger.error(f"[WS] Error decodificando JSON del mensaje: {message[:200]}...")
+        except json.JSONDecodeError as e:
+            self._logger.error(f"[WS] Error decodificando JSON: {e} | Mensaje: {message[:200]}...")
         except Exception as e:
-            self._logger.error(f"[WS] Error procesando mensaje WebSocket: {type(e).__name__}: {e} | Mensaje: {message[:200]}...")
+            self._logger.error(f"[WS] Error procesando mensaje: {type(e).__name__}: {e} | Mensaje: {message[:200]}...", exc_info=True)
 
     async def _unsubscribe_all_events(self):
         """
@@ -1039,6 +1251,7 @@ class PumpFunWebSocketApiClient():
                         self._logger.debug(f"Desuscripción enviada para {method}")
 
                 except websockets.ConnectionClosed as e:
+                    self._on_connection_closed()
                     self._logger.debug(f"WebSocket cerrado durante desuscripción de {method}: {e}")
                     break  # Salir del bucle si la conexión se cerró
                 except Exception as e:
@@ -1055,60 +1268,78 @@ class PumpFunWebSocketApiClient():
     async def _reconnect_websocket(self, reason: str = "unknown"):
         """
         Reconecta WebSocket automáticamente usando sistema de reconexión exponencial
+        Protegido contra llamadas concurrentes con lock
         """
         if not self._is_running:
             return
 
-        self._logger.debug(f"Reconectando WebSocket automáticamente... (motivo: {reason})")
-        self._metrics['reconnect_count'] += 1
-        self._metrics['last_reconnect_reason'] = reason
-        self._metrics['last_reconnect_time'] = time.time()
+        # Prevenir reconexiones concurrentes
+        async with self._reconnect_lock:
+            # Verificar nuevamente después de adquirir el lock
+            if self._is_reconnecting:
+                self._logger.debug(f"Reconexión ya en curso, ignorando solicitud (motivo: {reason})")
+                return
 
-        reconnect_start = time.time()
-        try:
-            self._is_reconnecting = True
+            self._logger.debug(f"Reconectando WebSocket automáticamente... (motivo: {reason})")
+            self._metrics['reconnect_count'] += 1
+            self._metrics['last_reconnect_reason'] = reason
+            self._metrics['last_reconnect_time'] = time.time()
 
-            # Fase 1: Desconectar
-            disconnect_start = time.time()
-            await self.disconnect()
-            disconnect_time = time.time() - disconnect_start
-            self._logger.debug(f"Desconexión completada en {disconnect_time:.6f}s")
+            reconnect_start = time.time()
+            try:
+                self._is_reconnecting = True
 
-            await asyncio.sleep(1)
+                # Fase 1: Desconectar
+                disconnect_start = time.time()
+                await self.disconnect()
+                disconnect_time = time.time() - disconnect_start
+                self._logger.debug(f"Desconexión completada en {disconnect_time:.6f}s")
 
-            # Fase 2: Reconectar usando sistema exponencial
-            connect_start = time.time()
-            await self.connect()  # Ya incluye el sistema de reconexión exponencial
-            connect_time = time.time() - connect_start
-            self._logger.debug(f"Conexión establecida en {connect_time:.6f}s")
+                await asyncio.sleep(1)
 
-            # Fase 3: Reestablecer suscripciones
-            subscriptions_start = time.time()
-            if self._websocket_subscriptions:
-                self._logger.info(f"Reestableciendo {len(self._websocket_subscriptions)} suscripciones...")
-                for i, subscription in enumerate(self._websocket_subscriptions):
-                    if self._websocket:
-                        try:
-                            await self._websocket.send(subscription)
-                            self._logger.debug(f"Suscripción {i+1}/{len(self._websocket_subscriptions)} reestablecida")
-                        except Exception as e:
-                            self._logger.error(f"Error reestableciendo suscripción {i+1}: {e}")
-                self._logger.info("Suscripciones reestablecidas")
-            else:
-                self._logger.debug("No hay suscripciones que reestablecer")
-            subscriptions_time = time.time() - subscriptions_start
+                # Fase 2: Reconectar usando sistema exponencial
+                connect_start = time.time()
+                await self.connect()  # Ya incluye el sistema de reconexión exponencial
+                connect_time = time.time() - connect_start
+                self._logger.debug(f"Conexión establecida en {connect_time:.6f}s")
 
-            # Tiempo total de reconexión
-            total_reconnect_time = time.time() - reconnect_start
+                # Fase 3: Reestablecer suscripciones
+                subscriptions_start = time.time()
+                if self._websocket_subscriptions:
+                    self._logger.info(f"Reestableciendo {len(self._websocket_subscriptions)} suscripciones...")
+                    # Reestablecer suscripciones en paralelo para mayor eficiencia
+                    subscription_tasks = []
+                    for subscription in self._websocket_subscriptions:
+                        if self._websocket:
+                            subscription_tasks.append(self._websocket.send(subscription))
+                    
+                    if subscription_tasks:
+                        results = await asyncio.gather(*subscription_tasks, return_exceptions=True)
+                        failed = sum(1 for r in results if isinstance(r, Exception))
+                        if failed > 0:
+                            self._logger.warning(f"{failed} de {len(subscription_tasks)} suscripciones fallaron al reestablecer")
+                        else:
+                            self._logger.debug("Todas las suscripciones reestablecidas correctamente")
+                else:
+                    self._logger.debug("No hay suscripciones que reestablecer")
+                subscriptions_time = time.time() - subscriptions_start
 
-            self._logger.info(f"Reconexión completada en {total_reconnect_time:.6f}s (desconectar: {disconnect_time:.6f}s, conectar: {connect_time:.6f}s, suscripciones: {subscriptions_time:.6f}s) - motivo: {reason}")
+                # Tiempo total de reconexión
+                total_reconnect_time = time.time() - reconnect_start
 
-        except Exception as e:
-            total_reconnect_time = time.time() - reconnect_start
-            self._logger.error(f"Error reconectando WebSocket después de {total_reconnect_time:.6f}s: {e}")
-        finally:
-            self._logger.info("WebSocket reconectado exitosamente")
-            self._is_reconnecting = False
+                self._logger.info(
+                    f"Reconexión completada en {total_reconnect_time:.6f}s "
+                    f"(desconectar: {disconnect_time:.6f}s, conectar: {connect_time:.6f}s, "
+                    f"suscripciones: {subscriptions_time:.6f}s) - motivo: {reason}"
+                )
+
+            except Exception as e:
+                total_reconnect_time = time.time() - reconnect_start
+                self._logger.error(f"Error reconectando WebSocket después de {total_reconnect_time:.6f}s: {e}")
+                raise
+            finally:
+                self._is_reconnecting = False
+                self._logger.debug(f"Reconexión completada (motivo: {reason})")
 
     # ============================================================================
     # MÉTODOS DE CONVENIENCIA
@@ -1269,6 +1500,9 @@ class PumpFunWebSocketApiClient():
             'base_reconnect_delay': self._base_reconnect_delay,
             'max_reconnect_delay': self._max_reconnect_delay,
             'reconnect_jitter_enabled': self._reconnect_jitter,
+            'max_background_tasks': self._max_background_tasks,
+            'current_background_tasks': len(self._background_tasks),
+            'is_websocket_connected': self._is_websocket_connected,
             # Métricas de trades
             'trade_count': trade_count,
             'last_trade_time': self._metrics['last_trade_time'],
