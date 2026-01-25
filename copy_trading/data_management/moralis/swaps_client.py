@@ -148,7 +148,7 @@ class MoralisSwapsClient:
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
-        max_retries: int = 5
+        max_retries: int = 20
     ) -> Dict[str, Any]:
         """
         Realiza una petición GET a la API de Moralis con retry y backoff exponencial.
@@ -300,7 +300,8 @@ class MoralisSwapsClient:
         order: str = "DESC",
         max_pages: Optional[int] = None,
         process_page: Optional[Callable[[Dict[str, Any], int], Any]] = None,
-        transaction_types: Optional[str] = None
+        transaction_types: Optional[str] = None,
+        initial_cursor: Optional[str] = None
     ) -> tuple[List[Any], int]:
         """
         Itera sobre todas las páginas de swaps y procesa cada página con un callback.
@@ -315,12 +316,13 @@ class MoralisSwapsClient:
             max_pages: Número máximo de páginas a obtener (None para todas)
             process_page: Callback opcional que recibe (response, page_count) y retorna el dato a acumular
             transaction_types: Tipos de transacción a filtrar. Valores posibles: 'buy', 'sell' o 'buy,sell' (opcional)
+            initial_cursor: Cursor inicial para continuar desde una página específica (opcional)
 
         Returns:
             Tupla con (lista de datos acumulados, número de páginas procesadas)
         """
         self._accumulated_swaps = []
-        cursor = None
+        cursor = initial_cursor
         page_count = 0
 
         try:
@@ -536,6 +538,58 @@ class MoralisSwapsClient:
         logger.info(f"Total de páginas obtenidas: {len(all_pages)}")
         return all_pages
 
+    async def fetch_all_swaps_pages_from_cursor(
+        self,
+        wallet: str,
+        cursor: str,
+        token: Optional[str] = None,
+        limit_per_page: int = 100,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        order: str = "DESC",
+        max_pages: Optional[int] = None,
+        transaction_types: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Obtiene páginas de swaps a partir de un cursor dado.
+        Equivalente a fetch_all_swaps_pages pero empezando en la página siguiente al cursor.
+
+        Args:
+            wallet: Dirección de la wallet de Solana
+            cursor: Cursor de paginación (p. ej. de la última página de un JSON guardado)
+            token: Dirección del token para filtrar swaps (opcional)
+            limit_per_page: Número máximo de resultados por página (máximo 100)
+            from_date: Fecha de inicio para filtrar swaps (opcional)
+            to_date: Fecha de fin para filtrar swaps (opcional)
+            order: Orden de los resultados ("ASC" o "DESC"). Por defecto: "DESC"
+            max_pages: Número máximo de páginas a obtener (None para todas)
+            transaction_types: Tipos de transacción a filtrar (opcional)
+
+        Returns:
+            Lista de respuestas completas de Moralis (cada una con 'result' y 'cursor')
+        """
+        logger.info(f"Obteniendo páginas de swaps desde cursor para wallet {wallet[:8]}...")
+
+        def log_page(response: Dict[str, Any], page_count: int) -> Dict[str, Any]:
+            logger.debug(f"Página {page_count + 1}: respuesta obtenida")
+            return response
+
+        all_pages, _ = await self._iterate_pages(
+            wallet=wallet,
+            token=token,
+            limit_per_page=limit_per_page,
+            from_date=from_date,
+            to_date=to_date,
+            order=order,
+            max_pages=max_pages,
+            process_page=log_page,
+            transaction_types=transaction_types,
+            initial_cursor=cursor
+        )
+
+        logger.info(f"Total de páginas obtenidas desde cursor: {len(all_pages)}")
+        return all_pages
+
     async def save_swaps_to_file(
         self,
         wallet: str,
@@ -642,6 +696,135 @@ class MoralisSwapsClient:
 
         except Exception as e:
             logger.error(f"Error guardando swaps en {file_path}: {e}", exc_info=True)
+            raise
+
+    @staticmethod
+    async def get_cursor_from_file(file_path: str) -> Optional[str]:
+        """
+        Obtiene el cursor de la última página de un archivo JSON guardado por save_swaps_to_file.
+        Útil para continuar recolectando datos con save_swaps_to_file_from_cursor.
+
+        Args:
+            file_path: Ruta del archivo JSON (lista de páginas con 'result' y 'cursor')
+
+        Returns:
+            Cursor de la última página, o None si el archivo está vacío o no tiene cursor
+        """
+        p = Path(file_path)
+        if not p.exists():
+            logger.warning(f"Archivo no encontrado: {file_path}")
+            return None
+        try:
+            async with aiofiles.open(p, "r", encoding="utf-8") as f:
+                data = json.loads(await f.read())
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"Error leyendo {file_path}: {e}")
+            return None
+        if not isinstance(data, list) or len(data) == 0:
+            return None
+        last = data[-1]
+        if isinstance(last, dict) and "cursor" in last:
+            return last["cursor"]
+        return None
+
+    async def save_swaps_to_file_from_cursor(
+        self,
+        wallet: str,
+        file_path: str,
+        cursor: str,
+        token: Optional[str] = None,
+        limit_per_page: int = 100,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        order: str = "DESC",
+        max_pages: Optional[int] = None,
+        transaction_types: Optional[str] = None
+    ) -> str:
+        """
+        Recolecta swaps a partir de un cursor y los guarda en un archivo JSON.
+        Variante de save_swaps_to_file que continúa desde una página específica
+        (p. ej. usando el cursor de la última página de un JSON previo).
+
+        Si file_path ya existe y contiene un arreglo de páginas válido, no se reemplaza:
+        se cargan los datos existentes y se agregan las nuevas páginas al arreglo.
+
+        Args:
+            wallet: Dirección de la wallet de Solana
+            file_path: Ruta donde guardar los datos (se reutiliza si existe y tiene datos)
+            cursor: Cursor de paginación (p. ej. de la última página de un JSON existente)
+            token: Dirección del token para filtrar swaps (opcional)
+            limit_per_page: Número máximo de resultados por página (máximo 100)
+            from_date: Fecha de inicio para filtrar swaps (opcional)
+            to_date: Fecha de fin para filtrar swaps (opcional)
+            order: Orden de los resultados ("ASC" o "DESC"). Por defecto: "DESC"
+            max_pages: Número máximo de páginas a obtener (None para todas)
+            transaction_types: Tipos de transacción a filtrar (opcional)
+
+        Returns:
+            Ruta del archivo donde se guardaron los datos
+
+        Raises:
+            OSError: Si no se puede crear el directorio o escribir el archivo
+            aiohttp.ClientError: Si la petición falla
+
+        Example:
+            cursor = await MoralisSwapsClient.get_cursor_from_file("data_moralis/AtTjQK_buy-sell__2026-01-24.json")
+            if cursor:
+                await client.save_swaps_to_file_from_cursor(
+                    wallet, "data_moralis/AtTjQK_buy-sell__2026-01-24.json", cursor,
+                    transaction_types="buy,sell"
+                )
+        """
+        path = Path(file_path)
+        parent_dir = path.parent
+        if parent_dir and parent_dir != Path("."):
+            try:
+                parent_dir.mkdir(parents=True, exist_ok=True)
+                logger.debug(f"Directorio verificado/creado: {parent_dir}")
+            except OSError as e:
+                logger.warning(f"No se pudo crear el directorio {parent_dir}: {e}")
+
+        try:
+            new_pages = await self.fetch_all_swaps_pages_from_cursor(
+                wallet=wallet,
+                cursor=cursor,
+                token=token,
+                limit_per_page=limit_per_page,
+                from_date=from_date,
+                to_date=to_date,
+                order=order,
+                max_pages=max_pages,
+                transaction_types=transaction_types
+            )
+
+            if path.exists():
+                try:
+                    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+                        existing = json.loads(await f.read())
+                    if isinstance(existing, list) and len(existing) > 0 and isinstance(existing[0], dict) and "result" in existing[0]:
+                        data_to_save = existing + new_pages
+                        logger.debug(f"Agregando {len(new_pages)} página(s) al archivo existente ({len(existing)} ya guardadas)")
+                    else:
+                        data_to_save = new_pages
+                        logger.warning("Archivo existente sin formato válido de páginas, guardando solo las nuevas")
+                except (OSError, json.JSONDecodeError) as e:
+                    logger.warning(f"Error leyendo {file_path}: {e}. Guardando solo páginas nuevas.")
+                    data_to_save = new_pages
+            else:
+                data_to_save = new_pages
+
+            async with aiofiles.open(path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(data_to_save, indent=2, ensure_ascii=False))
+
+            total_swaps, num_pages = self._calculate_swap_stats(data_to_save)
+            logger.info(
+                f"Swaps guardados desde cursor en {file_path}: "
+                f"{total_swaps} swaps en {num_pages} página(s)"
+            )
+            return str(path)
+
+        except Exception as e:
+            logger.error(f"Error guardando swaps desde cursor en {file_path}: {e}", exc_info=True)
             raise
 
     def _calculate_swap_stats(self, data: Any) -> tuple[int, int]:

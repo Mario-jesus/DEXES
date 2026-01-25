@@ -622,6 +622,10 @@ class PumpFunWebSocketApiClient():
 
     def _on_connection_closed(self):
         """Marca la conexión como cerrada e inicia el contador de tiempo de desconexión"""
+        # Si ya se ha marcado como no running (cierre explícito), no programar tareas
+        if not self._is_running:
+            return
+
         self._is_websocket_connected = False
         self._metrics['last_connection_closed_time'] = time.time()
 
@@ -828,32 +832,65 @@ class PumpFunWebSocketApiClient():
     async def disconnect(self):
         """Desconecta el WebSocket y limpia todos los recursos"""
         try:
-            # Cancelar tareas en paralelo
-            tasks_to_cancel = []
-            if self._listener_task and not self._listener_task.done():
-                tasks_to_cancel.append(self._listener_task)
-            if self._inactivity_task and not self._inactivity_task.done():
-                tasks_to_cancel.append(self._inactivity_task)
+            # PRIMERO: Marcar como no running para que las tareas se detengan naturalmente
+            # Esto evita recursión infinita al cancelar tareas hijas
+            was_running = self._is_running
+            self._is_running = False
 
-            if tasks_to_cancel:
-                for task in tasks_to_cancel:
-                    task.cancel()
-                # Esperar a que se cancelen
-                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
-            # Esperar a que las tareas en background se completen (con timeout)
-            if self._background_tasks:
-                self._logger.debug(f"Esperando {len(self._background_tasks)} tareas en background...")
-                done, pending = await asyncio.wait(
-                    self._background_tasks,
-                    timeout=5.0,
-                    return_when=asyncio.ALL_COMPLETED
-                )
-                if pending:
-                    self._logger.warning(f"{len(pending)} tareas en background no completadas a tiempo")
-                    for task in pending:
-                        task.cancel()
+            if not was_running:
+                # Ya estaba desconectado, solo limpiar referencias
+                self._listener_task = None
+                self._inactivity_task = None
                 self._background_tasks.clear()
+                return
+
+            # SEGUNDO: Limpiar tareas en background sin cancelación recursiva
+            if self._background_tasks:
+                self._logger.debug(f"Limpiando {len(self._background_tasks)} tareas en background...")
+                # Crear copia y limpiar el set inmediatamente para evitar que se agreguen más
+                background_tasks_copy = list(self._background_tasks)
+                self._background_tasks.clear()
+
+                # Cancelar tareas en background de forma segura (sin esperar)
+                for task in background_tasks_copy:
+                    if not task.done():
+                        try:
+                            task.cancel()
+                        except (RuntimeError, RecursionError):
+                            # Ignorar errores de recursión - la tarea se limpiará sola
+                            pass
+                        except Exception:
+                            pass  # Ignorar todos los errores al cancelar
+
+            # TERCERO: Cancelar tareas principales de forma segura
+            # Guardar referencias y limpiar inmediatamente para evitar referencias circulares
+            listener_task = self._listener_task
+            inactivity_task = self._inactivity_task
+            self._listener_task = None
+            self._inactivity_task = None
+
+            # Cancelar tareas principales sin esperar recursión
+            # Usar try/except para capturar cualquier error de recursión
+            if listener_task and not listener_task.done():
+                try:
+                    listener_task.cancel()
+                except (RuntimeError, RecursionError):
+                    # Ignorar errores de recursión - la tarea se limpiará sola
+                    self._logger.debug("Error de recursión al cancelar listener_task (ignorado)")
+                except Exception:
+                    pass
+
+            if inactivity_task and not inactivity_task.done():
+                try:
+                    inactivity_task.cancel()
+                except (RuntimeError, RecursionError):
+                    # Ignorar errores de recursión - la tarea se limpiará sola
+                    self._logger.debug("Error de recursión al cancelar inactivity_task (ignorado)")
+                except Exception:
+                    pass
+
+            # NO esperar a que se cancelen - esto puede causar deadlocks
+            # Las tareas se limpiarán naturalmente cuando Python las recolecte
 
             await self._unsubscribe_all_events()
 
@@ -867,13 +904,23 @@ class PumpFunWebSocketApiClient():
 
             # Cancelar y limpiar el task de desconexión si existe
             if self._disconnect_task is not None and not self._disconnect_task.done():
-                self._disconnect_task.cancel()
+                disconnect_task = self._disconnect_task
+                self._disconnect_task = None  # Limpiar referencia inmediatamente
                 try:
-                    await self._disconnect_task
-                except (asyncio.CancelledError, Exception):
+                    disconnect_task.cancel()
+                    # Esperar con timeout muy corto para evitar bloqueos
+                    try:
+                        await asyncio.wait_for(disconnect_task, timeout=0.5)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        # Ignorar timeout y cancelación - la tarea se limpiará sola
+                        pass
+                    except Exception:
+                        pass  # Ignorar cualquier otro error
+                except (RuntimeError, RecursionError):
+                    # Ignorar errores de recursión
                     pass
-                finally:
-                    self._disconnect_task = None
+                except Exception:
+                    pass  # Ignorar todos los errores
 
             self._is_running = False
             self._on_connection_closed()
@@ -955,6 +1002,7 @@ class PumpFunWebSocketApiClient():
         """
         # Crear tarea de ping en background
         ping_task = asyncio.create_task(self._ping_keepalive())
+        ping_task_ref = None  # Referencia para limpieza segura
 
         was_cancelled = False
         try:
@@ -999,7 +1047,13 @@ class PumpFunWebSocketApiClient():
                     # Procesar mensaje en background para no bloquear la escucha
                     task = asyncio.create_task(self._process_websocket_message(message_str))
                     self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
+                    # Usar callback seguro que no cause problemas de cancelación
+                    def safe_discard(t):
+                        try:
+                            self._background_tasks.discard(t)
+                        except Exception:
+                            pass  # Ignorar errores en el callback
+                    task.add_done_callback(safe_discard)
                 except websockets.ConnectionClosed as e:
                     self._logger.warning(f"WebSocket desconectado: {e}")
                     self._on_connection_closed()
@@ -1013,12 +1067,20 @@ class PumpFunWebSocketApiClient():
                     break
 
         finally:
-            # Cancelar tarea de ping al salir
-            ping_task.cancel()
-            try:
-                await ping_task
-            except asyncio.CancelledError:
-                pass
+            # Cancelar tarea de ping al salir de forma segura
+            if ping_task and not ping_task.done():
+                try:
+                    ping_task.cancel()
+                    # Esperar con timeout muy corto para evitar bloqueos
+                    try:
+                        await asyncio.wait_for(ping_task, timeout=0.5)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+                except (RuntimeError, RecursionError):
+                    # Ignorar errores de recursión
+                    pass
+                except Exception as e:
+                    self._logger.debug(f"Error cancelando ping_task: {e}")
 
             # Reconectar si es necesario y no fue un cancel explícito ni hay reconexión en curso
             if self._is_running and not was_cancelled and not self._is_reconnecting:
@@ -1114,7 +1176,20 @@ class PumpFunWebSocketApiClient():
                     self._logger.info(
                         f"Inactividad detectada ({int(gap)}s sin trades, umbral: {wait_seconds:.1f}s). Reconectando WebSocket... (reconexión #{self._metrics['inactivity_reconnects']})"
                     )
-                    await self._reconnect_websocket(reason="inactivity_no_trades")
+                    # Marcar que debemos reconectar pero no desde esta tarea
+                    # La reconexión se hará en background para evitar deadlocks
+                    if not self._is_reconnecting:
+                        try:
+                            # Crear tarea en background sin esperar
+                            reconnect_task = asyncio.create_task(
+                                self._reconnect_websocket(reason="inactivity_no_trades")
+                            )
+                            # No esperar - dejar que se ejecute en background
+                            # El task se limpiará cuando se complete
+                        except Exception as e:
+                            self._logger.error(f"Error iniciando reconexión por inactividad: {e}")
+                    else:
+                        self._logger.debug("Reconexión ya en curso, ignorando solicitud de inactividad")
             except asyncio.CancelledError:
                 break
             except Exception as e:
