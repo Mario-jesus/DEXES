@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import List, Optional, Dict, Any, Literal, cast
 
-from sqlalchemy import create_engine, select, and_, text
+from sqlalchemy import create_engine, select, and_, or_, text
 from sqlalchemy.orm import sessionmaker
 
 from ....domain.ports.transaction_repository import ITransactionRepository
@@ -113,6 +113,7 @@ class SystemTransactionRepository(ITransactionRepository):
         run_id: Optional[Any] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        include_liquidations: bool = False,
         limit: Optional[int] = None,
         query: Optional[str] = None,
         **kwargs
@@ -129,6 +130,7 @@ class SystemTransactionRepository(ITransactionRepository):
             run_id: ID del run a usar (opcional). Si no se proporciona, se usa el más reciente
             start_date: Fecha de inicio para filtrar (opcional). Usa Position.created_at
             end_date: Fecha de fin para filtrar (opcional). Usa Position.created_at
+            include_liquidations: Si True, incluye posiciones de liquidación (por defecto False)
             limit: Límite de registros a cargar (opcional)
             query: Query SQL personalizada (opcional). Si se proporciona, se usa esta en lugar de ORM
             **kwargs: Parámetros adicionales
@@ -226,13 +228,21 @@ class SystemTransactionRepository(ITransactionRepository):
             conditions.append(Position.runs_id == run_id)
             logger.debug(f"Filtrando por run_id: {run_id}")
 
-            # Filtrar por trader_wallet (obligatorio)
-            conditions.append(Position.traders_id == trader_wallet)
-            logger.debug(f"Filtrando por trader_wallet: {trader_wallet[:8]}...")
-
-            # Excluir liquidaciones
-            conditions.append(Position.is_liquidation == False)
-            logger.debug("Excluyendo posiciones de liquidación")
+            # Filtrar por trader_wallet y liquidaciones según el parámetro
+            if include_liquidations:
+                # Incluir posiciones del trader O liquidaciones (donde traders_id es NULL)
+                conditions.append(
+                    or_(
+                        Position.traders_id == trader_wallet,
+                        Position.is_liquidation == True
+                    )
+                )
+                logger.debug(f"Incluyendo posiciones del trader {trader_wallet[:8]}... y liquidaciones")
+            else:
+                # Solo posiciones del trader (excluir liquidaciones)
+                conditions.append(Position.traders_id == trader_wallet)
+                conditions.append(Position.is_liquidation == False)
+                logger.debug(f"Filtrando por trader_wallet: {trader_wallet[:8]}... (excluyendo liquidaciones)")
 
             # Filtros de fecha usando Position.created_at
             if start_date:
@@ -488,6 +498,13 @@ class SystemTransactionRepository(ITransactionRepository):
 
         # Obtener pool de TraderTradeData
         pool = raw_transaction.get('pool')  # Nombre original del pool en TraderTradeData
+        if pool is None:
+            if base_token_address[-4:] == "pump":
+                pool = "pump"
+            elif base_token_address[-4:] == "bonk":
+                pool = "bonk"
+            else:
+                pool = "pump-amm"
 
         # Obtener la dirección del exchange basándose en el pool
         exchange_address_from_pool = self._POOL_TO_ADDRESS.get(pool) if pool else None

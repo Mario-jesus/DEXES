@@ -72,6 +72,7 @@ class ITransactionRepository(ABC):
         run_id: Optional[Any] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        include_liquidations: bool = False,
         limit: Optional[int] = None,
         **kwargs
     ) -> None:
@@ -87,6 +88,7 @@ class ITransactionRepository(ABC):
             run_id: ID del run a usar (opcional)
             start_date: Fecha de inicio del rango (opcional)
             end_date: Fecha de fin del rango (opcional)
+            include_liquidations: Si True, incluye posiciones de liquidación (por defecto False)
             limit: Límite de registros a cargar (opcional)
             **kwargs: Parámetros adicionales para el loader específico
         
