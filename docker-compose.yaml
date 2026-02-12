@@ -456,6 +456,169 @@ services:
       - trading_network
     restart: unless-stopped
 
+  COPY_TRADING_BOT_N:
+
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_N
+    ports:
+      - "7791:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-N.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_O:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_O
+    ports:
+      - "7792:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-O.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_P:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_P
+    ports:
+      - "7793:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-P.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_Q:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_Q
+    ports:
+      - "7794:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-Q.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+      condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_R:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_R
+    ports:
+      - "7795:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-R.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  COPY_TRADING_BOT_S:
+    image: copy-trading-bot:1.0.0
+    container_name: COPY_TRADING_BOT_S
+    ports:
+      - "7796:8888"
+    environment:
+      - CONFIG_FILE_PATH=copy_trading/configs_in_json/config-S.json
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pumpfun_bridge:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    networks:
+      - trading_network
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
