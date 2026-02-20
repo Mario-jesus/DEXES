@@ -10,6 +10,7 @@ from .price_client import (
     MoralisNotFoundError
 )
 from .swaps_client import MoralisSwapsClient, SolanaInvestmentStats
+from .download_traders_swaps import download_traders_swaps, run_download_traders_swaps
 
 __all__ = [
     'MoralisPriceClient',
@@ -17,5 +18,7 @@ __all__ = [
     'SolanaInvestmentStats',
     'MoralisApiError',
     'MoralisAuthError',
-    'MoralisNotFoundError'
+    'MoralisNotFoundError',
+    'download_traders_swaps',
+    'run_download_traders_swaps',
 ]
