@@ -209,3 +209,9 @@ copy_trading/configs_in_json/
 
 # Datos de Moralis
 /data_moralis/
+
+# Reports
+/reports/
+
+# Prometheus config with secrets (generated from prometheus.yml.template + .env)
+prometheus.yml

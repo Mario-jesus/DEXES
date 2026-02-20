@@ -1,5 +1,5 @@
 {
-    "python.analysis.typeCheckingMode": "basic",
-    "cursorpyright.analysis.typeCheckingMode": "basic",
+    "python.analysis.typeCheckingMode": "standard",
+    "cursorpyright.analysis.typeCheckingMode": "standard",
     "python.analysis.autoImportCompletions": true
 }

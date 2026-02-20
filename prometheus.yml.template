@@ -1,0 +1,33 @@
+# Prometheus config for DEXES monitoring (host + containers).
+# Generated from this template: run scripts/generate-prometheus-config.sh
+# after setting in .env:
+#   GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL
+#   GRAFANA_CLOUD_METRICS_INSTANCE_ID
+#   GRAFANA_CLOUD_METRICS_TOKEN
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+external_labels:
+  env: production
+  instance_id: ec2-dexes
+
+remote_write:
+  - url: ${GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL}
+    basic_auth:
+      username: ${GRAFANA_CLOUD_METRICS_INSTANCE_ID}
+      password: ${GRAFANA_CLOUD_METRICS_TOKEN}
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node-exporter
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['cadvisor:8080']
