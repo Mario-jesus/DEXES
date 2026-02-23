@@ -147,6 +147,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -174,6 +176,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -201,6 +205,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -228,6 +234,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -255,6 +263,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -282,6 +292,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -309,6 +321,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -336,6 +350,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -364,6 +380,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -392,6 +410,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -420,6 +440,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -448,6 +470,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -476,6 +500,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -504,6 +530,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -532,6 +560,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -559,6 +589,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -586,6 +618,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -613,6 +647,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -640,6 +676,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
@@ -667,6 +705,8 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    volumes:
+      - ./logs:/app/copy_trading/logs
     networks:
       - trading_network
     restart: unless-stopped
