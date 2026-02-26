@@ -4,7 +4,7 @@ Calculador de métricas de trading.
 Maneja acumulación de PnL en memoria y genera métricas.
 """
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from logging_system import AppLogger
@@ -13,12 +13,21 @@ from logging_system import AppLogger
 class TradingMetricsCalculator:
     """Calcula métricas de trading a partir de datos leídos."""
 
-    def __init__(self):
+    def __init__(self, max_trader_idle_days: Optional[float] = None):
+        """
+        Args:
+            max_trader_idle_days: Si está definido, se eliminan de memoria los traders
+                que no hayan aparecido en un snapshot en tantos días. Reduce memoria
+                a costa de: en el ciclo siguiente a una poda, el total agregado puede
+                subestimar hasta que se re-incorporan desde BD. Por defecto None (sin TTL).
+        """
         self._logger = AppLogger(self.__class__.__name__)
+        self._max_trader_idle_days = max_trader_idle_days
 
         # Estado en memoria para acumulación
         self.cumulative_pnl_by_trader: Dict[str, Decimal] = {}
         self.last_pnl_timestamp: Optional[datetime] = None
+        self._last_seen_by_trader: Dict[str, datetime] = {}
 
         # Capital en memoria
         self.initial_capital: Optional[Decimal] = None
@@ -46,6 +55,7 @@ class TradingMetricsCalculator:
         """Resetea el estado acumulado."""
         self.cumulative_pnl_by_trader = {}
         self.last_pnl_timestamp = None
+        self._last_seen_by_trader = {}
         self.initial_capital = None
         self.current_capital = None
         self.max_capital_by_trader = {}
@@ -80,12 +90,14 @@ class TradingMetricsCalculator:
         has_changes = False
 
         # Procesar cada trader del snapshot
+        keys_in_snapshot = set()
         for pnl_record in pnl_data:
             trader_wallet = pnl_record.get("trader_wallet")
             if not trader_wallet:
                 continue
 
             trader_key = trader_wallet
+            keys_in_snapshot.add(trader_key)
 
             # Obtener PnL acumulado del snapshot
             pnl_with_cost = pnl_record.get("pnl_with_cost_sol")
@@ -102,6 +114,7 @@ class TradingMetricsCalculator:
                 has_changes = True
                 # Actualizar valor en memoria
                 self.cumulative_pnl_by_trader[trader_key] = current_pnl
+                self._last_seen_by_trader[trader_key] = current_timestamp
 
                 # Actualizar máximo PnL histórico del trader
                 if trader_key not in self.max_capital_by_trader:
@@ -191,6 +204,28 @@ class TradingMetricsCalculator:
                     "metric_value": float(drawdown_total),
                     "trader": "ALL_TRADERS",
                 })
+
+        # Poda de memoria: solo mantener traders que vienen en el snapshot (alineado con BD)
+        for key in list(self.cumulative_pnl_by_trader.keys()):
+            if key == "ALL_TRADERS":
+                continue
+            if key not in keys_in_snapshot:
+                self.cumulative_pnl_by_trader.pop(key, None)
+                self.max_capital_by_trader.pop(key, None)
+                self._last_seen_by_trader.pop(key, None)
+
+        # Poda opcional por TTL: eliminar traders inactivos hace más de N días
+        if self._max_trader_idle_days is not None and self._max_trader_idle_days > 0:
+            cutoff = current_timestamp - timedelta(days=self._max_trader_idle_days)
+            for key in list(self.cumulative_pnl_by_trader.keys()):
+                if key == "ALL_TRADERS":
+                    continue
+                last_seen = self._last_seen_by_trader.get(key)
+                if last_seen is not None and last_seen < cutoff:
+                    self.cumulative_pnl_by_trader.pop(key, None)
+                    self.max_capital_by_trader.pop(key, None)
+                    self._last_seen_by_trader.pop(key, None)
+                    self._logger.debug(f"Trader {key[:8]}... podado por TTL ({self._max_trader_idle_days} días)")
 
         self._logger.debug(
             f"Procesado snapshot de {len(pnl_data)} traders, "

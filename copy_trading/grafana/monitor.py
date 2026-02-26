@@ -32,13 +32,14 @@ class SystemMonitor:
         data_reader: TradingDataReader,
         metrics_repository: TradingMetricsRepository,
         solana_manager: SolanaTxAnalyzer,
+        max_trader_idle_days: Optional[float] = None,
     ):
         self.system_wallet_address = system_wallet_address
         self.runs_id = runs_id
         self.execution_mode = execution_mode
         self.data_reader = data_reader
         self.metrics_repository = metrics_repository
-        self.metrics_calculator = TradingMetricsCalculator()
+        self.metrics_calculator = TradingMetricsCalculator(max_trader_idle_days=max_trader_idle_days)
         self._logger = AppLogger(f"{self.__class__.__name__}[{system_wallet_address[:8]}]")
         self.solana_manager = solana_manager
 
@@ -160,15 +161,19 @@ class SystemMonitor:
 class TradingMetricsMonitor:
     """Monitor que procesa datos y genera métricas para todos los sistemas."""
 
-    def __init__(self, systems_to_monitor: Optional[List[str]] = None):
+    def __init__(self, systems_to_monitor: Optional[List[str]] = None, max_trader_idle_days: Optional[float] = None):
         """
         Inicializa el monitor.
 
         Args:
             systems_to_monitor: Lista opcional de system_wallet_address a monitorear.
                 Si es None, monitorea todos los sistemas encontrados.
+            max_trader_idle_days: Si está definido, se podan traders que no aparezcan
+                en un snapshot en tantos días (reduce memoria; un ciclo puede tener
+                totales ligeramente subestimados hasta re-incorporar desde BD).
         """
         self._logger = AppLogger(self.__class__.__name__)
+        self._max_trader_idle_days = max_trader_idle_days
 
         self.data_reader = TradingDataReader()
         self.metrics_repository = TradingMetricsRepository()
@@ -314,6 +319,7 @@ class TradingMetricsMonitor:
                         data_reader=self.data_reader,
                         metrics_repository=self.metrics_repository,
                         solana_manager=self.solana_manager,
+                        max_trader_idle_days=self._max_trader_idle_days,
                     )
                     await monitor.initialize()
                     self._system_monitors[system_address] = monitor
