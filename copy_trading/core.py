@@ -132,7 +132,8 @@ class CopyTrading:
             balance_manager=self.balance_manager,
             position_event_bus=self.position_event_bus,
             system_stop_callback=self.stop,
-            notification_manager=self.notification_manager
+            notification_manager=self.notification_manager,
+            get_open_positions_count=self._get_open_positions_count,
         )
         self._logger.debug("DrawdownManager inicializado")
 
@@ -1058,6 +1059,20 @@ class CopyTrading:
                 self._logger.error(f"Error en el loop de ejecución de trades: {e}", exc_info=True)
                 # Esperar antes de reintentar para no sobrecargar en caso de error continuo
                 await asyncio.sleep(1)
+
+    def _get_open_positions_count(self) -> int:
+        """
+        Devuelve el número de posiciones abiertas del sistema.
+        Usado por DrawdownManager en modo block_buys para decidir si detener
+        cuando el drawdown sigue excedido y ya no hay posiciones (no hay forma de recuperar).
+        """
+        if not self.queue_manager or not self.queue_manager.open_queue:
+            return 0
+        try:
+            return self.queue_manager.open_queue.get_queue_size()
+        except Exception as e:
+            self._logger.debug(f"Error obteniendo conteo de posiciones abiertas: {e}")
+            return 0
 
     async def _wait_for_open_queue_drained(self):
         """

@@ -28,7 +28,9 @@ from ..events import (
 
 if TYPE_CHECKING:
     from ..notifications import NotificationManager
-    SystemStopCallback = Callable[[], Awaitable[None]]
+
+SystemStopCallback = Callable[[], Awaitable[None]]
+GetOpenPositionsCountCallback = Callable[[], int]
 
 getcontext().prec = 26
 
@@ -56,24 +58,30 @@ class DrawdownManager:
         config: CopyTradingConfig,
         balance_manager: BalanceManager,
         position_event_bus: PositionEventBus,
-        system_stop_callback: Optional["SystemStopCallback"] = None,
-        notification_manager: Optional["NotificationManager"] = None
+        system_stop_callback: Optional[SystemStopCallback] = None,
+        notification_manager: Optional["NotificationManager"] = None,
+        get_open_positions_count: Optional[GetOpenPositionsCountCallback] = None,
     ):
         """
         Inicializa el DrawdownManager.
-        
+
         Args:
             config: Configuración del sistema
             balance_manager: Gestor de balances
             position_event_bus: Bus de eventos para notificaciones
             system_stop_callback: Callback para detener el sistema completamente
             notification_manager: Gestor de notificaciones (Telegram, consola, etc.)
+            get_open_positions_count: Callback opcional que devuelve el número de posiciones
+                abiertas. Si se proporciona y la acción es block_buys, cuando el drawdown siga
+                excedido y haya 0 posiciones abiertas se detendrá el sistema (no hay forma de
+                recuperar capital).
         """
         self.config = config
         self.balance_manager = balance_manager
         self.position_event_bus = position_event_bus
         self.system_stop_callback = system_stop_callback
         self.notification_manager = notification_manager
+        self._get_open_positions_count = get_open_positions_count
         self._logger = AppLogger(self.__class__.__name__)
 
         # Estado de drawdown
@@ -293,6 +301,51 @@ class DrawdownManager:
                         peak_capital_sol=format(self.metrics.peak_capital_sol, "f"),
                         current_capital_sol=format(self.metrics.current_capital_sol, "f")
                     )
+                )
+
+        # block_buys: si el umbral sigue excedido y ya no hay posiciones abiertas, detener sistema
+        if (
+            self.config.drawdown_action == "block_buys"
+            and threshold_exceeded
+            and self._get_open_positions_count is not None
+        ):
+            try:
+                open_count = self._get_open_positions_count()
+                if open_count == 0:
+                    self._stop_trading_activated = True
+                    self._logger.error(
+                        "Drawdown excedido en block_buys con 0 posiciones abiertas - "
+                        "no hay forma de recuperar capital, deteniendo sistema"
+                    )
+                    await self._notify_drawdown_warning(
+                        "🔴 <b>Drawdown: Stop (0 posiciones)</b>",
+                        level="error",
+                        action_description=(
+                            "🚫 Todas las posiciones cerradas con drawdown por encima del máximo. "
+                            "No hay forma de recuperar capital. Sistema en proceso de apagado."
+                        ),
+                    )
+                    if not self._system_stop_requested:
+                        self._system_stop_requested = True
+                        if self.system_stop_callback:
+                            self._logger.error(
+                                "Deteniendo sistema por drawdown (block_buys, 0 posiciones)"
+                            )
+                            try:
+                                stop_system_future = asyncio.create_task(self._stop_system())
+                                self._background_tasks.add(stop_system_future)
+                                stop_system_future.add_done_callback(self._background_tasks.discard)
+                            except Exception as e:
+                                self._logger.error(
+                                    f"Error deteniendo sistema: {e}", exc_info=True
+                                )
+                        else:
+                            self._logger.error(
+                                "system_stop_callback no disponible, no se puede detener el sistema"
+                            )
+            except Exception as e:
+                self._logger.error(
+                    f"Error obteniendo conteo de posiciones abiertas: {e}", exc_info=True
                 )
 
     async def _execute_drawdown_action(self) -> None:
