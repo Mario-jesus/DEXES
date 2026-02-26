@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
@@ -369,6 +370,7 @@ class PumpFunRedisSubscriptions:
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending_requests[payload["request_id"]] = future
 
+        start = time.perf_counter()
         await self._redis.publish(self._command_channel, json.dumps(payload))
         self._logger.debug(f"Comando {action} publicado, esperando ACK...")
 
@@ -377,7 +379,11 @@ class PumpFunRedisSubscriptions:
             self._logger.debug(f"ACK recibido para comando {action}")
         except asyncio.TimeoutError as exc:
             self._pending_requests.pop(payload["request_id"], None)
-            self._logger.error(f"Timeout esperando ACK para acción {action} después de {self._ack_timeout}s")
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            self._logger.error(
+                f"Timeout esperando ACK para acción {action} después de {self._ack_timeout}s "
+                f"(request_id={payload['request_id']}, tiempo transcurrido={elapsed_ms:.2f} ms)"
+            )
             raise TimeoutError(
                 f"Timeout esperando ACK para acción {action}"
             ) from exc
@@ -385,10 +391,18 @@ class PumpFunRedisSubscriptions:
         status = response.get("status")
         if status != "ok":
             message = response.get("message", "Error desconocido")
-            self._logger.error(f"Comando {action} rechazado: {message}")
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            self._logger.error(
+                f"Comando {action} rechazado: {message} "
+                f"(request_id={payload['request_id']}, tiempo={elapsed_ms:.2f} ms)"
+            )
             raise RuntimeError(f"Acción {action} falló: {message}")
 
         self._pending_requests.pop(payload["request_id"], None)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        self._logger.info(
+            f"Comando {action} request_id={payload['request_id']} procesado en {elapsed_ms:.2f} ms (status=ok)"
+        )
 
     async def _dispatch_callback(
         self,

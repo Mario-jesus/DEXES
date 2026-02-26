@@ -4,6 +4,7 @@
 import asyncio
 import json
 import signal
+import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -28,6 +29,10 @@ class RedisBridgeConfig:
     max_disconnect_time_seconds: int = 300
     websocket_timeout: int = 60
     duplicate_signature_cache_ttl: int = 60  # TTL para cache de firmas duplicadas en segundos (default: 60s)
+    # Timeout al enviar subscribe al WebSocket de PumpFun; si se excede, se responde error al cliente
+    pumpfun_subscribe_timeout_seconds: float = 8.0
+    # Máximo de comandos procesados concurrentemente (semáforo)
+    max_concurrent_commands: int = 15
 
 
 class PumpFunRedisBridgeService:
@@ -93,6 +98,9 @@ class PumpFunRedisBridgeService:
 
         # Locks
         self._subscription_lock = asyncio.Lock()
+        # Concurrencia: semáforo para limitar comandos en vuelo; set de tareas para cancelar en stop
+        self._command_semaphore = asyncio.Semaphore(config.max_concurrent_commands)
+        self._command_tasks: Set[asyncio.Task[Any]] = set()
 
     async def _on_disconnect_time_exceeded(self, data: Dict[str, Any]) -> None:
         """Notifica a todos los clientes cuando se excede el tiempo de desconexión"""
@@ -196,6 +204,22 @@ class PumpFunRedisBridgeService:
 
         self._logger.info("Deteniendo servicio PumpFun Redis Bridge")
 
+        if self._command_tasks:
+            self._logger.debug(f"Cancelando {len(self._command_tasks)} tarea(s) de comandos en vuelo")
+            for t in list(self._command_tasks):
+                if not t.done():
+                    t.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._command_tasks, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                self._logger.warning("Timeout esperando que terminen las tareas de comandos")
+            except Exception as e:
+                self._logger.debug(f"Al cancelar tareas de comandos: {e}")
+            self._command_tasks.clear()
+
         if self._command_task:
             self._logger.debug("Cancelando tarea de loop de comandos")
             self._command_task.cancel()
@@ -252,7 +276,9 @@ class PumpFunRedisBridgeService:
     async def _command_loop(self) -> None:
         assert self._pubsub is not None, "PubSub no inicializado"
 
-        self._logger.debug("Iniciando loop de comandos")
+        self._logger.debug(
+            f"Iniciando loop de comandos (máx. {self._config.max_concurrent_commands} comandos concurrentes)"
+        )
         try:
             async for raw_message in self._pubsub.listen():
                 if raw_message is None:
@@ -266,16 +292,50 @@ class PumpFunRedisBridgeService:
 
                 try:
                     payload = json.loads(data)
-                    self._logger.debug(f"Comando recibido: {payload.get('action')} de cliente {payload.get('client_id')}")
+                    action = payload.get("action")
+                    client_id = payload.get("client_id")
+                    self._logger.debug(f"Comando recibido: {action} de cliente {client_id}")
                 except json.JSONDecodeError:
                     self._logger.warning(f"Mensaje inválido en canal de comandos: {data}")
                     continue
 
-                await self._dispatch_command(payload)
+                task = asyncio.create_task(self._process_command_with_semaphore(payload))
+                self._command_tasks.add(task)
+                task.add_done_callback(self._command_tasks.discard)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover - registro defensivo
             self._logger.error(f"Error en loop de comandos: {exc}", exc_info=True)
+
+    async def _process_command_with_semaphore(self, payload: Dict[str, Any]) -> None:
+        """Ejecuta un comando bajo el semáforo y registra el tiempo hasta responder."""
+        action = payload.get("action", "unknown")
+        client_id = payload.get("client_id", "unknown")
+        request_id = payload.get("request_id")
+        start = time.perf_counter()
+        try:
+            async with self._command_semaphore:
+                await self._dispatch_command(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._logger.error(f"Error procesando comando {action} para {client_id}: {exc}", exc_info=True)
+            if client_id and request_id is not None and self._redis:
+                await self._send_response(
+                    client_id,
+                    {
+                        "type": "error",
+                        "request_id": request_id,
+                        "status": "error",
+                        "message": str(exc),
+                    },
+                )
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            self._logger.info(
+                f"Comando {action} cliente={client_id} request_id={request_id or 'n/a'} "
+                f"respondido en {elapsed_ms:.2f} ms (tareas en vuelo: {len(self._command_tasks)})"
+            )
 
     async def _dispatch_command(self, payload: Dict[str, Any]) -> None:
         action = payload.get("action")
@@ -364,10 +424,43 @@ class PumpFunRedisBridgeService:
 
         if new_keys:
             self._logger.debug(f"Suscribiendo {len(new_keys)} cuentas nuevas al WebSocket de PumpFun")
-            await self._subscriptions.subscribe_account_trade(
-                account_addresses=new_keys,
-                callback=self._handle_trade_event,  # Usar handler común
-            )
+            ws_start = time.perf_counter()
+            try:
+                await asyncio.wait_for(
+                    self._subscriptions.subscribe_account_trade(
+                        account_addresses=new_keys,
+                        callback=self._handle_trade_event,
+                    ),
+                    timeout=self._config.pumpfun_subscribe_timeout_seconds,
+                )
+                ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+                self._logger.info(
+                    f"WebSocket subscribe_account_trade respondió en {ws_elapsed_ms:.2f} ms ({len(new_keys)} keys)"
+                )
+            except asyncio.TimeoutError:
+                ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+                self._logger.warning(
+                    f"Timeout ({self._config.pumpfun_subscribe_timeout_seconds}s) al suscribir {len(new_keys)} cuentas en PumpFun "
+                    f"(WebSocket no respondió en {ws_elapsed_ms:.2f} ms); revirtiendo estado"
+                )
+                async with self._subscription_lock:
+                    for key in new_keys:
+                        self._client_accounts[client_id].discard(key)
+                        clients = self._account_clients.get(key)
+                        if clients:
+                            clients.discard(client_id)
+                            if not clients:
+                                self._account_clients.pop(key, None)
+                await self._send_response(
+                    client_id,
+                    {
+                        "type": "subscription",
+                        "request_id": request_id,
+                        "status": "error",
+                        "message": f"Timeout al suscribir en PumpFun (>{self._config.pumpfun_subscribe_timeout_seconds}s)",
+                    },
+                )
+                return
             self._logger.debug(
                 f"Suscripción PumpFun agregada para {len(new_keys)} cuentas nuevas"
             )
@@ -429,7 +522,12 @@ class PumpFunRedisBridgeService:
 
         if to_unsubscribe:
             self._logger.debug(f"Desuscribiendo {len(to_unsubscribe)} cuentas del WebSocket de PumpFun")
+            ws_start = time.perf_counter()
             await self._subscriptions.unsubscribe_account_trade(to_unsubscribe)
+            ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+            self._logger.info(
+                f"WebSocket unsubscribe_account_trade respondió en {ws_elapsed_ms:.2f} ms ({len(to_unsubscribe)} keys)"
+            )
             self._logger.debug(
                 f"Suscripción PumpFun removida para {len(to_unsubscribe)} cuentas"
             )
@@ -483,10 +581,43 @@ class PumpFunRedisBridgeService:
 
         if new_keys:
             self._logger.debug(f"Suscribiendo {len(new_keys)} tokens nuevos al WebSocket de PumpFun")
-            await self._subscriptions.subscribe_token_trade(
-                token_addresses=new_keys,
-                callback=self._handle_trade_event,  # Usar handler común
-            )
+            ws_start = time.perf_counter()
+            try:
+                await asyncio.wait_for(
+                    self._subscriptions.subscribe_token_trade(
+                        token_addresses=new_keys,
+                        callback=self._handle_trade_event,
+                    ),
+                    timeout=self._config.pumpfun_subscribe_timeout_seconds,
+                )
+                ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+                self._logger.info(
+                    f"WebSocket subscribe_token_trade respondió en {ws_elapsed_ms:.2f} ms ({len(new_keys)} keys)"
+                )
+            except asyncio.TimeoutError:
+                ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+                self._logger.warning(
+                    f"Timeout ({self._config.pumpfun_subscribe_timeout_seconds}s) al suscribir {len(new_keys)} tokens en PumpFun "
+                    f"(WebSocket no respondió en {ws_elapsed_ms:.2f} ms); revirtiendo estado"
+                )
+                async with self._subscription_lock:
+                    for key in new_keys:
+                        self._client_tokens[client_id].discard(key)
+                        clients = self._token_clients.get(key)
+                        if clients:
+                            clients.discard(client_id)
+                            if not clients:
+                                self._token_clients.pop(key, None)
+                await self._send_response(
+                    client_id,
+                    {
+                        "type": "subscription",
+                        "request_id": request_id,
+                        "status": "error",
+                        "message": f"Timeout al suscribir en PumpFun (>{self._config.pumpfun_subscribe_timeout_seconds}s)",
+                    },
+                )
+                return
             self._logger.debug(
                 f"Suscripción PumpFun agregada para {len(new_keys)} tokens nuevos"
             )
@@ -548,7 +679,12 @@ class PumpFunRedisBridgeService:
 
         if to_unsubscribe:
             self._logger.debug(f"Desuscribiendo {len(to_unsubscribe)} tokens del WebSocket de PumpFun")
+            ws_start = time.perf_counter()
             await self._subscriptions.unsubscribe_token_trade(to_unsubscribe)
+            ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+            self._logger.info(
+                f"WebSocket unsubscribe_token_trade respondió en {ws_elapsed_ms:.2f} ms ({len(to_unsubscribe)} keys)"
+            )
             self._logger.debug(
                 f"Suscripción PumpFun removida para {len(to_unsubscribe)} tokens"
             )
@@ -584,9 +720,12 @@ class PumpFunRedisBridgeService:
 
         if needs_subscription:
             self._logger.debug("Suscribiendo a nuevos tokens en el WebSocket de PumpFun")
+            ws_start = time.perf_counter()
             await self._subscriptions.subscribe_new_token(
                 callback=self._handle_new_token_event,
             )
+            ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+            self._logger.info(f"WebSocket subscribe_new_token respondió en {ws_elapsed_ms:.2f} ms")
             self._new_token_subscribed = True
             self._logger.debug("Suscripción PumpFun agregada para nuevos tokens")
         else:
@@ -620,7 +759,10 @@ class PumpFunRedisBridgeService:
 
         if should_unsubscribe:
             self._logger.debug("Desuscribiendo de nuevos tokens en el WebSocket de PumpFun")
+            ws_start = time.perf_counter()
             await self._subscriptions.unsubscribe_new_token()
+            ws_elapsed_ms = (time.perf_counter() - ws_start) * 1000
+            self._logger.info(f"WebSocket unsubscribe_new_token respondió en {ws_elapsed_ms:.2f} ms")
             self._new_token_subscribed = False
             self._logger.debug("Suscripción PumpFun removida para nuevos tokens")
         elif client_id not in self._new_token_clients:
@@ -861,6 +1003,8 @@ class PumpFunRedisBridgeService:
             "new_token_clients": len(self._new_token_clients),
             "new_token_subscribed": self._new_token_subscribed,
             "processed_signatures_count": len(self._processed_signatures),
+            "command_tasks_in_flight": len(self._command_tasks),
+            "max_concurrent_commands": self._config.max_concurrent_commands,
         }
         self._logger.debug(
             f"Estado del servicio consultado: {status['clients_accounts']} clientes de cuentas, "
@@ -904,10 +1048,18 @@ async def run_service(config: RedisBridgeConfig) -> None:
 def from_env() -> RedisBridgeConfig:
     import os
 
+    timeout_str = os.getenv("PUMPFUN_SUBSCRIBE_TIMEOUT_SECONDS")
+    pumpfun_subscribe_timeout = float(timeout_str) if timeout_str else 8.0
+
+    max_conc_str = os.getenv("PUMPFUN_MAX_CONCURRENT_COMMANDS")
+    max_concurrent_commands = int(max_conc_str) if max_conc_str else 15
+
     return RedisBridgeConfig(
         redis_url=os.getenv("PUMPFUN_REDIS_URL", "redis://localhost:6379/0"),
         namespace=os.getenv("PUMPFUN_REDIS_NAMESPACE", "pumpfun"),
         api_key=os.getenv("PUMPFUN_API_KEY"),
+        pumpfun_subscribe_timeout_seconds=pumpfun_subscribe_timeout,
+        max_concurrent_commands=max_concurrent_commands,
     )
 
 
